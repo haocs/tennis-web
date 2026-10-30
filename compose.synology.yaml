@@ -1,0 +1,13 @@
+# Optional override for NAS folders readable by a specific existing file owner.
+# Merge with compose.yaml; never mount originals or the whole shared folder.
+services:
+  courtside:
+    user: "${TENNIS_APP_UID:?Set the numeric NAS reader UID}:${TENNIS_APP_GID:-100}"
+    environment:
+      HOME: /tmp
+    volumes:
+      - type: bind
+        source: ${TENNIS_DATA_PATH:?Set the native host path for separate website state}
+        target: /data
+        bind:
+          create_host_path: false

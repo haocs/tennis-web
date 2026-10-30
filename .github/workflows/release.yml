@@ -28,6 +28,14 @@ jobs:
           TENNIS_IMAGE: courtside-ci:test
           TENNIS_LIBRARY_PATH: /tmp/tennis-ci-library
         run: docker compose config --quiet
+      - name: Validate optional NAS storage override
+        env:
+          TENNIS_IMAGE: courtside-ci:test
+          TENNIS_LIBRARY_PATH: /tmp/tennis-ci-library
+          TENNIS_APP_UID: '2000'
+          TENNIS_APP_GID: '100'
+          TENNIS_DATA_PATH: /tmp/tennis-ci-state
+        run: docker compose -f compose.yaml -f compose.synology.yaml config --quiet
       - name: Build runtime image
         run: docker build --tag courtside-ci:test .
       - name: Verify non-root startup, read-only media, and persistent state

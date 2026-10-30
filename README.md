@@ -41,7 +41,7 @@ The server binds to loopback in this example. The Docker image listens on its in
 
 ## Synology deployment
 
-See [Synology deployment](docs/SYNOLOGY.md). The NAS **pulls a published container image**; it never builds application source. Only `compose.yaml` and a private `.env` containing deployment settings are needed on the container host. Videos, processing metadata, and website state stay outside the image.
+See [Synology deployment](docs/SYNOLOGY.md), including the optional existing-owner UID and separate native-host state override. The NAS **pulls a published container image**; it never builds application source. Only `compose.yaml` and a private `.env` containing deployment settings are needed on the container host. Videos, processing metadata, and website state stay outside the image.
 
 Set `TENNIS_IMAGE` to the real release image or immutable digest, `TENNIS_LIBRARY_PATH` to the actual shared library filesystem path, and `TENNIS_MEDIA_GID` to an appropriate read group. No release image is shipped or implied by this source folder.
 

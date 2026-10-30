@@ -10,6 +10,22 @@ This deployment is local-network-only. The application has no additional login. 
 4. The application runs as UID/GID 10001 and can join an additional group using `TENNIS_MEDIA_GID`. Set that to a NAS group that already has read/traverse permission on the published library. Verify access rather than broadly changing private-folder ACLs. The separate Docker data volume is owned by the application UID.
 5. Confirm both partners can browse the published library using their own NAS accounts. The website uses its own container identity; DSM user ACLs are not applied separately to HTTP visitors.
 
+## When an existing NAS account owns the published folders
+
+A container does not automatically inherit that account's NAS administrator-group membership. Matching the file-owner UID alone may still leave access denied when folder rules grant only groups. Inspect the actual ownership and folder rules before changing permissions.
+
+For this deployment option, grant the existing reader account a direct **Read** rule on the published library, inherited by its descendants. Give the same account a direct **Read & Write** rule only on a separate website-state folder. Preserve the existing partner and administrator entries. Do not grant administrator-group membership to the container or mount private originals.
+
+Set `TENNIS_APP_UID` to the verified numeric file-owner/reader UID, `TENNIS_APP_GID` to its numeric group, and `TENNIS_DATA_PATH` to the separate state directory's native host path. Merge the optional override on any host with Docker Compose installed:
+
+```sh
+docker compose -f compose.yaml -f compose.synology.yaml config > compose.nas.yaml
+```
+
+Use that rendered image-only file in Container Manager. Keep its resolved paths out of the public repository. The override replaces only the `/data` volume with a native-host bind; the library remains read-only. This is a filesystem path **on the NAS**, not SQLite running over a Mac SMB client mount. The default deployment continues to use a named state volume.
+
+Do not remove an old state volume when selecting a different state location. Back up and migrate existing preferences while stopped if it contains real user data. Verify database creation, both session discovery and media access, new processor publications, and persistence after restart.
+
 ## Create the project
 
 - Install/open Container Manager using the NAS administrator's normal DSM session.
