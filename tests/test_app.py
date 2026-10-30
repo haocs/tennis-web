@@ -260,3 +260,20 @@ def test_concurrent_visitors_do_not_create_duplicate_court_names(setup):
         codes=list(pool.map(save,range(8)))
     assert codes.count(201)==1 and codes.count(409)==7
     assert len(app.test_client().get('/api/courts').json['courts'])==1
+
+
+def test_versioned_processing_generation_preserves_review_and_likes(setup):
+    app,root,data=setup;client=app.test_client();generation='d'*32
+    put(client,f'/api/sessions/{ID}/likes/session',{'liked':True,'version':0})
+    (root/'media'/ID).rename(root/'media'/generation)
+    (root/'metadata/runs').mkdir()
+    (root/'metadata/sessions'/ID).rename(root/'metadata/runs'/generation)
+    data.update(media_directory=generation,artifact_directory=generation)
+    (root/'metadata/sessions'/f'{ID}.json').write_text(json.dumps(data))
+    assert client.get(f'/media/{ID}/Practice.mp4').status_code==200
+    assert client.get(f'/review/{ID}').status_code==200
+    assert client.get(f'/api/sessions/{ID}').json['like']['value'] is True
+    assert Library(root).artifact(ID,'Review.html')==root/'metadata/runs'/generation/'Review.html'
+    data['artifact_directory']='../private'
+    (root/'metadata/sessions'/f'{ID}.json').write_text(json.dumps(data))
+    assert client.get(f'/review/{ID}').status_code==503

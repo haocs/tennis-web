@@ -52,6 +52,9 @@ class Library:
     def validate(self, data, identity):
         if data.get("schema_version") != 1 or data.get("id") != identity:
             raise ValueError("Unsupported session manifest")
+        artifact = data.get('artifact_directory')
+        if artifact is not None and (not isinstance(artifact,str) or not re.fullmatch('[a-f0-9]{32}',artifact)):
+            raise ValueError('Invalid artifact directory')
         directory = data.get("media_directory", identity)
         if Path(directory).name != directory or directory.startswith('.'):
             raise ValueError("Invalid media directory")
@@ -99,10 +102,11 @@ class Library:
         return inside(directory, filename)
 
     def artifact(self, identity, filename):
-        self.get(identity)
+        session = self.get(identity)
         if filename not in ARTIFACTS:
             raise KeyError(filename)
-        return inside(self.metadata, f"sessions/{identity}/{filename}")
+        directory = session.get('artifact_directory')
+        return inside(self.metadata, f"runs/{directory}/{filename}" if directory else f"sessions/{identity}/{filename}")
 
 
 def smb_root(value):
