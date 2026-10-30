@@ -1,0 +1,29 @@
+services:
+  courtside:
+    image: ${TENNIS_IMAGE:?Set TENNIS_IMAGE to a published release image or digest}
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${TENNIS_PORT:-8765}:8000"
+    environment:
+      TENNIS_LIBRARY_ROOT: /library
+      TENNIS_DATA_ROOT: /data
+    volumes:
+      - type: bind
+        source: ${TENNIS_LIBRARY_PATH:-../library}
+        target: /library
+        read_only: true
+        bind:
+          create_host_path: false
+      - courtside-data:/data
+    group_add:
+      - "${TENNIS_MEDIA_GID:-100}"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+volumes:
+  courtside-data:

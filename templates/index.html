@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#193f33"><title>Courtside — Your tennis library</title>
+<link rel="stylesheet" href="/static/app.css"><script src="/static/app.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="site-header"><a class="brand" href="/" aria-label="Courtside home"><span class="brand-mark" aria-hidden="true">◉</span> COURTSIDE<span class="brand-note">THE PRACTICE LIBRARY</span></a><nav aria-label="Main"><a href="/" id="nav-library">Library</a><a href="/#liked" id="nav-liked">Liked <span id="liked-count" class="small-count">0</span></a></nav><span class="network-label"><span class="dot"></span> Your local court</span></header>
+<main id="main"><div class="loading"><span class="dot"></span> Opening your practice library…</div></main>
+<footer><span>COURTSIDE</span><span>A little more time on your game.</span><span>Shared library · Local network</span></footer>
+<div id="toast" role="status" aria-live="polite"></div>
+<dialog id="edit-dialog"><form id="edit-form"><div class="dialog-heading"><h2>Session details</h2><button class="icon-button" type="button" id="close-edit" aria-label="Close">×</button></div><p>Changes are shared with everyone viewing the library.</p><label>Title<input id="edit-title" name="title" maxlength="160" required></label><label>Location<input id="edit-location" name="location" maxlength="200" placeholder="e.g. Our local tennis courts"></label><p id="edit-error" class="error-message" role="alert"></p><button class="button primary" type="submit">Save details</button></form></dialog>
+</body></html>

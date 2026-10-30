@@ -1,0 +1,13 @@
+# Allow only application runtime files into the build context.
+**
+!Dockerfile
+!requirements.txt
+!app.py
+!storage.py
+!state.py
+!manage.py
+!templates/
+!templates/*.html
+!static/
+!static/*.css
+!static/*.js

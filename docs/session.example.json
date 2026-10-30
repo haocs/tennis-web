@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "title": "Evening practice",
+  "source": {"name": "practice.mov", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "recorded_at": "2026-01-01T17:00:00-08:00", "duration_seconds": 20, "location": null},
+  "published_at": 1767315600,
+  "media_directory": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "video": {"file": "Practice.mp4", "poster": "poster.jpg", "duration_seconds": 10, "width": 1920, "height": 1080, "hdr": false},
+  "clips": [{"id": "bbbbbbbbbbbbbbbbbbbbbbbb", "index": 1, "file": "Clips/clip-001.mp4", "original_start_seconds": 5, "original_end_seconds": 15, "duration_seconds": 10, "playback_start_seconds": 0, "playback_end_seconds": 10}],
+  "kept_seconds": 10,
+  "removed_seconds": 10,
+  "chapter_alignment": "joined-video-keyframe-pts",
+  "algorithm": "example-only",
+  "encoding": {},
+  "artifacts": ["edit-timeline.csv", "edit-timeline.json", "timestamps.csv", "Review.html"]
+}
