@@ -175,3 +175,88 @@ def test_separate_media_root_requires_matching_nas_address(setup, tmp_path):
     assert separate.test_client().get(f'/api/sessions/{ID}').json['video']['nas_url'] is None
     separate=create_app({**config,'MEDIA_SMB_URL':'smb://nas/other-media'})
     assert separate.test_client().get(f'/api/sessions/{ID}').json['clips'][0]['nas_url'].startswith('smb://nas/other-media/')
+
+
+def court_create(client, **fields):
+    return client.post('/api/courts',json={'name':'Local court','latitude':12.0,'longitude':34.0,'radius_m':150,**fields},headers={'X-Tennis-Request':'1'})
+
+
+def test_saved_court_gps_matching_and_renaming_preserves_video_names(setup):
+    app,root,data=setup
+    data['source']['location']={'latitude':12.0001,'longitude':34.0001,'altitude_m':18}
+    manifest=root/'metadata/sessions'/f'{ID}.json'; manifest.write_text(json.dumps(data))
+    c=app.test_client(); response=court_create(c);assert response.status_code==201
+    court=response.json
+    group=c.get('/api/sessions').json['practice_groups'][0]
+    assert group['court_status']=='gps_match' and group['court']['id']==court['id']
+    assert group['title']=='Local court · 2026/10/24 evening'
+    assert group['location']['altitude_m']==18
+    assert c.get(f'/api/sessions/{ID}').json['title']==data['title']
+    renamed=c.put('/api/courts/'+court['id'],json={k:v for k,v in {**court,'name':'Evening courts'}.items() if k!='id'},headers={'X-Tennis-Request':'1'})
+    assert renamed.status_code==200
+    assert c.get('/api/sessions').json['practice_groups'][0]['title'].startswith('Evening courts · ')
+    assert json.loads(manifest.read_text())==data
+    restored=create_app({'LIBRARY_ROOT':str(root),'DATA_ROOT':app.config['DATA_ROOT']})
+    assert restored.test_client().get('/api/courts').json['courts'][0]['name']=='Evening courts'
+
+
+def test_nearby_multiple_courts_need_confirmation_and_manual_choice_wins(setup):
+    app,root,data=setup;c=app.test_client()
+    data['source']['location']={'latitude':12,'longitude':34}
+    (root/'metadata/sessions'/f'{ID}.json').write_text(json.dumps(data))
+    a=court_create(c).json;b=court_create(c,name='Other court').json
+    group=c.get('/api/sessions').json['practice_groups'][0]
+    assert group['court_status']=='ambiguous' and group['court'] is None
+    assert len(group['court_candidates'])==2
+    url=f'/api/practices/{group["id"]}/court'
+    assert put(c,url,{'court_id':b['id'],'versions':group['court_versions']}).status_code==200
+    selected=c.get('/api/sessions').json['practice_groups'][0]
+    assert selected['court']['id']==b['id'] and selected['court_status']=='selected'
+    assert put(c,url,{'court_id':a['id'],'versions':group['court_versions']}).status_code==409
+    assert put(c,url,{'court_id':None,'versions':selected['court_versions']}).status_code==200
+    assert c.get('/api/sessions').json['practice_groups'][0]['court_status']=='ambiguous'
+
+
+def test_assignment_all_or_nothing_when_another_visitor_changes_one_recording(setup):
+    app,root,data=setup;c=app.test_client()
+    other=copy.deepcopy(data);other['id']='c'*64;other['source']['recorded_at']='2026-10-24T17:01:00-0700'
+    (root/'metadata/sessions'/f"{other['id']}.json").write_text(json.dumps(other))
+    court=court_create(c).json;group=c.get('/api/sessions').json['practice_groups'][0]
+    app.extensions['state'].update('court-assignment:'+other['id'],{'court_id':court['id']},0)
+    assert put(c,f'/api/practices/{group["id"]}/court',{'court_id':court['id'],'versions':group['court_versions']}).status_code==409
+    assert 'court-assignment:'+ID not in app.extensions['state'].all()
+    assert put(c,f'/api/practices/{group["id"]}/court',{'court_id':court['id'],'versions':{ID:0}}).status_code==409
+
+
+def test_saved_court_validation_duplicate_names_and_stale_edits(setup):
+    app,root,_=setup;c=app.test_client()
+    first=court_create(c).json
+    assert court_create(c,name='LOCAL COURT').status_code==409
+    for changes in [{'latitude':91},{'longitude':None},{'radius_m':0},{'radius_m':float('nan')},{'name':' '},{'latitude':True}]:
+        assert court_create(c,**changes).status_code==400
+    fields={k:v for k,v in first.items() if k!='id'}
+    assert c.put('/api/courts/'+first['id'],json=fields,headers={'X-Tennis-Request':'1'}).status_code==200
+    assert c.put('/api/courts/'+first['id'],json=fields,headers={'X-Tennis-Request':'1'}).status_code==409
+    assert c.post('/api/courts',json={'name':'No request header'}).status_code==415
+    assert c.post('/api/courts',json={'name':'Cross origin'},headers={'X-Tennis-Request':'1','Origin':'https://example.invalid'}).status_code==403
+
+
+def test_court_names_without_gps_can_be_selected_without_changing_review(setup):
+    app,root,data=setup;c=app.test_client()
+    court=court_create(c,latitude=None,longitude=None).json
+    group=c.get('/api/sessions').json['practice_groups'][0]
+    assert group['court_status']=='unknown'
+    assert put(c,f'/api/practices/{ID}/court',{'court_id':court['id'],'versions':group['court_versions']}).status_code==200
+    assert c.get('/api/sessions').json['practice_groups'][0]['court']['id']==court['id']
+    assert c.get(f'/api/sessions/{ID}').json['location_label']==''
+
+
+def test_concurrent_visitors_do_not_create_duplicate_court_names(setup):
+    app,root,data=setup
+    def save(_):
+        with app.test_client() as client:
+            return court_create(client).status_code
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        codes=list(pool.map(save,range(8)))
+    assert codes.count(201)==1 and codes.count(409)==7
+    assert len(app.test_client().get('/api/courts').json['courts'])==1

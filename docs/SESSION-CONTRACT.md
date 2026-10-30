@@ -38,3 +38,16 @@ Session responses add `recorded_at_iso` and `recorded_at_epoch` from the origina
 `source.recorded_at` only. They also add optional `video.nas_url` and clip `nas_url`
 fields derived from private operator-supplied SMB display roots. These fields are
 not written into the published manifests or backed by an SMB client connection.
+
+## Courts and home titles
+
+`source.location` supports latitude/longitude and optional `altitude_m` from original
+recording metadata. Saved court definitions and manual selections belong only in
+website state. The library API enriches each practice with `title`, `time_label`,
+`location`, `court`, `court_name`, `court_status`, `court_candidates` and
+`court_versions`. These are derived fields, never a replacement for video titles.
+
+`GET/POST /api/courts` and versioned `PUT /api/courts/<id>` manage the local court
+list. Versioned `PUT /api/practices/<id>/court` applies a chosen court (or clears
+selection for GPS matching) to all current recording identities atomically.
+Concurrent edits or changed practice membership produce HTTP 409.

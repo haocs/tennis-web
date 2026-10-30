@@ -43,3 +43,37 @@ class State:
             db.execute("INSERT OR REPLACE INTO state VALUES(?,?,?)", (key, json.dumps(value), version))
             db.commit()
             return {"value": value, "version": version}
+
+    def update_many(self, changes):
+        """Apply one practice's recording assignments atomically, with no partial save."""
+        with self.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            for key, value, expected in changes:
+                row = db.execute('SELECT value,version FROM state WHERE key=?',(key,)).fetchone()
+                current = {'value':json.loads(row[0]),'version':row[1]} if row else {'value':None,'version':0}
+                if current['version'] != expected:
+                    db.rollback()
+                    raise Conflict(current)
+            for key, value, expected in changes:
+                db.execute('INSERT OR REPLACE INTO state VALUES(?,?,?)',(key,json.dumps(value),expected+1))
+            db.commit()
+
+    def save_court(self, identity, value, expected):
+        with self.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            rows = db.execute("SELECT key,value,version FROM state WHERE key LIKE 'court:%'").fetchall()
+            current = {'value':None,'version':0}
+            for key, raw, version in rows:
+                stored = json.loads(raw)
+                if key == 'court:'+identity:
+                    current = {'value':stored,'version':version}
+                elif stored and stored['name'].casefold() == value['name'].casefold():
+                    db.rollback()
+                    raise ValueError('A saved court already has this name. Select it from the list.')
+            if current['version'] != expected:
+                db.rollback()
+                raise Conflict(current)
+            version = expected+1
+            db.execute('INSERT OR REPLACE INTO state VALUES(?,?,?)',('court:'+identity,json.dumps(value),version))
+            db.commit()
+            return {'id':identity,**value,'version':version}

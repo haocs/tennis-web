@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import time
+import uuid
 from urllib.parse import urlparse
 
 from flask import Flask, abort, jsonify, render_template, request, send_file
@@ -14,6 +15,7 @@ from werkzeug.exceptions import HTTPException
 from storage import Library, smb_root, nas_media_address
 from practices import recording_time, group_recordings
 from state import State, Conflict
+from courts import COURT_ID, court_list, validate_court, enrich_groups
 
 
 def create_app(config=None):
@@ -107,12 +109,70 @@ def create_app(config=None):
             return jsonify(sessions=[], practice_groups=[], invalid_sessions=0, library_available=False, shared_preferences=True)
         shared = state.all()
         decorated = [decorate(s, shared) for s in sessions]
-        return jsonify(sessions=decorated, practice_groups=group_recordings(decorated, gap_minutes), invalid_sessions=errors,
+        groups = enrich_groups(group_recordings(decorated, gap_minutes), decorated, shared)
+        return jsonify(sessions=decorated, practice_groups=groups, courts=court_list(shared), invalid_sessions=errors,
                        library_available=(library.metadata / 'sessions').is_dir(), shared_preferences=True)
 
     @app.get('/api/sessions/<identity>')
     def get_session(identity):
         return jsonify(decorate(session(identity)))
+
+    @app.get('/api/courts')
+    def get_courts():
+        return jsonify(courts=court_list(state.all()))
+
+    @app.post('/api/courts')
+    @app.put('/api/courts/<identity>')
+    def save_court(identity=None):
+        body = request.get_json()
+        try:
+            value = validate_court(body)
+        except ValueError as error:
+            abort(400,str(error))
+        if identity is None:
+            identity, expected = uuid.uuid4().hex, 0
+        else:
+            if not COURT_ID.fullmatch(identity) or 'court:'+identity not in state.all():
+                abort(404,'Court not found')
+            expected = body.get('version')
+            if type(expected) is not int or expected < 1:
+                abort(400,'The current court version is required')
+        try:
+            return jsonify(state.save_court(identity,value,expected)), 201 if request.method=='POST' else 200
+        except Conflict as conflict:
+            return jsonify(error='This court was edited in another browser. Reload its latest details.',current=conflict.current),409
+        except ValueError as error:
+            return jsonify(error=str(error)),409
+
+    @app.put('/api/practices/<identity>/court')
+    def assign_court(identity):
+        shared = state.all()
+        try:
+            videos, _ = library.sessions()
+        except OSError:
+            abort(503,'The recording library is unavailable')
+        decorated = [decorate(v,shared) for v in videos]
+        group = next((g for g in group_recordings(decorated,gap_minutes) if g['id']==identity),None)
+        if group is None:
+            if any(v['id']==identity for v in decorated):
+                return jsonify(error='This practice now includes different recordings. Reload and try again.'),409
+            abort(404,'Practice not found')
+        body = request.get_json()
+        if not isinstance(body,dict) or set(body)-{'court_id','versions'}:
+            abort(400,'Invalid court selection')
+        court_id, versions = body.get('court_id'), body.get('versions')
+        if court_id is not None and (not isinstance(court_id,str) or not COURT_ID.fullmatch(court_id) or 'court:'+court_id not in shared):
+            abort(400,'Choose a saved court')
+        if not isinstance(versions,dict) or set(versions)!=set(group['recording_ids']):
+            return jsonify(error='Recordings in this practice changed. Reload and try again.'),409
+        if any(type(v) is not int or v<0 for v in versions.values()):
+            abort(400,'Valid recording versions are required')
+        changes=[('court-assignment:'+v, {'court_id':court_id} if court_id else None, versions[v]) for v in group['recording_ids']]
+        try:
+            state.update_many(changes)
+        except Conflict:
+            return jsonify(error='Someone else changed this practice court. Reload and try again.'),409
+        return jsonify(saved=True)
 
     @app.put('/api/sessions/<identity>/likes/<item>')
     def like(identity, item):

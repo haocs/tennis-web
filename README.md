@@ -77,6 +77,16 @@ Newest/oldest sorting uses the original recording's timezone-aware creation time
 
 The home page groups overlapping recordings and recordings starting within 30 minutes of the previous recording ending into one practice card. Each card retains a separate link and favorite control for every recording. Durations and clip counts are summed. This does not merge files, change stable identities, alter review pages, or migrate existing likes/edits. `TENNIS_SESSION_GAP_MINUTES` configures the gap (default 30). Liked views retain the existing individual recording/clip favorites.
 
+## Saved courts and home-page names
+
+Every home practice card is named `Court name · YYYY/MM/DD morning/afternoon/evening/night`, using the first original recording's own date/timezone. All recordings, including a single recording, are listed separately inside that card. Review-page titles remain the individual video titles.
+
+Use **Name or choose court** on a practice to select a remembered court or add one. Adding a court pre-fills coordinates and optional altitude from an actual original recording; you can adjust its name, position, and matching range. A court saved without coordinates can learn them when selected for a practice with GPS. **Saved courts** lets you edit names and locations centrally.
+
+The default matching range is 150 metres (configurable per court from 25 to 2000 metres). A GPS match is automatic only when one saved court contains every available recording position in the practice. Matching uses horizontal distance; altitude is retained/displayed but does not reject a match. Overlapping saved court ranges produce suggestions requiring a choice. An explicit practice selection takes priority over GPS. Missing GPS is never guessed or sent to an external geocoder.
+
+Court names/coordinates and recording assignments live in the existing private website database, separate from read-only processing metadata. Renaming a saved court updates its home titles. Per-recording assignment identities preserve selections across regrouping; conflicting selections in a newly merged practice are flagged. Court edits and all-recording assignments use optimistic versions and atomic transactions. Existing video names, likes, metadata edits, files, and review URLs are preserved. Database backups include saved courts automatically.
+
 ## Locate a file on the NAS
 
 Set `TENNIS_LIBRARY_SMB_URL` to the credential-free SMB address of the same published library folder mounted by `TENNIS_LIBRARY_ROOT`, for example `smb://nas/Shared/library`. The review shows a NAS address button for each clip and the currently playing file. It displays and copies the exact URL without opening SMB, authenticating, checking visitor permissions, or modifying the file.

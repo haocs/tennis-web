@@ -3,7 +3,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 TENNIS_LIBRARY_ROOT=/library TE
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt && groupadd -g 10001 courtside && useradd -u 10001 -g courtside -M courtside && mkdir /data && chown courtside:courtside /data
-COPY --chown=courtside:courtside app.py storage.py state.py manage.py practices.py ./
+COPY --chown=courtside:courtside app.py storage.py state.py manage.py practices.py courts.py ./
 COPY --chown=courtside:courtside templates ./templates
 COPY --chown=courtside:courtside static ./static
 USER 10001:10001
