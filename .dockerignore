@@ -6,6 +6,7 @@
 !storage.py
 !state.py
 !manage.py
+!practices.py
 !templates/
 !templates/*.html
 !static/

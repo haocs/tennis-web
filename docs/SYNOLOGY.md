@@ -30,7 +30,7 @@ Do not remove an old state volume when selecting a different state location. Bac
 
 - Install/open Container Manager using the NAS administrator's normal DSM session.
 - First publish and verify a public release image using [release operations](RELEASE.md).
-- Copy only `compose.yaml` and `.env.example` to the project directory; rename the latter to `.env`. Fill in the actual release image/digest, library path, and media group ID.
+- Copy only `compose.yaml` and `.env.example` to the project directory; rename the latter to `.env`. Fill in the actual release image/digest, library path, and media group ID. Set `TENNIS_LIBRARY_SMB_URL` to that library's SMB address to enable clip file-address controls; keep it in private settings. Grouping defaults to a 30-minute recording gap.
 - Create a Container Manager project using that image-only Compose file. Pull/download the image and deploy the project. No Dockerfile or application source build is needed. If DSM labels its deployment operation “Build”, the Compose file still has no `build:` section; it uses the specified registry image.
 - Check project logs and container health. Do not reuse a stopped, failed source-build project without explicitly updating its saved configuration. Do not Clean it as part of routine deployment.
 - No SSH service needs to be enabled. If using SSH was already configured, the same Compose commands in the README can be used there.

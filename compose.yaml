@@ -7,6 +7,8 @@ services:
     environment:
       TENNIS_LIBRARY_ROOT: /library
       TENNIS_DATA_ROOT: /data
+      TENNIS_SESSION_GAP_MINUTES: ${TENNIS_SESSION_GAP_MINUTES:-30}
+      TENNIS_LIBRARY_SMB_URL: ${TENNIS_LIBRARY_SMB_URL:-}
     volumes:
       - type: bind
         source: ${TENNIS_LIBRARY_PATH:-../library}

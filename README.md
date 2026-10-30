@@ -71,6 +71,18 @@ All visitors share session likes, clip likes, titles, and location overrides. Th
 
 Storage file permissions apply to the container process. A reverse proxy does not automatically apply a visitor's DSM identity or folder ACLs. Publish only content intentionally shared with all site visitors. Synology identity/SSO is optional future work and is not required by this application.
 
+## Home-page practices and original recording time
+
+Newest/oldest sorting uses the original recording's timezone-aware creation timestamp from processing metadata, never upload, file modification, or publication time. UTC instants determine order; the recording's own date and time remain visible. Missing/invalid timestamps and timestamps with no timezone are not guessed from the server clock; those recordings sort last and remain separate.
+
+The home page groups overlapping recordings and recordings starting within 30 minutes of the previous recording ending into one practice card. Each card retains a separate link and favorite control for every recording. Durations and clip counts are summed. This does not merge files, change stable identities, alter review pages, or migrate existing likes/edits. `TENNIS_SESSION_GAP_MINUTES` configures the gap (default 30). Liked views retain the existing individual recording/clip favorites.
+
+## Locate a file on the NAS
+
+Set `TENNIS_LIBRARY_SMB_URL` to the credential-free SMB address of the same published library folder mounted by `TENNIS_LIBRARY_ROOT`, for example `smb://nas/Shared/library`. The review shows a NAS address button for each clip and the currently playing file. It displays and copies the exact URL without opening SMB, authenticating, checking visitor permissions, or modifying the file.
+
+NAS names and paths belong only in private deployment settings. They are never baked into the image. If a separate `TENNIS_MEDIA_ROOT` is configured, set `TENNIS_MEDIA_SMB_URL` to that media directory's SMB address; the app avoids guessing a link to the wrong location. Without an address setting, the controls stay hidden.
+
 ## Playback
 
 Chapter starts are measured against actual keyframe timestamps in the combined export, including concat/audio rounding. Original timestamps are kept separately. The review uses one embedded player for full practice and individual clips, with Previous/Next following the current sort/filter. Removing a playing clip from a liked-only list lets it finish; navigation then uses the remaining list. Autoplay is opt-in. At the final clip it stops.

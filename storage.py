@@ -3,7 +3,7 @@ from pathlib import Path
 import json
 import re
 import math
-from urllib.parse import urlparse, unquote
+from urllib.parse import urlparse, unquote, quote, urlunsplit
 
 IDENTITY = re.compile(r"[a-f0-9]{64}")
 CLIP_ID = re.compile(r"[a-f0-9]{24}")
@@ -103,3 +103,23 @@ class Library:
         if filename not in ARTIFACTS:
             raise KeyError(filename)
         return inside(self.metadata, f"sessions/{identity}/{filename}")
+
+
+def smb_root(value):
+    """A display-only address; never authenticate to or mount this URL."""
+    if not value:
+        return None
+    parsed = urlparse(value)
+    if (parsed.scheme != 'smb' or not parsed.hostname or parsed.username is not None
+            or parsed.password is not None or parsed.query or parsed.fragment):
+        raise ValueError('NAS address must be a credential-free smb://host/share URL')
+    path = unquote(parsed.path).rstrip('/')
+    if not path or '..' in Path(path).parts:
+        raise ValueError('NAS address must include a share path without traversal')
+    return urlunsplit(('smb', parsed.netloc, quote(path, safe='/'), '', ''))
+
+
+def nas_media_address(root, directory, filename):
+    if not root:
+        return None
+    return root + '/' + quote(directory, safe='') + '/' + quote(filename, safe='/')

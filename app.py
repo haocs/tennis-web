@@ -11,7 +11,8 @@ from urllib.parse import urlparse
 from flask import Flask, abort, jsonify, render_template, request, send_file
 from werkzeug.exceptions import HTTPException
 
-from storage import Library
+from storage import Library, smb_root, nas_media_address
+from practices import recording_time, group_recordings
 from state import State, Conflict
 
 
@@ -20,10 +21,20 @@ def create_app(config=None):
     app.config.update(LIBRARY_ROOT=os.environ.get("TENNIS_LIBRARY_ROOT", "/library"),
                       MEDIA_ROOT=os.environ.get("TENNIS_MEDIA_ROOT"),
                       DATA_ROOT=os.environ.get("TENNIS_DATA_ROOT", "/data"),
-                      STATUS_FILE=os.environ.get("TENNIS_STATUS_FILE"), MAX_CONTENT_LENGTH=8192)
+                      STATUS_FILE=os.environ.get("TENNIS_STATUS_FILE"),
+                      SESSION_GAP_MINUTES=os.environ.get("TENNIS_SESSION_GAP_MINUTES", "30"),
+                      LIBRARY_SMB_URL=os.environ.get("TENNIS_LIBRARY_SMB_URL"),
+                      MEDIA_SMB_URL=os.environ.get("TENNIS_MEDIA_SMB_URL"), MAX_CONTENT_LENGTH=8192)
     if config:
         app.config.update(config)
     library = Library(app.config["LIBRARY_ROOT"], app.config["MEDIA_ROOT"])
+    gap_minutes = int(app.config["SESSION_GAP_MINUTES"])
+    if not 0 <= gap_minutes <= 1440:
+        raise ValueError('Session grouping gap must be between 0 and 1440 minutes')
+    library_smb = smb_root(app.config["LIBRARY_SMB_URL"])
+    media_smb = smb_root(app.config["MEDIA_SMB_URL"])
+    if media_smb is None and library.media_root == library.root / 'media' and library_smb:
+        media_smb = library_smb + '/media'
     state = State(Path(app.config["DATA_ROOT"]) / "website.sqlite3")
     app.extensions.update(library=library, state=state)
 
@@ -39,12 +50,16 @@ def create_app(config=None):
         data = copy.deepcopy(data)
         shared = shared if shared is not None else state.all()
         identity = data["id"]
+        data['recorded_at_iso'], data['recorded_at_epoch'] = recording_time(data['source'].get('recorded_at'))
+        directory = data.get('media_directory', identity)
+        data['video']['nas_url'] = nas_media_address(media_smb, directory, data['video']['file'])
         data["like"] = shared.get(f"like:{identity}", {"value": False, "version": 0})
         data["overrides"] = shared.get(f"meta:{identity}", {"value": {}, "version": 0})
         edits = data["overrides"]["value"] or {}
         data["title"] = edits.get("title", data["title"])
         data["location_label"] = edits.get("location", "")
         for clip in data["clips"]:
+            clip['nas_url'] = nas_media_address(media_smb, directory, clip['file'])
             clip["like"] = shared.get(f"like:{identity}:{clip['id']}", {"value": False, "version": 0})
         return data
 
@@ -89,9 +104,10 @@ def create_app(config=None):
         try:
             sessions, errors = library.sessions()
         except OSError:
-            return jsonify(sessions=[], invalid_sessions=0, library_available=False, shared_preferences=True)
+            return jsonify(sessions=[], practice_groups=[], invalid_sessions=0, library_available=False, shared_preferences=True)
         shared = state.all()
-        return jsonify(sessions=[decorate(s, shared) for s in sessions], invalid_sessions=errors,
+        decorated = [decorate(s, shared) for s in sessions]
+        return jsonify(sessions=decorated, practice_groups=group_recordings(decorated, gap_minutes), invalid_sessions=errors,
                        library_available=(library.metadata / 'sessions').is_dir(), shared_preferences=True)
 
     @app.get('/api/sessions/<identity>')

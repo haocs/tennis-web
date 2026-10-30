@@ -134,3 +134,44 @@ def test_consistent_backup_restores_shared_preferences(setup,tmp_path):
     restored=create_app({'TESTING':True,'LIBRARY_ROOT':str(root),'DATA_ROOT':str(destination.parent)})
     assert restored.test_client().get(f'/api/sessions/{ID}').json['like']=={'value':True,'version':1}
     with pytest.raises(ValueError):backup(Path(app.config['DATA_ROOT'])/'website.sqlite3',destination)
+
+
+def test_home_groups_keep_original_video_review_and_manifest_unchanged(setup):
+    app, root, original = setup
+    other = copy.deepcopy(original)
+    other['id'] = 'c' * 64
+    other['source']['sha256'] = other['id']
+    other['source']['recorded_at'] = '2026-10-24T17:20:00-0700'
+    other['published_at'] = original['published_at'] - 100000
+    (root/'metadata/sessions'/f"{other['id']}.json").write_text(json.dumps(other))
+    client = app.test_client()
+    data = client.get('/api/sessions').json
+    assert len(data['sessions']) == 2 and len(data['practice_groups']) == 1
+    assert data['practice_groups'][0]['recording_ids'] == [ID, other['id']]
+    assert client.get(f'/api/sessions/{ID}').json['id'] == ID
+    assert client.get(f'/review/{ID}').status_code == 200
+    assert json.loads((root/'metadata/sessions'/f'{ID}.json').read_text()) == original
+
+
+def test_configured_nas_addresses_are_display_only_and_url_encoded(setup):
+    app, root, _ = setup
+    configured = create_app({'TESTING':True, 'LIBRARY_ROOT':str(root),
+                            'DATA_ROOT':app.config['DATA_ROOT'],
+                            'LIBRARY_SMB_URL':'smb://nas/Shared Tennis/library/'})
+    data = configured.test_client().get(f'/api/sessions/{ID}').json
+    assert data['clips'][0]['nas_url'] == f'smb://nas/Shared%20Tennis/library/media/{ID}/Clips/clip-001.mp4'
+    assert data['video']['nas_url'] == f'smb://nas/Shared%20Tennis/library/media/{ID}/Practice.mp4'
+    assert app.test_client().get(f'/api/sessions/{ID}').json['clips'][0]['nas_url'] is None
+    for value in ['https://nas/share', 'smb://user:secret@nas/share', 'smb://nas/share?token=secret']:
+        with pytest.raises(ValueError):
+            create_app({'LIBRARY_ROOT':str(root),'DATA_ROOT':app.config['DATA_ROOT'],'LIBRARY_SMB_URL':value})
+
+
+def test_separate_media_root_requires_matching_nas_address(setup, tmp_path):
+    app, root, _ = setup
+    config={'LIBRARY_ROOT':str(root),'MEDIA_ROOT':str(tmp_path/'other-media'),
+            'DATA_ROOT':app.config['DATA_ROOT'],'LIBRARY_SMB_URL':'smb://nas/library'}
+    separate=create_app(config)
+    assert separate.test_client().get(f'/api/sessions/{ID}').json['video']['nas_url'] is None
+    separate=create_app({**config,'MEDIA_SMB_URL':'smb://nas/other-media'})
+    assert separate.test_client().get(f'/api/sessions/{ID}').json['clips'][0]['nas_url'].startswith('smb://nas/other-media/')

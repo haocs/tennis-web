@@ -26,3 +26,15 @@ A boundary change creates a new clip ID. Website state keeps previous IDs for fu
 Media and processing metadata are read-only from the website. Likes, overrides, and future feedback belong in the separate website database. Store source and algorithm identities alongside future feedback so it can be traced back to the exact cut.
 
 Supported transport today is a filesystem mounted outside the application, optionally expressed as a local `file://` URL. Storage adapters can add other transports later without coupling the UI to Synology. Raw SMB URLs, HTTP catalogs, and object-storage providers are not currently implemented.
+
+## Website-derived library index
+
+`GET /api/sessions` retains individual recordings under `sessions` and adds
+`practice_groups` for the home page. Each group lists `recording_ids` in original
+recording order and timezone-aware start/end instants. Unknown dates form single
+recording groups. These are derived at read time; no manifest or media is rewritten.
+
+Session responses add `recorded_at_iso` and `recorded_at_epoch` from the original
+`source.recorded_at` only. They also add optional `video.nas_url` and clip `nas_url`
+fields derived from private operator-supplied SMB display roots. These fields are
+not written into the published manifests or backed by an SMB client connection.
