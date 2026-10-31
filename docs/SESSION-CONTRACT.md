@@ -51,3 +51,12 @@ website state. The library API enriches each practice with `title`, `time_label`
 list. Versioned `PUT /api/practices/<id>/court` applies a chosen court (or clears
 selection for GPS matching) to all current recording identities atomically.
 Concurrent edits or changed practice membership produce HTTP 409.
+
+Saved courts include an optional `address` string (at most 500 characters), stored
+only in website state. Courts saved before this field was introduced return an
+empty address. Legacy PUT clients omitting the field preserve the saved address;
+an explicit empty string clears it. Optimistic versions cover address edits too.
+
+Practice `title` is the recording-local `time_label` alone unless another dated
+practice has that same label, in which case ` @ court_name` is appended. Collisions
+are calculated across the complete derived index before browser filtering.
