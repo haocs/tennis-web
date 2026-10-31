@@ -9,6 +9,7 @@ services:
       TENNIS_DATA_ROOT: /data
       TENNIS_SESSION_GAP_MINUTES: ${TENNIS_SESSION_GAP_MINUTES:-30}
       TENNIS_LIBRARY_SMB_URL: ${TENNIS_LIBRARY_SMB_URL:-}
+      TENNIS_PROCESSING_ROOM_URL: ${TENNIS_PROCESSING_ROOM_URL:-/processing}
     volumes:
       - type: bind
         source: ${TENNIS_LIBRARY_PATH:-../library}

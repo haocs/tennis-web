@@ -24,11 +24,18 @@ def create_app(config=None):
                       MEDIA_ROOT=os.environ.get("TENNIS_MEDIA_ROOT"),
                       DATA_ROOT=os.environ.get("TENNIS_DATA_ROOT", "/data"),
                       STATUS_FILE=os.environ.get("TENNIS_STATUS_FILE"),
+                      PROCESSING_ROOM_URL=os.environ.get("TENNIS_PROCESSING_ROOM_URL", "/processing"),
                       SESSION_GAP_MINUTES=os.environ.get("TENNIS_SESSION_GAP_MINUTES", "30"),
                       LIBRARY_SMB_URL=os.environ.get("TENNIS_LIBRARY_SMB_URL"),
                       MEDIA_SMB_URL=os.environ.get("TENNIS_MEDIA_SMB_URL"), MAX_CONTENT_LENGTH=8192)
     if config:
         app.config.update(config)
+    processing_url = app.config['PROCESSING_ROOM_URL']
+    parsed_url = urlparse(processing_url) if isinstance(processing_url, str) else urlparse('')
+    if not (isinstance(processing_url, str) and processing_url and
+            (processing_url.startswith('/') and not parsed_url.netloc and not processing_url.startswith('//')
+             or parsed_url.scheme in {'http', 'https'} and parsed_url.hostname and not parsed_url.username and not parsed_url.password)):
+        raise ValueError('Processing Room URL must be a local path or an HTTP(S) URL without credentials')
     library = Library(app.config["LIBRARY_ROOT"], app.config["MEDIA_ROOT"])
     gap_minutes = int(app.config["SESSION_GAP_MINUTES"])
     if not 0 <= gap_minutes <= 1440:
@@ -95,11 +102,12 @@ def create_app(config=None):
         return jsonify(status='ok')
 
     @app.get('/')
+    @app.get('/processing')
     @app.get('/review/<identity>')
     def index(identity=None):
         if identity:
             session(identity)
-        return render_template('index.html')
+        return render_template('index.html', processing_url=processing_url)
 
     @app.get('/api/sessions')
     def list_sessions():
@@ -132,8 +140,12 @@ def create_app(config=None):
         if identity is None:
             identity, expected = uuid.uuid4().hex, 0
         else:
-            if not COURT_ID.fullmatch(identity) or 'court:'+identity not in state.all():
+            existing = state.all().get('court:'+identity)
+            if not COURT_ID.fullmatch(identity) or not existing:
                 abort(404,'Court not found')
+            # Older open browser tabs do not send the newly introduced field.
+            if 'address' not in body:
+                value['address'] = existing['value'].get('address', '')
             expected = body.get('version')
             if type(expected) is not int or expected < 1:
                 abort(400,'The current court version is required')

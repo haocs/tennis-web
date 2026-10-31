@@ -189,12 +189,14 @@ def test_saved_court_gps_matching_and_renaming_preserves_video_names(setup):
     court=response.json
     group=c.get('/api/sessions').json['practice_groups'][0]
     assert group['court_status']=='gps_match' and group['court']['id']==court['id']
-    assert group['title']=='Local court · 2026/10/24 evening'
+    assert group['title']=='2026/10/24 Evening'
     assert group['location']['altitude_m']==18
     assert c.get(f'/api/sessions/{ID}').json['title']==data['title']
     renamed=c.put('/api/courts/'+court['id'],json={k:v for k,v in {**court,'name':'Evening courts'}.items() if k!='id'},headers={'X-Tennis-Request':'1'})
     assert renamed.status_code==200
-    assert c.get('/api/sessions').json['practice_groups'][0]['title'].startswith('Evening courts · ')
+    renamed_group=c.get('/api/sessions').json['practice_groups'][0]
+    assert renamed_group['title']=='2026/10/24 Evening'
+    assert renamed_group['court_name']=='Evening courts'
     assert json.loads(manifest.read_text())==data
     restored=create_app({'LIBRARY_ROOT':str(root),'DATA_ROOT':app.config['DATA_ROOT']})
     assert restored.test_client().get('/api/courts').json['courts'][0]['name']=='Evening courts'
@@ -277,3 +279,54 @@ def test_versioned_processing_generation_preserves_review_and_likes(setup):
     data['artifact_directory']='../private'
     (root/'metadata/sessions'/f'{ID}.json').write_text(json.dumps(data))
     assert client.get(f'/review/{ID}').status_code==503
+
+
+def test_court_address_round_trip_legacy_edits_and_stale_writers(setup):
+    app,root,_=setup;c=app.test_client()
+    court=court_create(c,address='  123 Court Lane, Test City  ').json
+    assert court['address']=='123 Court Lane, Test City'
+    url='/api/courts/'+court['id']
+    fields={k:v for k,v in court.items() if k!='id'}
+    updated=c.put(url,json={**fields,'address':'456 Park Road'},headers={'X-Tennis-Request':'1'})
+    assert updated.status_code==200 and updated.json['address']=='456 Park Road'
+    assert c.put(url,json={**fields,'address':'Stale address'},headers={'X-Tennis-Request':'1'}).status_code==409
+    legacy={k:v for k,v in updated.json.items() if k not in {'id','address'}}
+    assert c.put(url,json=legacy,headers={'X-Tennis-Request':'1'}).json['address']=='456 Park Road'
+    restored=create_app({'LIBRARY_ROOT':str(root),'DATA_ROOT':app.config['DATA_ROOT']})
+    assert restored.test_client().get('/api/courts').json['courts'][0]['address']=='456 Park Road'
+    latest=c.get('/api/courts').json['courts'][0]
+    cleared=c.put(url,json={**{k:v for k,v in latest.items() if k!='id'},'address':''},headers={'X-Tennis-Request':'1'})
+    assert cleared.json['address']==''
+
+
+def test_existing_courts_without_address_remain_editable(setup):
+    app,_,_=setup;c=app.test_client()
+    identity='e'*32
+    app.extensions['state'].save_court(identity,{'name':'Old court','latitude':None,'longitude':None,'altitude_m':None,'radius_m':150},0)
+    court=c.get('/api/courts').json['courts'][0]
+    assert court['address']==''
+    assert c.put('/api/courts/'+identity,json={k:v for k,v in court.items() if k!='id'},headers={'X-Tennis-Request':'1'}).status_code==200
+
+
+@pytest.mark.parametrize('address',[None,True,123,[],{},'x'*501])
+def test_invalid_court_address_is_rejected(setup,address):
+    app,_,_=setup
+    response=court_create(app.test_client(),address=address)
+    assert response.status_code==400 and 'address' in response.json['error']
+
+
+def test_processing_room_route_and_configured_portal_link(setup):
+    app,root,_=setup
+    client=app.test_client()
+    assert client.get('/processing').status_code==200
+    assert b'data-processing-url="/processing"' in client.get('/').data
+    configured=create_app({'LIBRARY_ROOT':str(root),'DATA_ROOT':app.config['DATA_ROOT'],
+                           'PROCESSING_ROOM_URL':'http://processor.example:8089/'})
+    assert b'data-processing-url="http://processor.example:8089/"' in configured.test_client().get('/').data
+
+
+@pytest.mark.parametrize('url',['javascript:alert(1)','//example.invalid','http://user:password@example.invalid','',None])
+def test_processing_room_url_requires_a_safe_navigation_target(setup,url):
+    app,root,_=setup
+    with pytest.raises(ValueError,match='Processing Room URL'):
+        create_app({'LIBRARY_ROOT':str(root),'DATA_ROOT':app.config['DATA_ROOT'],'PROCESSING_ROOM_URL':url})

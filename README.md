@@ -77,15 +77,25 @@ Newest/oldest sorting uses the original recording's timezone-aware creation time
 
 The home page groups overlapping recordings and recordings starting within 30 minutes of the previous recording ending into one practice card. Each card retains a separate link and favorite control for every recording. Durations and clip counts are summed. This does not merge files, change stable identities, alter review pages, or migrate existing likes/edits. `TENNIS_SESSION_GAP_MINUTES` configures the gap (default 30). Liked views retain the existing individual recording/clip favorites.
 
+## Home-page worker summary
+
+The home header places a compact, live worker-status link to the left of session,
+clip and practice-time totals. Slogans are removed; the logo and brand remain.
+Set `TENNIS_PROCESSING_ROOM_URL` to your existing processing control portal in
+private deployment settings. The link opens that portal in the same tab. Without
+this setting, `/processing` provides a local read-only worker/queue status page.
+Worker unavailable, stale and paused states remain visible and clickable. Status
+refreshes every 15 seconds; the detailed queue is kept off the home summary.
+
 ## Saved courts and home-page names
 
-Every home practice card is named `Court name · YYYY/MM/DD morning/afternoon/evening/night`, using the first original recording's own date/timezone. All recordings, including a single recording, are listed separately inside that card. Review-page titles remain the individual video titles.
+Home practice titles use `YYYY/MM/DD Morning/Afternoon/Evening/Night`, using the first original recording's own date/timezone. When multiple practices share the same date and time period, each title adds ` @ Court name`. Collision detection uses the full library, so filtering and sorting keep titles stable. All recordings, including a single recording, are listed separately inside that card. Review-page titles remain the individual video titles.
 
-Open the **three-dot options** at the top right of a practice thumbnail, then choose **Change court** (or **Name or choose court** for an unidentified court) to select a remembered court or add one. Identified practices display the court name in place of GPS coordinates; unidentified practices retain their GPS information. Adding a court pre-fills coordinates and optional altitude from an actual original recording; you can adjust its name, position, and matching range. A court saved without coordinates can learn them when selected for a practice with GPS. **Saved courts** lets you edit names and locations centrally.
+Open the **three-dot options** at the top right of a practice thumbnail, then choose **Change court** (or **Name or choose court** for an unidentified court) to select a remembered court or add one. Identified practices display the court name in place of GPS coordinates; unidentified practices retain their GPS information. Adding a court pre-fills coordinates and optional altitude from an actual original recording; you can adjust its name, position, and matching range. A court saved without coordinates can learn them when selected for a practice with GPS. **Saved courts** lets you edit names, optional street addresses (up to 500 characters), and GPS locations centrally. Existing courts without an address remain valid, and address edits never change recording GPS or court matching.
 
 The default matching range is 150 metres (configurable per court from 25 to 2000 metres). A GPS match is automatic only when one saved court contains every available recording position in the practice. Matching uses horizontal distance; altitude is retained/displayed but does not reject a match. Overlapping saved court ranges produce suggestions requiring a choice. An explicit practice selection takes priority over GPS. Missing GPS is never guessed or sent to an external geocoder.
 
-Court names/coordinates and recording assignments live in the existing private website database, separate from read-only processing metadata. Renaming a saved court updates its home titles. Per-recording assignment identities preserve selections across regrouping; conflicting selections in a newly merged practice are flagged. Court edits and all-recording assignments use optimistic versions and atomic transactions. Existing video names, likes, metadata edits, files, and review URLs are preserved. Database backups include saved courts automatically.
+Court names/coordinates and recording assignments live in the existing private website database, separate from read-only processing metadata. Renaming a saved court updates its card location and any title suffix used to distinguish practices. Per-recording assignment identities preserve selections across regrouping; conflicting selections in a newly merged practice are flagged. Court edits and all-recording assignments use optimistic versions and atomic transactions. Existing video names, likes, metadata edits, files, and review URLs are preserved. Database backups include saved courts automatically.
 
 ## Locate a file on the NAS
 
