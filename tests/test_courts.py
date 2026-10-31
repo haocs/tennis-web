@@ -25,6 +25,29 @@ def test_matching_range_uses_every_recording_and_includes_boundary():
 
 
 def test_practice_time_label_uses_original_timezone_and_date():
-    assert rough_time('2026-10-30T13:00:00-07:00')=='2026/10/30 afternoon'
-    assert rough_time('2026-10-30T06:00:00+09:00')=='2026/10/30 morning'
+    assert rough_time('2026-10-30T13:00:00-07:00')=='2026/10/30 Afternoon'
+    assert rough_time('2026-10-30T06:00:00+09:00')=='2026/10/30 Morning'
     assert rough_time(None)=='Date not recorded'
+
+
+def test_titles_append_location_only_for_repeated_date_and_period():
+    groups = [
+        {'id':'a','recording_ids':['a'],'recorded_at_iso':'2026-10-30T13:00:00-07:00'},
+        {'id':'b','recording_ids':['b'],'recorded_at_iso':'2026-10-30T16:00:00-07:00'},
+        {'id':'c','recording_ids':['c'],'recorded_at_iso':'2026-10-30T18:00:00-07:00'},
+        {'id':'d','recording_ids':['d'],'recorded_at_iso':'2026-10-31T13:00:00+09:00'},
+        {'id':'e','recording_ids':['e'],'recorded_at_iso':None},
+    ]
+    recordings = [{'id':g['id'],'source':{'location':None},'location_label':name}
+                  for g,name in zip(groups,['Park','College','Park','College','Park'])]
+    enriched = enrich_groups(groups,recordings,{})
+    assert [g['title'] for g in enriched] == [
+        '2026/10/30 Afternoon @ Park', '2026/10/30 Afternoon @ College',
+        '2026/10/30 Evening', '2026/10/31 Afternoon', 'Date not recorded']
+    assert [g['id'] for g in enriched] == ['a','b','c','d','e']
+
+
+def test_undated_practices_do_not_get_a_fabricated_date_or_location_suffix():
+    groups = [{'id':v,'recording_ids':[v],'recorded_at_iso':None} for v in ['a','b']]
+    videos = [{'id':v,'source':{'location':None}} for v in ['a','b']]
+    assert [g['title'] for g in enrich_groups(groups,videos,{})] == ['Date not recorded']*2
