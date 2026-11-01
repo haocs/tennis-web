@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 
 from flask import Flask, abort, jsonify, render_template, request, send_file
 from werkzeug.exceptions import HTTPException
+from werkzeug.utils import secure_filename
 
 from storage import Library, smb_root, nas_media_address
 from practices import recording_time, group_recordings
@@ -228,7 +229,12 @@ def create_app(config=None):
             p = library.media(data, filename)
             if not p.is_file():
                 abort(404, 'Video not available')
-            return send_file(p, conditional=True, mimetype='image/jpeg' if filename.endswith('.jpg') else 'video/mp4', max_age=0)
+            download = request.args.get('download') == '1'
+            if download and filename not in {data['video']['file'], *(c['file'] for c in data['clips'])}:
+                abort(404)
+            name = secure_filename(f"{Path(data['source']['name']).stem[:100]}-{Path(filename).stem[:80]}.mp4")
+            return send_file(p, conditional=True, mimetype='image/jpeg' if filename.endswith('.jpg') else 'video/mp4',
+                             as_attachment=download, download_name=name if download else None, max_age=0)
         except (KeyError, ValueError):
             abort(404)
         except OSError:
