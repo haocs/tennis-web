@@ -97,6 +97,10 @@ The default matching range is 150 metres (configurable per court from 25 to 2000
 
 Court names/coordinates and recording assignments live in the existing private website database, separate from read-only processing metadata. Renaming a saved court updates its card location and any title suffix used to distinguish practices. Per-recording assignment identities preserve selections across regrouping; conflicting selections in a newly merged practice are flagged. Court edits and all-recording assignments use optimistic versions and atomic transactions. Existing video names, likes, metadata edits, files, and review URLs are preserved. Database backups include saved courts automatically.
 
+## Download the current video
+
+The player has one download action: **Download full practice** while the combined video is loaded, or **Download clip NN** while an individual clip is loaded. Seeking within the full practice still downloads the full practice. Downloads use the website over HTTP and do not require SMB or HTTPS. On iPhone, open a downloaded video in Files and use Share → Save Video when available to save it to Photos.
+
 ## Locate a file on the NAS
 
 Set `TENNIS_LIBRARY_SMB_URL` to the credential-free SMB address of the same published library folder mounted by `TENNIS_LIBRARY_ROOT`, for example `smb://nas/Shared/library`. The review shows a NAS address button for each clip and the currently playing file. It displays and copies the exact URL without opening SMB, authenticating, checking visitor permissions, or modifying the file.
