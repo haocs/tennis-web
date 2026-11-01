@@ -58,6 +58,30 @@ def test_only_declared_shared_media_can_be_served(setup,tmp_path):
     assert c.get('/api/sessions/'+'c'*64).status_code==404
 
 
+def test_video_downloads_are_attachments_and_keep_media_boundaries(setup, tmp_path):
+    app, root, data = setup
+    client = app.test_client()
+    for filename, expected, name in [
+        ('Practice.mp4', b'0123456789abcdefghijklmnopqrstuvwxyz', 'test-Practice.mp4'),
+        ('Clips/clip-001.mp4', b'clip video', 'test-clip-001.mp4'),
+    ]:
+        response = client.get(f'/media/{ID}/{filename}?download=1')
+        assert response.data == expected
+        assert response.mimetype == 'video/mp4'
+        assert response.headers['Content-Disposition'] == f'attachment; filename={name}'
+        assert client.head(f'/media/{ID}/{filename}?download=1').status_code == 200
+    assert client.get(f'/media/{ID}/Practice.mp4?download=1', headers={'Range': 'bytes=2-6'}).data == b'23456'
+    assert client.get(f'/media/{ID}/Practice.mp4').headers['Content-Disposition'].startswith('inline;')
+    (root/'media'/ID/'poster.jpg').write_bytes(b'poster')
+    assert client.get(f'/media/{ID}/poster.jpg?download=1').status_code == 404
+    assert client.get(f'/media/{ID}/session.json?download=1').status_code == 404
+    private = tmp_path/'private.mp4'
+    private.write_bytes(b'private')
+    (root/'media'/ID/'Practice.mp4').unlink()
+    (root/'media'/ID/'Practice.mp4').symlink_to(private)
+    assert client.get(f'/media/{ID}/Practice.mp4?download=1').status_code == 404
+
+
 def test_like_persistence_and_stale_update_conflict(setup):
     app,root,data=setup;c=app.test_client();url=f'/api/sessions/{ID}/likes/{CLIP}'
     assert put(c,url,{'liked':True,'version':0}).json=={'value':True,'version':1}
