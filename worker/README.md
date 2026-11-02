@@ -70,3 +70,10 @@ tennis-coach-worker --config /private/config.json --role render --package JOB_ID
 Open that printed folder in Finder, attach `excerpt.mp4` to ChatGPT and paste or
 attach `prompt.txt`. The web interface can copy your edited question with export
 timing. Merely opening ChatGPT does not attach local files automatically.
+
+For automatic macOS mounts, an optional private `mounts` array in configuration
+contains `{ "remote": "//username@nas/share/subfolder", "path": "/local/mount" }`
+entries. Use existing saved NAS login credentials, never inline passwords. Before
+claiming any job, workers reconnect configured mounts and verify required storage.
+If storage/login is unavailable, local status becomes `storage_unavailable` and
+work stays queued. Windows should use pre-mounted paths and omit this option.

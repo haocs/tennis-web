@@ -127,3 +127,12 @@ def test_export_request_identity_conflict_is_409(setup):
     app,root,data=enabled(setup);c=app.test_client();b=selection(data)
     assert post(c,'exports',b).status_code==201
     assert post(c,'exports',dict(b,start=1.5)).status_code==409
+
+
+def test_worker_does_not_claim_when_storage_is_unavailable(tmp_path):
+    sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'worker'))
+    from tennis_coach.worker import Worker
+    worker=Worker({'local_state':str(tmp_path),'artifact_root':str(tmp_path/'missing')},'ai')
+    worker.api=lambda *a:pytest.fail('No job should be claimed before storage is available')
+    assert worker.once() is False
+    assert json.loads((worker.root/'state.json').read_text())['status']=='storage_unavailable'
