@@ -1,85 +1,105 @@
 'use strict';
-// Keep navigation inside the fullscreen element, including on iPhone where
-// fullscreening the video itself replaces HTML controls with the system player.
 const ReviewPlayer = {
- markup(){return `<div class="video-stage" id="video-stage" role="region" aria-label="Video player" tabindex="-1">
- <div class="video-context" id="video-context" aria-live="polite"></div><video id="player" playsinline preload="metadata"></video>
- <div class="video-controls" aria-label="Playback controls">
+ icon(name){
+  const shapes={
+   play:'<path d="m9 5 11 7-11 7z" fill="currentColor" stroke="none"/>',
+   pause:'<path d="M7 5h4v14H7zm6 0h4v14h-4z" fill="currentColor" stroke="none"/>',
+   previous:'<path d="M6 5v14m12-14L8 12l10 7z"/>',
+   next:'<path d="M18 5v14M6 5l10 7-10 7z"/>',
+   fullscreen:'<path d="M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5"/>',
+   exit:'<path d="M3 8h5V3m13 5h-5V3M8 21v-5H3m13 5v-5h5"/>',
+   download:'<path d="M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5"/>',
+   more:'<circle cx="5" cy="12" r="1.6" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/><circle cx="19" cy="12" r="1.6" fill="currentColor" stroke="none"/>'
+  };
+  return `<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${shapes[name]||''}</svg>`;
+ },
+ markup(){return `<div class="video-stage" id="video-stage" role="region" aria-label="Video player" tabindex="0">
+ <video id="player" playsinline preload="metadata"></video>
+ <div class="video-overlay" aria-label="Playback controls">
+ <div class="video-topbar"><span id="video-context" class="video-context"></span><label class="video-autoplay" title="Autoplay next clip"><span class="autoplay-text">Autoplay</span><input type="checkbox" id="autoplay-next" aria-label="Autoplay"><span class="autoplay-switch" aria-hidden="true"></span></label></div>
+ <div class="video-transport">
+ <button type="button" class="video-button" id="previous" aria-label="Previous clip" title="Previous clip">${this.icon('previous')}</button>
+ <button type="button" class="video-button video-play" id="video-play" aria-label="Play video" title="Play video">${this.icon('play')}</button>
+ <button type="button" class="video-button" id="next" aria-label="Next clip" title="Next clip">${this.icon('next')}</button>
+ </div>
+ <div class="video-bottom"><span id="video-time" class="video-time">0:00 / 0:00</span><button type="button" class="video-button" id="video-fullscreen" aria-label="Enter fullscreen" title="Enter fullscreen">${this.icon('fullscreen')}</button></div>
  <label class="video-seek-label"><span class="sr-only">Seek current video</span><input id="video-seek" type="range" min="0" max="0" value="0" step="0.1" disabled></label>
- <div class="video-control-row">
- <button type="button" class="video-button" id="video-play" aria-label="Play video" title="Play video">▶</button>
- <button type="button" class="video-button" id="previous" aria-label="Previous clip" title="Previous clip">❮</button>
- <button type="button" class="video-button" id="next" aria-label="Next clip" title="Next clip">❯</button>
- <span id="video-time" class="video-time" aria-live="off">0:00 / 0:00</span>
- <span class="video-control-spacer"></span>
- <label class="video-autoplay" title="Play the next clip automatically"><input type="checkbox" id="autoplay-next">Autoplay</label>
- <button type="button" class="video-button" id="video-mute" aria-label="Mute video" title="Mute video">♪</button>
- <label class="video-rate"><span class="sr-only">Playback speed</span><select id="video-rate" aria-label="Playback speed"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="1.5">1.5×</option><option value="2">2×</option></select></label>
- <button type="button" class="video-button" id="video-fullscreen" aria-label="Enter fullscreen" title="Enter fullscreen">⛶</button>
- </div></div></div>`;},
- mount({time, onError}){
-  const stage=document.querySelector('#video-stage'), video=document.querySelector('#player');
-  const find=id=>stage.querySelector('#'+id), seek=find('video-seek'), full=find('video-fullscreen');
-  const actualFullscreen=()=>document.fullscreenElement===stage||document.webkitFullscreenElement===stage;
-  const expanded=()=>actualFullscreen()||stage.classList.contains('viewport-fullscreen');
+ </div></div>`;},
+ mount({time,onError}){
+  const stage=document.querySelector('#video-stage'),video=document.querySelector('#player');
+  const find=id=>stage.querySelector('#'+id),seek=find('video-seek'),full=find('video-fullscreen'),overlay=stage.querySelector('.video-overlay');
+  let hideTimer,keyboardMode=false;
+  const elementFullscreen=()=>document.fullscreenElement===stage||document.webkitFullscreenElement===stage||document.fullscreenElement===video;
+  const nativeFullscreen=()=>video.webkitDisplayingFullscreen||video.webkitPresentationMode==='fullscreen';
+  function hide(){
+   if(video.paused||(keyboardMode&&stage.contains(document.activeElement)))return;
+   stage.classList.add('controls-hidden');overlay.inert=true;
+  }
+  function reveal(){
+   clearTimeout(hideTimer);stage.classList.remove('controls-hidden');overlay.inert=false;
+   if(!video.paused)hideTimer=setTimeout(hide,2500);
+  }
   function sync(){
    const duration=Number.isFinite(video.duration)?video.duration:0;
    seek.max=duration;seek.value=video.currentTime||0;seek.disabled=!duration;
+   seek.style.setProperty('--played',duration?`${100*video.currentTime/duration}%`:'0%');
    find('video-time').textContent=`${time(video.currentTime)} / ${time(duration)}`;
-   const play=find('video-play'), label=video.paused?'Play video':'Pause video';
-   play.textContent=video.paused?'▶':'Ⅱ';play.setAttribute('aria-label',label);play.title=label;
-   const mute=find('video-mute'), muted=video.muted||video.volume===0;
-   mute.textContent=muted?'⌁':'♪';mute.setAttribute('aria-label',muted?'Unmute video':'Mute video');mute.title=muted?'Unmute video':'Mute video';
+   const play=find('video-play'),label=video.paused?'Play video':'Pause video';
+   play.innerHTML=ReviewPlayer.icon(video.paused?'play':'pause');play.setAttribute('aria-label',label);play.title=label;
   }
   function syncFullscreen(){
-   const active=expanded(),label=active?'Exit fullscreen':'Enter fullscreen';
-   full.setAttribute('aria-label',label);full.title=label;full.setAttribute('aria-pressed',String(active));
-  }
-  function viewportFullscreen(active){
-   stage.classList.toggle('viewport-fullscreen',active);
-   document.body.classList.toggle('player-expanded',active);
-   // Keep keyboard/screen reader focus inside the expanded player.
-   if(active){stage.setAttribute('role','dialog');stage.setAttribute('aria-modal','true');stage.focus();}
-   else{stage.setAttribute('role','region');stage.removeAttribute('aria-modal');full.focus();}
-   syncFullscreen();
+   const active=elementFullscreen()||nativeFullscreen(),label=active?'Exit fullscreen':'Enter fullscreen';
+   full.innerHTML=ReviewPlayer.icon(active?'exit':'fullscreen');full.setAttribute('aria-label',label);full.title=label;
+   full.setAttribute('aria-pressed',String(!!active));reveal();
   }
   async function toggleFullscreen(){
-   if(actualFullscreen()){
-    const exit=document.exitFullscreen||document.webkitExitFullscreen;
-    if(exit)await exit.call(document);
-   }else if(expanded()){viewportFullscreen(false);}
-   else{
+   if(nativeFullscreen()){
+    if(video.webkitExitFullscreen)video.webkitExitFullscreen();
+    else if(video.webkitSetPresentationMode)video.webkitSetPresentationMode('inline');
+   }else if(elementFullscreen()){
+    const exit=document.exitFullscreen||document.webkitExitFullscreen;if(exit)await exit.call(document);
+   }else{
     const request=stage.requestFullscreen||stage.webkitRequestFullscreen;
-    try{if(!request)throw new Error('Element fullscreen unavailable');await request.call(stage);}
-    catch{viewportFullscreen(true);}
+    const enterNative=video.webkitEnterFullscreen||video.webkitEnterFullScreen;
+    // iPhone's real fullscreen uses the system video player. Never fake it with
+    // a fixed-position page element, and call the native API in the user gesture.
+    if(enterNative&&!document.fullscreenEnabled&&!document.webkitFullscreenEnabled){enterNative.call(video);}
+    else if(request){
+     try{await request.call(stage);}catch(error){if(enterNative)enterNative.call(video);else throw error;}
+    }else if(enterNative){enterNative.call(video);}
+    else if(video.requestFullscreen){await video.requestFullscreen();}
+    else{throw new Error('Fullscreen unavailable');}
    }
    syncFullscreen();
   }
-  function togglePlay(){if(video.paused)video.play().catch(()=>onError('Playback could not start. Try Play again.'));else video.pause();}
+  function togglePlay(){
+   if(video.paused)video.play().catch(()=>onError('Playback could not start. Try Play again.'));else video.pause();
+   reveal();
+  }
   find('video-play').addEventListener('click',togglePlay);
-  video.addEventListener('click',togglePlay);
-  find('video-mute').addEventListener('click',()=>{video.muted=!video.muted;sync();});
-  find('video-rate').addEventListener('change',event=>video.playbackRate=Number(event.target.value));
-  seek.addEventListener('input',()=>{video.currentTime=Number(seek.value);sync();});
-  full.addEventListener('click',()=>toggleFullscreen().catch(()=>onError('Unable to change fullscreen mode.')));
+  video.addEventListener('click',()=>{
+   if(matchMedia('(pointer: coarse)').matches){if(stage.classList.contains('controls-hidden')||video.paused)reveal();else hide();}
+   else togglePlay();
+  });
+  stage.addEventListener('pointerdown',()=>{keyboardMode=false;});
+  stage.addEventListener('pointermove',event=>{if(event.pointerType!=='touch')reveal();});
+  stage.addEventListener('pointerleave',event=>{if(event.pointerType!=='touch')hide();});
+  stage.addEventListener('focusin',()=>{if(keyboardMode||document.activeElement===stage)reveal();});
+  seek.addEventListener('input',()=>{video.currentTime=Number(seek.value);sync();reveal();});
+  full.addEventListener('click',()=>toggleFullscreen().catch(()=>onError('Fullscreen is unavailable. Wait for the video to load, then try again.')));
   stage.addEventListener('keydown',event=>{
-   if(event.key==='Escape'&&stage.classList.contains('viewport-fullscreen')){event.preventDefault();viewportFullscreen(false);return;}
-   if(event.key==='Tab'&&stage.classList.contains('viewport-fullscreen')){
-    const controls=[...stage.querySelectorAll('button:not(:disabled),input:not(:disabled),select')];
-    const first=controls[0],last=controls.at(-1);
-    if(event.shiftKey&&(document.activeElement===first||document.activeElement===stage)){event.preventDefault();last.focus();}
-    else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first.focus();}
-   }
-   if(event.target.matches('button,input,select'))return;
+   keyboardMode=true;reveal();
+   if(event.target.matches('button,input'))return;
    if(event.key===' '||event.key==='k'){event.preventDefault();togglePlay();}
    if(event.key==='ArrowLeft'||event.key==='ArrowRight'){
     event.preventDefault();if(Number.isFinite(video.duration))video.currentTime=Math.max(0,Math.min(video.duration,video.currentTime+(event.key==='ArrowLeft'?-5:5)));
    }
   });
-  ['play','pause','ended','timeupdate','loadedmetadata','durationchange','emptied','volumechange'].forEach(event=>video.addEventListener(event,sync));
-  document.addEventListener('fullscreenchange',syncFullscreen);
-  document.addEventListener('webkitfullscreenchange',syncFullscreen);
+  ['play','pause','ended','loadedmetadata','emptied'].forEach(event=>video.addEventListener(event,()=>{sync();reveal();}));
+  ['timeupdate','durationchange'].forEach(event=>video.addEventListener(event,sync));
+  ['fullscreenchange','webkitfullscreenchange'].forEach(event=>document.addEventListener(event,syncFullscreen));
+  ['webkitbeginfullscreen','webkitendfullscreen'].forEach(event=>video.addEventListener(event,syncFullscreen));
   sync();syncFullscreen();
-  return {sync};
+  return {sync,reveal};
  }
 };
