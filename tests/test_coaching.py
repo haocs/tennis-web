@@ -136,3 +136,30 @@ def test_worker_does_not_claim_when_storage_is_unavailable(tmp_path):
     worker.api=lambda *a:pytest.fail('No job should be claimed before storage is available')
     assert worker.once() is False
     assert json.loads((worker.root/'state.json').read_text())['status']=='storage_unavailable'
+
+
+def test_mac_service_definition_uses_named_launcher(tmp_path,monkeypatch):
+    import importlib.util
+    module_path=Path(__file__).resolve().parents[1]/'worker/install_service.py'
+    spec=importlib.util.spec_from_file_location('coach_install_service',module_path)
+    module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+    monkeypatch.setattr(Path,'home',lambda:tmp_path)
+    cfg=tmp_path/'config.json';cfg.write_text('{}')
+    executable=tmp_path/'venv/bin/tennis-coach-worker';launcher=tmp_path/'Tennis Coach.app/Contents/MacOS/TennisCoach'
+    monkeypatch.setattr(sys,'argv',['install_service.py','install','--role','ai','--config',str(cfg),'--executable',str(executable),'--launcher',str(launcher)])
+    module.main()
+    import plistlib
+    data=plistlib.loads((tmp_path/'Library/LaunchAgents/local.tennis-coach.ai.plist').read_bytes())
+    assert data['ProgramArguments']==[str(launcher),'--worker',str(executable),'--config',str(cfg),'--role','ai']
+    assert data['KeepAlive'] and data['RunAtLoad']
+
+
+def test_worker_server_error_is_actionable_and_redacted(tmp_path,monkeypatch):
+    import io,urllib.error
+    sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'worker'))
+    from tennis_coach.worker import Worker
+    worker=Worker({'local_state':str(tmp_path),'server_url':'http://localhost','worker_token':'private-test-token'},'ai')
+    def rejected(*args,**kwargs):raise urllib.error.HTTPError('http://localhost',400,'Bad request',{},io.BytesIO(b'{"error":"Denied private-test-token"}'))
+    monkeypatch.setattr('urllib.request.urlopen',rejected)
+    with pytest.raises(ValueError,match='HTTP 400: Denied') as error:worker.api('worker/ai/claim',{'worker_id':'test'})
+    assert 'private-test-token' not in str(error.value) and '[redacted]' in str(error.value)
