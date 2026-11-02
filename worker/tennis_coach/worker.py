@@ -8,6 +8,7 @@ from pathlib import Path
 import shutil
 import signal
 import subprocess
+import sys
 import threading
 import time
 import urllib.request
@@ -123,7 +124,21 @@ class Worker:
     def state(self,**value):
         atomic(self.root/'state.json',dict(worker_id=self.identity,role=self.role,updated=time.time(),**value))
 
+    def storage_ready(self):
+        for mount in self.config.get('mounts',[]):
+            path=Path(mount['path']).expanduser()
+            if path.is_mount():continue
+            if sys.platform!='darwin':raise ValueError('Configured storage must be mounted before starting this worker')
+            path.mkdir(parents=True,exist_ok=True)
+            subprocess.run(['/sbin/mount_smbfs','-N',mount['remote'],str(path)],check=True,capture_output=True,timeout=30)
+            if not path.is_mount():raise ValueError('Storage is not mounted')
+        required=['artifact_root']+(['library_media_root'] if self.role=='render' else [])
+        if any(not Path(self.config[k]).is_dir() for k in required):raise ValueError('Required storage is unavailable')
+
     def once(self):
+        try:self.storage_ready()
+        except Exception:
+            self.state(status='storage_unavailable');return False
         response=self.api('worker/'+self.role+'/claim',{'worker_id':self.identity});job=response['job']
         if not job:self.state(status='ready');return False
         identity=job['id'];local=self.root/'jobs'/identity/hashlib.sha256(job['token'].encode()).hexdigest()[:24];local.mkdir(parents=True,exist_ok=True)
