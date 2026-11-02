@@ -396,3 +396,59 @@ def test_processing_room_url_requires_a_safe_navigation_target(setup,url):
     app,root,_=setup
     with pytest.raises(ValueError,match='Processing Room URL'):
         create_app({'LIBRARY_ROOT':str(root),'DATA_ROOT':app.config['DATA_ROOT'],'PROCESSING_ROOM_URL':url})
+
+
+def test_clip_study_legacy_context_and_publication_conflict(setup):
+    app, root, data = setup
+    client = app.test_client()
+    url = f'/api/sessions/{ID}/clips/{CLIP}/study'
+    result = client.get(url)
+    assert result.status_code == 200 and result.json['observations'] == []
+    assert result.json['algorithm'] == 'test'
+    assert result.json['original_start_seconds'] == 5
+    assert result.headers['Cache-Control'] == 'no-store'
+    assert client.get(url+'?publication='+str(data['published_at'])).status_code == 200
+    assert client.get(url+'?publication=0').status_code == 409
+    for invalid in ('nan', 'inf', 'not-a-number'):
+        assert client.get(url+'?publication='+invalid).status_code == 400
+    assert client.get(f'/api/sessions/{ID}/clips/'+('d'*24)+'/study').status_code == 404
+
+
+def test_clip_study_filters_observations_without_exposing_raw_fields(setup):
+    app, root, data = setup
+    valid = {'label': '<script>Candidate movement</script>', 'detail': 'Pose movement, not verified ball contact',
+             'original_start_seconds': 6, 'original_end_seconds': 8, 'score': 2.5, 'score_kind': 'margin',
+             'private_path': '/private/original.mov', 'raw_log': 'secret'}
+    invalid = [None, {}, {**valid, 'original_start_seconds': True},
+               {**valid, 'original_start_seconds': 4}, {**valid, 'original_end_seconds': 17},
+               {**valid, 'original_end_seconds': float('nan')}, {**valid, 'label': 'x'*121}]
+    data['clips'][0]['processor_observations'] = invalid + [valid]
+    path = root/'metadata/sessions'/f'{ID}.json'
+    path.write_text(json.dumps(data))
+    result = app.test_client().get(f'/api/sessions/{ID}/clips/{CLIP}/study')
+    assert len(result.json['observations']) == 1
+    observation = result.json['observations'][0]
+    assert observation['local_start_seconds'] == 1 and observation['local_end_seconds'] == 3
+    assert observation['score'] == 2.5 and observation['score_kind'] == 'margin'
+    assert '/private' not in result.text and 'secret' not in result.text
+    assert '<script>' in observation['label']  # Returned as data; frontend uses textContent.
+    data['clips'][0]['processor_observations'] = [{**valid, 'score': 5, 'score_kind': 'probability'}]*30
+    path.write_text(json.dumps(data))
+    observations = app.test_client().get(f'/api/sessions/{ID}/clips/{CLIP}/study').json['observations']
+    assert len(observations) == 20 and all('score' not in o for o in observations)
+    data['clips'][0]['processor_observations'] = 'not a list'
+    path.write_text(json.dumps(data))
+    assert app.test_client().get(f'/api/sessions/{ID}/clips/{CLIP}/study').json['observations'] == []
+
+
+def test_versioned_media_cannot_silently_change_under_study(setup):
+    app, root, data = setup
+    client = app.test_client()
+    url = f'/media/{ID}/Clips/clip-001.mp4?v={data["published_at"]}'
+    assert client.get(url).status_code == 200
+    data['published_at'] += 10
+    (root/'metadata/sessions'/f'{ID}.json').write_text(json.dumps(data))
+    assert client.get(url).status_code == 409
+    assert client.get(url+'&download=1').status_code == 409
+    assert client.get(f'/media/{ID}/Clips/clip-001.mp4?v={data["published_at"]}').status_code == 200
+    assert client.get(f'/media/{ID}/Clips/clip-001.mp4').status_code == 200
