@@ -41,7 +41,7 @@ def ui_server(tmp_path_factory):
     app.config['TESTING'] = True
     from app import create_app
     app = create_app({'TESTING':True,'LIBRARY_ROOT':str(root),'DATA_ROOT':app.config['DATA_ROOT'],
-                      'LIBRARY_SMB_URL':'smb://test/library'})
+                      'LIBRARY_SMB_URL':'smb://test/library','COACH_WORKER_TOKEN':'ui-fixture-only'})
     server = make_server('127.0.0.1', 0, app, threaded=True)
     worker = threading.Thread(target=server.serve_forever, daemon=True)
     worker.start()
@@ -291,4 +291,30 @@ def test_clip_study_frame_package_is_local_and_resets(browser, ui_server, tmp_pa
     expect(page.locator('#study-export')).to_have_text('Download frame package')
     page.keyboard.press('Escape')
     expect(dialog).not_to_be_visible()
+    page.close()
+
+
+def test_coaching_selection_queues_export_without_ai_upload(browser, ui_server):
+    page=browser.new_page()
+    page.goto(ui_server+f'/review/{ID}?clip={CLIP}')
+    page.get_by_label('More video actions',exact=True).click()
+    page.get_by_role('button',name='Study clip',exact=True).click()
+    expect(page.locator('#study-play')).to_be_enabled()
+    expect(page.locator('#coach-prepare')).to_be_enabled()
+    page.get_by_role('textbox',name='What would you like help with?',exact=True).fill('Check my balance')
+    zoom=page.get_by_role('slider',name='Video zoom',exact=True)
+    zoom.press('Home')
+    for _ in range(4):zoom.press('ArrowRight')
+    with page.expect_response(lambda r:r.url.endswith('/api/coaching/exports') and r.request.method=='POST') as event:
+        page.get_by_role('button',name='Prepare coaching clip',exact=True).click()
+    response=event.value
+    assert response.status==201
+    job=response.json()
+    assert job['role']=='render' and job['state']=='queued'
+    spec=job['body']
+    assert spec['question']=='Check my balance' and spec['speed']==.5
+    assert 0 < min(spec['crop'][2:]) < 1
+    expect(page.locator('#coach-ask')).to_be_disabled()
+    expect(page.locator('#coach-status')).to_contain_text('queued',ignore_case=True)
+    page.get_by_role('button',name='← Back to review',exact=True).click()
     page.close()

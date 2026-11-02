@@ -43,6 +43,7 @@ def register_coaching(app,library,session):
             clip=next(c for c in data['clips'] if c['id']==b.get('clip_id'))
             spec=recipe(b,data,clip)
             return jsonify(queue.create('render',spec,b.get('request_id'))),201
+        except QueueConflict:raise
         except (ValueError,TypeError,KeyError,StopIteration) as e:abort(400,str(e) or 'Invalid selection')
 
     @routes.post('/api/coaching/requests')

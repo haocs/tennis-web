@@ -121,3 +121,9 @@ def test_worker_identity_persists_across_restart_and_roles_are_distinct(tmp_path
     cfg={'local_state':str(tmp_path)}
     a=Worker(cfg,'ai');again=Worker(cfg,'ai');render=Worker(cfg,'render')
     assert a.identity==again.identity and a.identity!=render.identity
+
+
+def test_export_request_identity_conflict_is_409(setup):
+    app,root,data=enabled(setup);c=app.test_client();b=selection(data)
+    assert post(c,'exports',b).status_code==201
+    assert post(c,'exports',dict(b,start=1.5)).status_code==409

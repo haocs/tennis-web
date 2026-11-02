@@ -1,0 +1,13 @@
+# Optional: docker compose -f compose.yaml -f compose.coaching.yaml up -d
+services:
+  courtside:
+    environment:
+      TENNIS_COACH_WORKER_TOKEN: ${TENNIS_COACH_WORKER_TOKEN:?Set a private coaching worker token}
+      TENNIS_COACH_MEDIA_ROOT: /coaching-media
+    volumes:
+      - type: bind
+        source: ${TENNIS_COACH_MEDIA_PATH:?Set the shared coaching artifact folder}
+        target: /coaching-media
+        read_only: true
+        bind:
+          create_host_path: false
