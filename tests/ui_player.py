@@ -248,6 +248,8 @@ def test_clip_study_menu_precision_and_return(browser, ui_server):
     assert page.locator('#study-video').evaluate('v => v.loop')
     dialog.get_by_role('button', name='← Back to review', exact=True).click()
     expect(dialog).not_to_be_visible()
+    # The native dialog close event runs after its open attribute is removed.
+    page.wait_for_function("() => Math.abs(document.querySelector('#player').currentTime - .5) <= .08")
     assert page.locator('#player').evaluate('v => v.currentTime') == pytest.approx(.5, abs=.08)
     assert page.locator('#player').evaluate('v => v.paused')
     expect(page.locator('.player-more summary')).to_be_focused()
