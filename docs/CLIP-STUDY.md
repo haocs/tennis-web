@@ -23,8 +23,9 @@ with bounded drag-to-pan, touch pinch and Reset view; zoom does not alter media.
 
 The watch page retains its existing markup, player.js and watch styles. One
 `ClipStudy.updateEntry` call in the current-video update function supplies the
-menu element, session, selected clip, player and versioned media URL. The study
-module creates/hides its own menu entry and owns all modal behavior. This keeps
+button element, session, selected clip, player and versioned media URL. The watch
+page places the magnifier action beside Like; the study module shows it for clips,
+returns focus to it on close, and owns all modal behavior. This keeps
 layout work in the normal player independent of the study view.
 
 ## Processor context contract
