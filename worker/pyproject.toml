@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "tennis-coach-worker"
+version = "0.1.0"
+requires-python = ">=3.11"
+description = "Independent media-export and ChatGPT coaching workers"
+[project.scripts]
+tennis-coach-worker = "tennis_coach.worker:main"
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["tennis_coach*"]

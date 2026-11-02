@@ -48,6 +48,13 @@ jobs:
           TENNIS_APP_GID: '100'
           TENNIS_DATA_PATH: /tmp/tennis-ci-state
         run: docker compose -f compose.yaml -f compose.synology.yaml config --quiet
+      - name: Validate optional coaching storage override
+        env:
+          TENNIS_IMAGE: courtside-ci:test
+          TENNIS_LIBRARY_PATH: /tmp/tennis-ci-library
+          TENNIS_COACH_MEDIA_PATH: /tmp/tennis-coaching-media
+          TENNIS_COACH_WORKER_TOKEN: ci-only
+        run: docker compose -f compose.yaml -f compose.coaching.yaml config --quiet
       - name: Build runtime image
         run: docker build --tag courtside-ci:test .
       - name: Verify non-root startup, read-only media, and persistent state
