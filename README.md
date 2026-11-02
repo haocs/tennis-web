@@ -145,7 +145,9 @@ Recording reviews and liked cards use the same resolved saved court as their pra
 
 Click or keyboard-activate an entire on-court moment to load and play that clip. Like the current clip with the heart beside the player. The compact download action follows the loaded video; the three-dot menu contains the NAS address.
 
-Previous, next, autoplay, play/pause, seeking, mute, speed, and fullscreen belong to the video player. Fullscreen includes the HTML controls. On browsers such as iPhone Safari that do not offer element fullscreen, the fullscreen button expands the player to the available viewport instead of switching to the system video player. Browser chrome can remain visible in this fallback. Exit using the fullscreen button or Escape; rotate the device for landscape. Keyboard Space/K toggles playback and Left/Right seeks when the player region has focus.
+Previous, next, play/pause, autoplay, and a thin seek bar overlay the picture and hide while playing. Move the pointer or tap the picture to reveal them; paused playback and keyboard navigation keep controls visible. Chapters are available from a collapsed menu below the player. This normal player has no audio or speed controls; speed adjustments belong to the future deep-dive page.
+
+Desktop and supported tablet fullscreen include the overlay. On iPhone, the fullscreen button opens the real native video player rather than enlarging a page element. Apple supplies the fullscreen controls there, so site-specific previous/next controls remain available in inline playback. No fake viewport fullscreen is used. Keyboard Space/K toggles playback and Left/Right seeks when the player region has focus.
 
 Run the application suite with `python -m pytest -q`. For the isolated desktop/mobile browser suite:
 
@@ -155,4 +157,4 @@ python -m playwright install chromium webkit
 python -m pytest tests/ui_player.py -q
 ```
 
-The tiny MP4s in `tests/fixtures` are generated solid-color test videos, not user footage. Browser tests use a temporary synthetic library. They cover court names, clickable rows, current-video downloads, fullscreen navigation, autoplay, and the viewport fullscreen fallback. Physical iPhone verification remains useful for platform-specific browser chrome and touch behavior.
+The tiny MP4s in `tests/fixtures` are generated solid-color test videos, not user footage. Browser tests use a temporary synthetic library. They cover court names, clickable rows, current-video downloads, fullscreen navigation, autoplay, overlay geometry/auto-hide, and native iPhone fullscreen API routing. CI cannot display or verify the actual iPhone system player, so physical-device fullscreen/touch testing remains a limitation.
