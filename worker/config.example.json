@@ -1,0 +1,9 @@
+{
+  "server_url": "http://localhost:8873",
+  "worker_token": "set-the-same-private-value-as-TENNIS_COACH_WORKER_TOKEN",
+  "library_media_root": "/mounted/library/media",
+  "artifact_root": "/mounted/coaching-media",
+  "local_state": "~/.local/state/tennis-coach",
+  "ffmpeg": "/path/to/ffmpeg",
+  "codex": "/path/to/codex"
+}

@@ -13,3 +13,7 @@ __pycache__/
 library/
 data/
 backups/
+
+# Worker packaging products (not runtime configuration)
+worker/build/
+worker/*.egg-info/

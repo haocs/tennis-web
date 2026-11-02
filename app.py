@@ -17,6 +17,7 @@ from storage import Library, smb_root, nas_media_address
 from practices import recording_time, group_recordings
 from state import State, Conflict
 from clip_study import public_clip_study, number as finite_number
+from coaching_routes import register_coaching
 from courts import COURT_ID, court_list, validate_court, enrich_groups
 
 
@@ -29,7 +30,9 @@ def create_app(config=None):
                       PROCESSING_ROOM_URL=os.environ.get("TENNIS_PROCESSING_ROOM_URL", "/processing"),
                       SESSION_GAP_MINUTES=os.environ.get("TENNIS_SESSION_GAP_MINUTES", "30"),
                       LIBRARY_SMB_URL=os.environ.get("TENNIS_LIBRARY_SMB_URL"),
-                      MEDIA_SMB_URL=os.environ.get("TENNIS_MEDIA_SMB_URL"), MAX_CONTENT_LENGTH=8192)
+                      MEDIA_SMB_URL=os.environ.get("TENNIS_MEDIA_SMB_URL"),
+                      COACH_MEDIA_ROOT=os.environ.get("TENNIS_COACH_MEDIA_ROOT"),
+                      COACH_WORKER_TOKEN=os.environ.get("TENNIS_COACH_WORKER_TOKEN", ""), MAX_CONTENT_LENGTH=32768)
     if config:
         app.config.update(config)
     processing_url = app.config['PROCESSING_ROOM_URL']
@@ -56,6 +59,10 @@ def create_app(config=None):
             abort(404, "Session not found")
         except (OSError, ValueError, TypeError):
             abort(503, "This session's metadata is unavailable")
+
+    if not app.config["COACH_MEDIA_ROOT"]:
+        app.config["COACH_MEDIA_ROOT"] = str(Path(app.config["DATA_ROOT"]) / "coaching-media")
+    register_coaching(app, library, session)
 
     def require_publication(data, parameter):
         expected = request.args.get(parameter)

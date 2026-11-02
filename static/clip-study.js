@@ -56,6 +56,7 @@
   function close() { if (dialog.open) dialog.close(); }
   dialog.addEventListener('close', () => {
     const old = context; if (!old) return;
+    window.Coach?.close();
     context = null; generation++;
     old.fetchController.abort(); old.captureController?.abort();
     video.pause(); video.removeAttribute('src'); video.load();
@@ -137,6 +138,14 @@
     dt.textContent=label;dd.textContent=value;row.append(dt,dd);return row;
   }
   window.ClipStudy = {
+  coachingSelection() {
+    if(!ready())return null;
+    const sw=stage.clientWidth,sh=stage.clientHeight,w=video.videoWidth,h=video.videoHeight;
+    const fit=Math.min(sw/w,sh/h)*context.zoom;
+    const x0=C.clamp(((-sw/2-context.x)/fit+w/2)/w,0,1),y0=C.clamp(((-sh/2-context.y)/fit+h/2)/h,0,1);
+    const x1=C.clamp(((sw/2-context.x)/fit+w/2)/w,0,1),y1=C.clamp(((sh/2-context.y)/fit+h/2)/h,0,1);
+    return {speed:video.playbackRate,crop:[x0,y0,x1-x0,y1-y0]};
+  },
   updateEntry(options) {
     const {menu,session,clip}=options;
     if(!menu)return;
@@ -174,6 +183,7 @@
     dialog.scrollTop=0;document.querySelector('.study-sidebar').scrollTop=0;
     video.src=url;video.load();setControls();resetView();
     loadContext(context);
+    window.Coach?.open(session,clip);
   }};
   // Metadata and export adapters are kept separate from precision playback.
   async function loadContext(owner) {

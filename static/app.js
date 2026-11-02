@@ -62,6 +62,7 @@ function review(s){model.session=s;nav();const query=new URLSearchParams(locatio
 function updatePlayerDownload(){
  const s=model.session, clip=model.mode==='clip'?s.clips.find(c=>c.id===model.current):null;
  ClipStudy.updateEntry({menu:$('.player-more-list'),session:s,clip,player:$('#player'),url:clip?mediaURL(s,clip.file):null});
+  window.Coach?.watch({session:s,clip,player:$('#player')});
  const link=$('#player-download');link.href=mediaURL(s,clip?clip.file:s.video.file)+'&download=1';
  const label=clip?'Download clip '+String(clip.index).padStart(2,'0'):'Download full practice';
  link.setAttribute('aria-label',label);link.title=label;
