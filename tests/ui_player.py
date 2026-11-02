@@ -128,8 +128,9 @@ def test_mobile_overlay_layout_and_autoplay(browser, ui_server):
       v.currentTime=v.duration-0.15;await v.play();
     }''')
     expect(page.locator('#player')).to_have_attribute('src',re.compile('clip-003.mp4'),timeout=10000)
-    page.get_by_role('button',name='Previous clip',exact=True).click()
     page.get_by_label('Autoplay',exact=True).uncheck()
+    page.get_by_role('button',name='Previous clip',exact=True).click()
+    expect(page.locator('#player')).to_have_attribute('src',re.compile('clip-002.mp4'))
     page.locator('#player').evaluate('''async v => {
       if(v.readyState<1)await new Promise(resolve=>v.addEventListener('loadedmetadata',resolve,{once:true}));
       v.currentTime=v.duration-0.15;await v.play();
@@ -208,4 +209,16 @@ def test_mobile_tap_reveals_overlay_without_pausing(browser, ui_server):
     page.locator('#player').tap(position={'x':20,'y':60})
     expect(page.locator('#video-stage')).not_to_have_class(re.compile('controls-hidden'))
     assert not page.locator('#player').evaluate('(v)=>v.paused')
+    page.close()
+
+
+def test_progress_bar_has_a_touch_hit_area_and_seeks(browser, ui_server):
+    page = browser.new_page(viewport={'width':390,'height':844},has_touch=True)
+    page.goto(ui_server+f'/review/{ID}')
+    seek=page.locator('#video-seek')
+    expect(seek).to_be_enabled()
+    box=seek.bounding_box()
+    assert box['height'] >= 20
+    seek.tap(position={'x':box['width']*0.7,'y':box['height']/2})
+    assert page.locator('#player').evaluate('(v)=>v.currentTime') > 3
     page.close()
