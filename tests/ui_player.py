@@ -100,25 +100,26 @@ def test_review_rows_actions_and_courts(browser, ui_server, tmp_path):
     page.close()
 
 
-def test_mobile_fullscreen_navigation_and_fallback(browser, ui_server):
+def test_mobile_overlay_layout_and_autoplay(browser, ui_server):
     page = browser.new_page(viewport={'width':390,'height':844},has_touch=True)
     page.goto(ui_server+f'/review/{ID}?clip={CLIP}')
     expect(page.locator('#video-seek')).to_be_enabled()
     for width in [320,390,844]:
         page.set_viewport_size({'width':width,'height':844 if width<844 else 390})
         assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
-        expect(page.get_by_role('button',name='Next clip',exact=True)).to_be_visible()
+        stage = page.locator('#video-stage').bounding_box()
+        video = page.locator('#player').bounding_box()
+        assert abs(stage['height']-video['height']) < 1
+        for selector in ['#previous','#next','#video-play','#video-seek','#video-fullscreen']:
+            box = page.locator(selector).bounding_box()
+            assert box['y'] >= stage['y'] and box['y']+box['height'] <= stage['y']+stage['height']+1
+        assert page.locator('#video-mute,#video-rate,select[aria-label="Playback speed"]').count() == 0
+        expect(page.locator('#player-download svg')).to_be_visible()
+        expect(page.locator('#player-download .download-text')).to_have_text('Download')
         if width == 390 and (folder := os.environ.get('TENNIS_UI_SCREENSHOT_DIR')):
             Path(folder).mkdir(parents=True, exist_ok=True)
             page.screenshot(path=str(Path(folder)/f'mobile-{browser.browser_type.name}.png'),full_page=True)
-    # Deterministically exercise iPhone's lack of element fullscreen.
-    page.evaluate('''() => {
-      const stage=document.querySelector('#video-stage');
-      stage.requestFullscreen=undefined;stage.webkitRequestFullscreen=undefined;
-    }''')
-    page.get_by_role('button',name='Enter fullscreen',exact=True).click()
-    expect(page.locator('#video-stage')).to_have_class(re.compile('viewport-fullscreen'))
-    expect(page.locator('#video-stage')).to_have_attribute('aria-modal','true')
+            page.locator('.player-shell').screenshot(path=str(Path(folder)/f'player-mobile-{browser.browser_type.name}.png'))
     page.get_by_role('button',name='Next clip',exact=True).click()
     expect(page.locator('#player')).to_have_attribute('src',re.compile('clip-002.mp4'))
     page.get_by_label('Autoplay',exact=True).check()
@@ -128,7 +129,6 @@ def test_mobile_fullscreen_navigation_and_fallback(browser, ui_server):
     }''')
     expect(page.locator('#player')).to_have_attribute('src',re.compile('clip-003.mp4'),timeout=10000)
     page.get_by_role('button',name='Previous clip',exact=True).click()
-    expect(page.locator('#player')).to_have_attribute('src',re.compile('clip-002.mp4'))
     page.get_by_label('Autoplay',exact=True).uncheck()
     page.locator('#player').evaluate('''async v => {
       if(v.readyState<1)await new Promise(resolve=>v.addEventListener('loadedmetadata',resolve,{once:true}));
@@ -137,13 +137,50 @@ def test_mobile_fullscreen_navigation_and_fallback(browser, ui_server):
     expect(page.get_by_role('button',name='Play video',exact=True)).to_be_visible()
     assert page.locator('#player').evaluate('(v)=>v.ended')
     expect(page.locator('#player')).to_have_attribute('src',re.compile('clip-002.mp4'))
-    page.keyboard.press('Escape')
-    expect(page.locator('#video-stage')).not_to_have_class(re.compile('viewport-fullscreen'))
-    expect(page.get_by_role('button',name='Enter fullscreen',exact=True)).to_be_focused()
     page.close()
 
 
-def test_element_fullscreen_keeps_controls(browser, ui_server):
+def test_iphone_calls_real_native_fullscreen(browser, ui_server):
+    page = browser.new_page(viewport={'width':390,'height':844},has_touch=True)
+    page.goto(ui_server+f'/review/{ID}?clip={CLIP}')
+    expect(page.locator('#video-seek')).to_be_enabled()
+    # Browsers in CI cannot show iPhone system UI. Verify that capability
+    # detection invokes the native API, with no page-sized fullscreen substitute.
+    page.evaluate('''() => {
+      const stage=document.querySelector('#video-stage'),v=document.querySelector('#player');
+      stage.requestFullscreen=undefined;stage.webkitRequestFullscreen=undefined;
+      window.nativeFullscreenEntries=0;
+      Object.defineProperty(v,'webkitDisplayingFullscreen',{value:false,writable:true,configurable:true});
+      v.webkitEnterFullscreen=()=>{window.nativeFullscreenEntries++;v.webkitDisplayingFullscreen=true;v.dispatchEvent(new Event('webkitbeginfullscreen'));};
+      v.webkitExitFullscreen=()=>{v.webkitDisplayingFullscreen=false;v.dispatchEvent(new Event('webkitendfullscreen'));};
+    }''')
+    page.get_by_role('button',name='Enter fullscreen',exact=True).click()
+    assert page.evaluate('window.nativeFullscreenEntries') == 1
+    assert page.locator('.viewport-fullscreen').count() == 0
+    assert page.locator('#video-stage').evaluate('(e)=>getComputedStyle(e).position') == 'relative'
+    page.get_by_role('button',name='Exit fullscreen',exact=True).click()
+    expect(page.get_by_role('button',name='Enter fullscreen',exact=True)).to_be_visible()
+    page.close()
+
+
+def test_overlay_hides_and_reappears_without_layout_shift(browser, ui_server):
+    page = browser.new_page()
+    page.goto(ui_server+f'/review/{ID}')
+    expect(page.locator('#video-seek')).to_be_enabled()
+    before = page.locator('#video-stage').evaluate('(e)=>[e.offsetWidth,e.offsetHeight,e.offsetTop]')
+    page.get_by_role('button',name='Play video',exact=True).click()
+    expect(page.locator('#video-stage')).to_have_class(re.compile('controls-hidden'),timeout=4000)
+    expect(page.locator('.video-overlay')).to_have_css('opacity','0')
+    assert page.locator('#video-stage').evaluate('(e)=>[e.offsetWidth,e.offsetHeight,e.offsetTop]') == before
+    # Moving over the picture reveals the overlay; pause keeps it visible.
+    page.locator('#player').hover()
+    expect(page.locator('#video-stage')).not_to_have_class(re.compile('controls-hidden'))
+    page.get_by_role('button',name='Pause video',exact=True).click()
+    expect(page.locator('#video-stage')).not_to_have_class(re.compile('controls-hidden'))
+    page.close()
+
+
+def test_element_fullscreen_keeps_overlay_controls(browser, ui_server):
     page = browser.new_page()
     page.goto(ui_server+f'/review/{ID}?clip={CLIP}')
     page.get_by_role('button',name='Enter fullscreen',exact=True).click()
@@ -153,9 +190,22 @@ def test_element_fullscreen_keeps_controls(browser, ui_server):
     expect(page.locator('#video-context')).to_be_visible()
     expect(page.locator('#video-stage #previous')).to_be_visible()
     expect(page.locator('#video-stage #next')).to_be_visible()
-    expect(page.locator('#video-stage #autoplay-next')).to_be_visible()
     page.get_by_role('button',name='Next clip',exact=True).click()
     expect(page.locator('#player')).to_have_attribute('src',re.compile('clip-002.mp4'))
     page.get_by_role('button',name='Exit fullscreen',exact=True).click()
     expect(page.get_by_role('button',name='Enter fullscreen',exact=True)).to_be_visible()
+    page.close()
+
+
+def test_mobile_tap_reveals_overlay_without_pausing(browser, ui_server):
+    page = browser.new_page(viewport={'width':390,'height':844},has_touch=True)
+    page.goto(ui_server+f'/review/{ID}')
+    expect(page.locator('#video-seek')).to_be_enabled()
+    page.get_by_role('button',name='Play video',exact=True).click()
+    page.locator('#player').tap(position={'x':20,'y':60})
+    expect(page.locator('#video-stage')).to_have_class(re.compile('controls-hidden'))
+    assert not page.locator('#player').evaluate('(v)=>v.paused')
+    page.locator('#player').tap(position={'x':20,'y':60})
+    expect(page.locator('#video-stage')).not_to_have_class(re.compile('controls-hidden'))
+    assert not page.locator('#player').evaluate('(v)=>v.paused')
     page.close()
