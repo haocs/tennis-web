@@ -102,3 +102,12 @@ Repeat installation for `--role ai`. Omit `--developer-dir` when the system-sele
 Apple toolchain and SDK already match. Build the app before starting services; stop
 services before rebuilding an installed launcher. Local ad-hoc signing identifies
 this build on the operator's Mac; it does not claim Apple notarization.
+
+Synology custom ACLs can allow SMB access while Linux mode bits prevent a read-only
+container from reading the same files. After the operator approves shared read
+access for the **dedicated coaching-artifact folder**, set `readable_exports: true`
+in private worker configuration. The media worker then sets its new task/attempt
+directories to 0755 and files to 0644, publishing the manifest last. It does not
+change originals, the published library, application state or unrelated paths.
+This option defaults off; configure the artifact root's own read/traverse access
+explicitly at deployment.

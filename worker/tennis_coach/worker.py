@@ -12,6 +12,7 @@ import sys
 import threading
 import time
 import urllib.request
+import urllib.error
 import uuid
 
 
@@ -64,8 +65,12 @@ def render(config,job,local):
     fence=hashlib.sha256(job['token'].encode()).hexdigest()[:24]
     dest=inside(config['artifact_root'],job['id']+'/'+fence)
     dest.mkdir(parents=True,exist_ok=True)
-    for name in ['excerpt.mp4','recipe.json','prompt.txt']+[f['file'] for f in frames]:
+    if config.get('readable_exports'):
+        dest.parent.chmod(0o755);dest.chmod(0o755)
+    # Publish the small completion manifest last, after all media are available.
+    for name in ['excerpt.mp4','prompt.txt']+[f['file'] for f in frames]+['recipe.json']:
         shutil.copy2(local/name,dest/name)
+        if config.get('readable_exports'):(dest/name).chmod(0o644)
     return info
 
 
@@ -119,7 +124,13 @@ class Worker:
 
     def api(self,path,body):
         req=urllib.request.Request(self.config['server_url'].rstrip('/')+'/api/coaching/'+path,data=json.dumps(body).encode(),headers={'Content-Type':'application/json','X-Tennis-Request':'1','Authorization':'Bearer '+self.config['worker_token']})
-        with urllib.request.urlopen(req,timeout=20) as r:return json.load(r)
+        try:
+            with urllib.request.urlopen(req,timeout=20) as r:return json.load(r)
+        except urllib.error.HTTPError as error:
+            try:detail=json.loads(error.read(8192)).get('error','Request rejected')
+            except (ValueError,AttributeError):detail='Request rejected'
+            detail=str(detail).replace(self.config['worker_token'],'[redacted]')[:500]
+            raise ValueError(f'Coaching server HTTP {error.code}: {detail}') from None
 
     def state(self,**value):
         atomic(self.root/'state.json',dict(worker_id=self.identity,role=self.role,updated=time.time(),**value))
