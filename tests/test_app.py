@@ -226,6 +226,48 @@ def test_saved_court_gps_matching_and_renaming_preserves_video_names(setup):
     assert restored.test_client().get('/api/courts').json['courts'][0]['name']=='Evening courts'
 
 
+def test_recording_and_liked_data_share_practice_court_resolution(setup):
+    app, root, data = setup
+    data['source']['location'] = {'latitude':12, 'longitude':34}
+    (root/'metadata/sessions'/f'{ID}.json').write_text(json.dumps(data))
+    other = copy.deepcopy(data)
+    other['id'] = 'c'*64
+    other['source']['sha256'] = other['id']
+    other['source']['recorded_at'] = '2026-10-24T17:01:00-0700'
+    other['source']['location'] = None
+    (root/'metadata/sessions'/f"{other['id']}.json").write_text(json.dumps(other))
+    client = app.test_client()
+    court = court_create(client, name='Park <West>').json
+    # A sibling without GPS must still use the same resolved practice venue.
+    collection = client.get('/api/sessions').json
+    assert collection['practice_groups'][0]['court']['id'] == court['id']
+    for recording in collection['sessions']:
+        single = client.get('/api/sessions/'+recording['id']).json
+        assert single['court'] == recording['court'] == court
+        assert single['court_status'] == 'gps_match'
+        assert single['source']['location'] == recording['source']['location']
+    put(client, f'/api/sessions/{ID}/likes/{CLIP}', {'liked':True,'version':0})
+    assert client.get('/api/sessions').json['sessions'][0]['court']['name'] == 'Park <West>'
+    # A manual choice must win over a GPS match on every page.
+    manual = court_create(client, name='Indoor court', latitude=None, longitude=None).json
+    group = collection['practice_groups'][0]
+    assert put(client, f'/api/practices/{group["id"]}/court',
+               {'court_id':manual['id'], 'versions':group['court_versions']}).status_code == 200
+    assert client.get('/api/sessions/'+other['id']).json['court']['name'] == 'Indoor court'
+
+
+def test_recording_court_does_not_guess_when_gps_is_ambiguous(setup):
+    app, root, data = setup
+    data['source']['location'] = {'latitude':12, 'longitude':34}
+    (root/'metadata/sessions'/f'{ID}.json').write_text(json.dumps(data))
+    client = app.test_client()
+    court_create(client, name='One')
+    court_create(client, name='Two')
+    single = client.get('/api/sessions/'+ID).json
+    assert single['court'] is None and single['court_status'] == 'ambiguous'
+    assert single['source']['location'] == data['source']['location']
+
+
 def test_nearby_multiple_courts_need_confirmation_and_manual_choice_wins(setup):
     app,root,data=setup;c=app.test_client()
     data['source']['location']={'latitude':12,'longitude':34}
