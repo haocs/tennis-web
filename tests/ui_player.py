@@ -115,7 +115,11 @@ def test_mobile_overlay_layout_and_autoplay(browser, ui_server):
             assert box['y'] >= stage['y'] and box['y']+box['height'] <= stage['y']+stage['height']+1
         assert page.locator('#video-stage').locator('#video-mute,#video-rate,select[aria-label="Playback speed"]').count() == 0
         expect(page.locator('#player-download svg')).to_be_visible()
-        expect(page.locator('#player-download .download-text')).to_have_text('Download')
+        assert page.locator('#player-download').inner_text().strip() == ''
+        expect(page.get_by_role('button',name='Study clip',exact=True)).to_be_visible()
+        assert page.locator('#study-clip svg').count() == 1
+        assert page.locator('.player-options').evaluate("e => [...e.children].map(c=>c.id)")[:3] == ['player-like','study-clip','player-download']
+        expect(page.locator('.player-chapters summary')).to_have_text('Clips')
         if width == 390 and (folder := os.environ.get('TENNIS_UI_SCREENSHOT_DIR')):
             Path(folder).mkdir(parents=True, exist_ok=True)
             page.screenshot(path=str(Path(folder)/f'mobile-{browser.browser_type.name}.png'),full_page=True)
@@ -224,12 +228,11 @@ def test_progress_bar_has_a_touch_hit_area_and_seeks(browser, ui_server):
     page.close()
 
 
-def test_clip_study_menu_precision_and_return(browser, ui_server):
+def test_clip_study_action_precision_and_return(browser, ui_server):
     page = browser.new_page()
     page.goto(ui_server+f'/review/{ID}?clip={CLIP}')
     page.wait_for_function("() => document.querySelector('#player')?.readyState >= 2")
     page.locator('#video-seek').evaluate("el => { el.value = 0.4; el.dispatchEvent(new Event('input', {bubbles:true})); }")
-    page.get_by_label('More video actions', exact=True).click()
     page.get_by_role('button', name='Study clip', exact=True).click()
     dialog = page.get_by_role('dialog', name='Clip study · 01', exact=True)
     expect(dialog).to_be_visible()
@@ -252,7 +255,7 @@ def test_clip_study_menu_precision_and_return(browser, ui_server):
     page.wait_for_function("() => Math.abs(document.querySelector('#player').currentTime - .5) <= .08")
     assert page.locator('#player').evaluate('v => v.currentTime') == pytest.approx(.5, abs=.08)
     assert page.locator('#player').evaluate('v => v.paused')
-    expect(page.locator('.player-more summary')).to_be_focused()
+    expect(page.get_by_role('button',name='Study clip',exact=True)).to_be_focused()
     page.get_by_role('button', name='Full practice ↗', exact=True).click()
     page.get_by_label('More video actions', exact=True).click()
     expect(page.get_by_role('button', name='Study clip', exact=True)).not_to_be_visible()
@@ -265,7 +268,6 @@ def test_clip_study_frame_package_is_local_and_resets(browser, ui_server, tmp_pa
     external = []
     page.on('request', lambda req: external.append(req.url) if req.url.startswith(('http:', 'https:')) and not req.url.startswith(ui_server) else None)
     page.goto(ui_server+f'/review/{ID}?clip={CLIP}')
-    page.get_by_label('More video actions', exact=True).click()
     page.get_by_role('button', name='Study clip', exact=True).click()
     dialog = page.get_by_role('dialog', name='Clip study · 01', exact=True)
     expect(dialog.get_by_role('button', name='Sample 6 moments', exact=True)).to_be_enabled()
@@ -284,7 +286,6 @@ def test_clip_study_frame_package_is_local_and_resets(browser, ui_server, tmp_pa
         assert all(0 < t < 2 for t in times)
     assert external == []
     dialog.get_by_role('button', name='← Back to review', exact=True).click()
-    page.get_by_label('More video actions', exact=True).click()
     page.get_by_role('button', name='Study clip', exact=True).click()
     expect(page.locator('.study-frame')).to_have_count(0)
     expect(page.locator('#study-export')).to_be_disabled()
