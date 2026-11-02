@@ -108,6 +108,9 @@ def enrich_groups(groups, recordings, shared):
         name = selected['name'] if selected else 'Multiple courts' if status == 'conflict' else next(iter(legacy)) if len(legacy)==1 else 'Unknown court'
         group.update(court=selected, court_status=status, court_candidates=candidates,
                      court_name=name, time_label=rough_time(group['recorded_at_iso']))
+        # Recording reviews and liked cards use the same resolved venue as home.
+        for video in videos:
+            video.update(court=selected, court_status=status, court_name=name)
     # Count before any browser filtering, so titles stay stable during search/sort.
     labels = Counter(g['time_label'] for g in groups if g['recorded_at_iso'])
     for group in groups:

@@ -138,3 +138,21 @@ Keep the backup outside the application volume too. Back up the published librar
 Tests cover ranged video serving, path/symlink isolation, optimistic concurrency, simultaneous writers, metadata persistence, original-review integration, and redacted/stale-aware status. Browser verification also covers sorting, embedded playback, chapter seeking, navigation, and responsive layouts.
 
 Cut-quality feedback and algorithm improvement remain future work. See the project todo document and algorithm roadmap.
+
+## Player controls and browser regression tests
+
+Recording reviews and liked cards use the same resolved saved court as their practice on the library page. A manual practice choice wins over GPS; ambiguous matches keep the existing location fallback.
+
+Click or keyboard-activate an entire on-court moment to load and play that clip. Like the current clip with the heart beside the player. The compact download action follows the loaded video; the three-dot menu contains the NAS address.
+
+Previous, next, autoplay, play/pause, seeking, mute, speed, and fullscreen belong to the video player. Fullscreen includes the HTML controls. On browsers such as iPhone Safari that do not offer element fullscreen, the fullscreen button expands the player to the available viewport instead of switching to the system video player. Browser chrome can remain visible in this fallback. Exit using the fullscreen button or Escape; rotate the device for landscape. Keyboard Space/K toggles playback and Left/Right seeks when the player region has focus.
+
+Run the application suite with `python -m pytest -q`. For the isolated desktop/mobile browser suite:
+
+```sh
+python -m pip install -r requirements-ui.txt
+python -m playwright install chromium webkit
+python -m pytest tests/ui_player.py -q
+```
+
+The tiny MP4s in `tests/fixtures` are generated solid-color test videos, not user footage. Browser tests use a temporary synthetic library. They cover court names, clickable rows, current-video downloads, fullscreen navigation, autoplay, and the viewport fullscreen fallback. Physical iPhone verification remains useful for platform-specific browser chrome and touch behavior.

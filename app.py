@@ -124,7 +124,18 @@ def create_app(config=None):
 
     @app.get('/api/sessions/<identity>')
     def get_session(identity):
-        return jsonify(decorate(session(identity)))
+        data = session(identity)
+        shared = state.all()
+        try:
+            recordings, _ = library.sessions()
+        except OSError:
+            abort(503, 'The recording library is unavailable')
+        # Resolve the entire practice, including assignments/GPS on its siblings.
+        recordings = [decorate(s, shared) for s in recordings if s['id'] != identity]
+        result = decorate(data, shared)
+        recordings.append(result)
+        enrich_groups(group_recordings(recordings, gap_minutes), recordings, shared)
+        return jsonify(result)
 
     @app.get('/api/courts')
     def get_courts():
