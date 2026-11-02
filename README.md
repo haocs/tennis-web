@@ -143,9 +143,9 @@ Cut-quality feedback and algorithm improvement remain future work. See the proje
 
 Recording reviews and liked cards use the same resolved saved court as their practice on the library page. A manual practice choice wins over GPS; ambiguous matches keep the existing location fallback.
 
-Click or keyboard-activate an entire on-court moment to load and play that clip. Like the current clip with the heart beside the player. The compact download action follows the loaded video; the three-dot menu contains the NAS address.
+Click or keyboard-activate an entire on-court moment to load and play that clip. Like the current clip with the heart beside the player. The icon-only download action follows the loaded video; the three-dot menu contains the NAS address.
 
-Previous, next, play/pause, autoplay, and a thin seek bar overlay the picture and hide while playing. Move the pointer or tap the picture to reveal them; paused playback and keyboard navigation keep controls visible. Chapters are available from a collapsed menu below the player. This normal player has no audio or speed controls; speed adjustments belong to the future deep-dive page.
+Previous, next, play/pause, autoplay, and a thin seek bar overlay the picture and hide while playing. Move the pointer or tap the picture to reveal them; paused playback and keyboard navigation keep controls visible. Clips are available from a collapsed menu below the player. This normal player has no audio or speed controls; speed adjustments belong to the future deep-dive page.
 
 Desktop and supported tablet fullscreen include the overlay. On iPhone, the fullscreen button opens the real native video player rather than enlarging a page element. Apple supplies the fullscreen controls there, so site-specific previous/next controls remain available in inline playback. No fake viewport fullscreen is used. Keyboard Space/K toggles playback and Left/Right seeks when the player region has focus.
 
@@ -161,7 +161,7 @@ The tiny MP4s in `tests/fixtures` are generated solid-color test videos, not use
 
 ## Clip study
 
-Select an individual clip, then choose **More video actions → Study clip** for focused slow playback,
+Select an individual clip, then use the magnifier **Study clip** action beside Like for focused slow playback,
 precise time seeking, looping and zoom/pan. Published processor observations appear
 when available. Prepare a clip or small selected-frame package with a coaching
 prompt for manual use in your AI chat. No footage uploads automatically.

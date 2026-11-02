@@ -147,20 +147,16 @@
     return {speed:video.playbackRate,crop:[x0,y0,x1-x0,y1-y0]};
   },
   updateEntry(options) {
-    const {menu,session,clip}=options;
-    if(!menu)return;
-    let button=menu.querySelector('#study-clip');
-    if(!button){
-      button=document.createElement('button');button.type='button';button.id='study-clip';button.textContent='Study clip';
+    const {button,clip}=options;
+    if(!button)return;
+    if(!button.studyBound){
       button.addEventListener('click',()=>{
         const current=button.studyOptions;if(!current?.clip)return;
-        const more=menu.closest('.player-more');if(more)more.open=false;
-        window.ClipStudy.open({...current,returnFocus:more?.querySelector('summary')||button});
+        window.ClipStudy.open({...current,returnFocus:button});
       });
-      menu.prepend(button);
+      button.studyBound=true;
     }
     button.studyOptions=options;button.classList.toggle('hidden',!clip);
-    menu.closest('.player-more')?.classList.toggle('hidden',!clip&&!session.video.nas_url);
   },
   open(options) {
     if (context || !options.clip || !options.player) return;

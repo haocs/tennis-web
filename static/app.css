@@ -80,3 +80,6 @@ button.clip-row:hover{background:#eef3e0}button.clip-row:focus-visible{outline:3
  .player-action{min-width:36px;min-height:40px;padding:8px;gap:6px}.player-more summary{padding:7px}
  button.clip-row{grid-template-columns:30px minmax(0,1fr) 44px;gap:10px;padding:15px 12px}
 }
+
+#player-download,#study-clip{width:40px;height:40px;padding:10px;flex-shrink:0}
+@media(max-width:650px){#player-download,#study-clip{width:44px;height:44px;min-width:44px;min-height:44px;padding:12px}}
