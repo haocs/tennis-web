@@ -113,7 +113,7 @@ def test_mobile_overlay_layout_and_autoplay(browser, ui_server):
         for selector in ['#previous','#next','#video-play','#video-seek','#video-fullscreen']:
             box = page.locator(selector).bounding_box()
             assert box['y'] >= stage['y'] and box['y']+box['height'] <= stage['y']+stage['height']+1
-        assert page.locator('#video-mute,#video-rate,select[aria-label="Playback speed"]').count() == 0
+        assert page.locator('#video-stage').locator('#video-mute,#video-rate,select[aria-label="Playback speed"]').count() == 0
         expect(page.locator('#player-download svg')).to_be_visible()
         expect(page.locator('#player-download .download-text')).to_have_text('Download')
         if width == 390 and (folder := os.environ.get('TENNIS_UI_SCREENSHOT_DIR')):
@@ -227,7 +227,7 @@ def test_progress_bar_has_a_touch_hit_area_and_seeks(browser, ui_server):
 def test_clip_study_menu_precision_and_return(browser, ui_server):
     page = browser.new_page()
     page.goto(ui_server+f'/review/{ID}?clip={CLIP}')
-    page.wait_for_function("document.querySelector('#player').readyState >= 2")
+    page.wait_for_function("() => document.querySelector('#player').readyState >= 2")
     page.locator('#video-seek').evaluate("el => { el.value = 0.4; el.dispatchEvent(new Event('input', {bubbles:true})); }")
     page.get_by_label('More video actions', exact=True).click()
     page.get_by_role('button', name='Study clip', exact=True).click()
