@@ -113,7 +113,7 @@ def test_mobile_overlay_layout_and_autoplay(browser, ui_server):
         for selector in ['#previous','#next','#video-play','#video-seek','#video-fullscreen']:
             box = page.locator(selector).bounding_box()
             assert box['y'] >= stage['y'] and box['y']+box['height'] <= stage['y']+stage['height']+1
-        assert page.locator('#video-mute,#video-rate,select[aria-label="Playback speed"]').count() == 0
+        assert page.locator('#video-stage').locator('#video-mute,#video-rate,select[aria-label="Playback speed"]').count() == 0
         expect(page.locator('#player-download svg')).to_be_visible()
         expect(page.locator('#player-download .download-text')).to_have_text('Download')
         if width == 390 and (folder := os.environ.get('TENNIS_UI_SCREENSHOT_DIR')):
@@ -221,4 +221,72 @@ def test_progress_bar_has_a_touch_hit_area_and_seeks(browser, ui_server):
     assert box['height'] >= 20
     seek.tap(position={'x':box['width']*0.7,'y':box['height']/2})
     assert page.locator('#player').evaluate('(v)=>v.currentTime') > 3
+    page.close()
+
+
+def test_clip_study_menu_precision_and_return(browser, ui_server):
+    page = browser.new_page()
+    page.goto(ui_server+f'/review/{ID}?clip={CLIP}')
+    page.wait_for_function("() => document.querySelector('#player')?.readyState >= 2")
+    page.locator('#video-seek').evaluate("el => { el.value = 0.4; el.dispatchEvent(new Event('input', {bubbles:true})); }")
+    page.get_by_label('More video actions', exact=True).click()
+    page.get_by_role('button', name='Study clip', exact=True).click()
+    dialog = page.get_by_role('dialog', name='Clip study · 01', exact=True)
+    expect(dialog).to_be_visible()
+    expect(page.locator('#study-play')).to_be_enabled()
+    assert page.locator('#player').evaluate('v => v.paused')
+    dialog.get_by_role('button', name='Step forward 0.1 seconds').click()
+    assert page.locator('#study-video').evaluate('v => v.currentTime') == pytest.approx(.5, abs=.08)
+    dialog.get_by_role('combobox', name='Playback speed').select_option('0.25')
+    assert page.locator('#study-video').evaluate('v => v.playbackRate') == .25
+    zoom = dialog.get_by_role('slider', name='Video zoom')
+    zoom.press('Home')
+    for _ in range(4):
+        zoom.press('ArrowRight')
+    expect(page.locator('#study-zoom-value')).to_have_text('2×')
+    dialog.get_by_role('checkbox', name='Loop clip', exact=True).check()
+    assert page.locator('#study-video').evaluate('v => v.loop')
+    dialog.get_by_role('button', name='← Back to review', exact=True).click()
+    expect(dialog).not_to_be_visible()
+    assert page.locator('#player').evaluate('v => v.currentTime') == pytest.approx(.5, abs=.08)
+    assert page.locator('#player').evaluate('v => v.paused')
+    expect(page.locator('.player-more summary')).to_be_focused()
+    page.get_by_role('button', name='Full practice ↗', exact=True).click()
+    page.get_by_label('More video actions', exact=True).click()
+    expect(page.get_by_role('button', name='Study clip', exact=True)).not_to_be_visible()
+    page.close()
+
+
+def test_clip_study_frame_package_is_local_and_resets(browser, ui_server, tmp_path):
+    import zipfile
+    page = browser.new_page(accept_downloads=True)
+    external = []
+    page.on('request', lambda req: external.append(req.url) if req.url.startswith(('http:', 'https:')) and not req.url.startswith(ui_server) else None)
+    page.goto(ui_server+f'/review/{ID}?clip={CLIP}')
+    page.get_by_label('More video actions', exact=True).click()
+    page.get_by_role('button', name='Study clip', exact=True).click()
+    dialog = page.get_by_role('dialog', name='Clip study · 01', exact=True)
+    expect(dialog.get_by_role('button', name='Sample 6 moments', exact=True)).to_be_enabled()
+    dialog.get_by_role('button', name='Sample 6 moments', exact=True).click()
+    expect(page.locator('.study-frame')).to_have_count(6, timeout=15000)
+    with page.expect_download() as event:
+        dialog.get_by_role('button', name='Download 6-frame package', exact=True).click()
+    target = tmp_path/'frames.zip'
+    event.value.save_as(target)
+    with zipfile.ZipFile(target) as archive:
+        assert archive.testzip() is None
+        assert len(archive.namelist()) == 8
+        context = json.loads(archive.read('context.json'))
+        times = [f['clip_seconds'] for f in context['frames']]
+        assert len(times) == 6 and times == sorted(times)
+        assert all(0 < t < 2 for t in times)
+    assert external == []
+    dialog.get_by_role('button', name='← Back to review', exact=True).click()
+    page.get_by_label('More video actions', exact=True).click()
+    page.get_by_role('button', name='Study clip', exact=True).click()
+    expect(page.locator('.study-frame')).to_have_count(0)
+    expect(page.locator('#study-export')).to_be_disabled()
+    expect(page.locator('#study-export')).to_have_text('Download frame package')
+    page.keyboard.press('Escape')
+    expect(dialog).not_to_be_visible()
     page.close()

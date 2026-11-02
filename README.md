@@ -158,3 +158,11 @@ python -m pytest tests/ui_player.py -q
 ```
 
 The tiny MP4s in `tests/fixtures` are generated solid-color test videos, not user footage. Browser tests use a temporary synthetic library. They cover court names, clickable rows, current-video downloads, fullscreen navigation, autoplay, overlay geometry/auto-hide, and native iPhone fullscreen API routing. CI cannot display or verify the actual iPhone system player, so physical-device fullscreen/touch testing remains a limitation.
+
+## Clip study
+
+Select an individual clip, then choose **More video actions → Study clip** for focused slow playback,
+precise time seeking, looping and zoom/pan. Published processor observations appear
+when available. Prepare a clip or small selected-frame package with a coaching
+prompt for manual use in your AI chat. No footage uploads automatically.
+See [Clip study design and local validation](docs/CLIP-STUDY.md).

@@ -16,6 +16,7 @@ from werkzeug.utils import secure_filename
 from storage import Library, smb_root, nas_media_address
 from practices import recording_time, group_recordings
 from state import State, Conflict
+from clip_study import public_clip_study, number as finite_number
 from courts import COURT_ID, court_list, validate_court, enrich_groups
 
 
@@ -56,6 +57,19 @@ def create_app(config=None):
         except (OSError, ValueError, TypeError):
             abort(503, "This session's metadata is unavailable")
 
+    def require_publication(data, parameter):
+        expected = request.args.get(parameter)
+        if expected is None:
+            return
+        try:
+            expected = float(expected)
+        except ValueError:
+            abort(400, 'Invalid publication version')
+        if not finite_number(expected):
+            abort(400, 'Invalid publication version')
+        if expected != data.get('published_at'):
+            abort(409, 'This recording was reprocessed. Refresh the review to load its new context.')
+
     def decorate(data, shared=None):
         data = copy.deepcopy(data)
         shared = shared if shared is not None else state.all()
@@ -86,7 +100,7 @@ def create_app(config=None):
     def headers(response):
         response.headers['X-Content-Type-Options'] = 'nosniff'
         response.headers['Referrer-Policy'] = 'same-origin'
-        response.headers.setdefault('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self'; connect-src 'self'; frame-ancestors 'self'; base-uri 'none'; form-action 'self'")
+        response.headers.setdefault('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self'; connect-src 'self'; frame-ancestors 'self'; base-uri 'none'; form-action 'self'")
         if request.path.startswith('/api/'):
             response.headers['Cache-Control'] = 'no-store'
         return response
@@ -136,6 +150,15 @@ def create_app(config=None):
         recordings.append(result)
         enrich_groups(group_recordings(recordings, gap_minutes), recordings, shared)
         return jsonify(result)
+
+    @app.get('/api/sessions/<identity>/clips/<clip_id>/study')
+    def study_clip(identity, clip_id):
+        data = session(identity)
+        clip = next((c for c in data['clips'] if c['id'] == clip_id), None)
+        if clip is None:
+            abort(404, 'Clip not found')
+        require_publication(data, 'publication')
+        return jsonify(public_clip_study(data, clip))
 
     @app.get('/api/courts')
     def get_courts():
@@ -236,6 +259,7 @@ def create_app(config=None):
     @app.get('/media/<identity>/<path:filename>')
     def media(identity, filename):
         data = session(identity)
+        require_publication(data, 'v')
         try:
             p = library.media(data, filename)
             if not p.is_file():

@@ -8,6 +8,7 @@
 !manage.py
 !practices.py
 !courts.py
+!clip_study.py
 !templates/
 !templates/*.html
 !static/

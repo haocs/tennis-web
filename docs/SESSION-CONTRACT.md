@@ -60,3 +60,11 @@ an explicit empty string clears it. Optimistic versions cover address edits too.
 Practice `title` is the recording-local `time_label` alone unless another dated
 practice has that same label, in which case ` @ court_name` is appended. Collisions
 are calculated across the complete derived index before browser filtering.
+
+## Optional Clip study observations
+
+A clip may supply bounded, explicitly public `processor_observations` in original
+seconds. Legacy publications remain valid. See [Clip study](CLIP-STUDY.md) for the
+observation fields, validation and read-only study endpoint. Scores retain their
+published semantics; session-level detector summaries are not presented as
+per-clip confidence. This optional consumer contract does not change processing.
