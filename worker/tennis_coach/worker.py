@@ -171,7 +171,9 @@ class Worker:
     def run(self,once=False):
         while not self.stop.is_set():
             try:worked=self.once()
-            except Exception:self.state(status='server_unavailable');worked=False
+            except Exception as error:
+                detail=(type(error).__name__+': '+str(error)).replace(self.config.get('worker_token','<unset>'),'[redacted]')[:500]
+                self.state(status='server_unavailable',error=detail);worked=False
             if once:return
             if not worked:self.stop.wait(5)
 

@@ -77,3 +77,28 @@ entries. Use existing saved NAS login credentials, never inline passwords. Befor
 claiming any job, workers reconnect configured mounts and verify required storage.
 If storage/login is unavailable, local status becomes `storage_unavailable` and
 work stays queued. Windows should use pre-mounted paths and omit this option.
+
+### macOS Local Network identity
+
+On some macOS versions, a LaunchAgent invoking a Python interpreter directly can
+receive `No route to host` even though interactive requests succeed and generic
+Python entries show as allowed. Use the named `mac_launcher.m` app wrapper
+with `install_service.py --launcher /path/to/TennisCoach` so network permission
+is attributed to Tennis Coach. Grant Local Network access through macOS normally;
+do not reset privacy settings or route around a denied permission. The wrapper
+connects to the configured NAS before spawning the role-specific Python worker.
+
+Build that wrapper with an installed, matching Apple compiler/SDK pair:
+
+```sh
+python worker/build_mac_app.py --output '/path/to/Tennis Coach.app' \
+  --developer-dir /Applications/Xcode.app/Contents/Developer
+python worker/install_service.py install --role render --config /private/config.json \
+  --executable /path/to/venv/bin/tennis-coach-worker \
+  --launcher '/path/to/Tennis Coach.app/Contents/MacOS/TennisCoach'
+```
+
+Repeat installation for `--role ai`. Omit `--developer-dir` when the system-selected
+Apple toolchain and SDK already match. Build the app before starting services; stop
+services before rebuilding an installed launcher. Local ad-hoc signing identifies
+this build on the operator's Mac; it does not claim Apple notarization.
