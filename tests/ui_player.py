@@ -227,7 +227,7 @@ def test_progress_bar_has_a_touch_hit_area_and_seeks(browser, ui_server):
 def test_clip_study_menu_precision_and_return(browser, ui_server):
     page = browser.new_page()
     page.goto(ui_server+f'/review/{ID}?clip={CLIP}')
-    page.wait_for_function("() => document.querySelector('#player').readyState >= 2")
+    page.wait_for_function("() => document.querySelector('#player')?.readyState >= 2")
     page.locator('#video-seek').evaluate("el => { el.value = 0.4; el.dispatchEvent(new Event('input', {bubbles:true})); }")
     page.get_by_label('More video actions', exact=True).click()
     page.get_by_role('button', name='Study clip', exact=True).click()
