@@ -319,3 +319,135 @@ def test_coaching_selection_queues_export_without_ai_upload(browser, ui_server):
     expect(page.locator('#coach-status')).to_contain_text('queued',ignore_case=True)
     page.get_by_role('button',name='← Back to review',exact=True).click()
     page.close()
+
+
+def test_native_media_navigation_uses_current_clip_queue(browser, ui_server):
+    page = browser.new_page(viewport={'width':390,'height':844}, has_touch=True)
+    errors = []
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    page.add_init_script('''
+      window.mediaHandlers={};window.mediaState={};
+      Object.defineProperty(navigator,'mediaSession',{configurable:true,value:{
+        setActionHandler(name,handler){window.mediaHandlers[name]=handler;},
+        setPositionState(state){window.mediaState.position=state;}
+      }});
+      window.MediaMetadata=class {constructor(data){Object.assign(this,data);}};
+    ''')
+    page.goto(ui_server+f'/review/{ID}?clip={CLIP}')
+    expect(page.locator('#video-seek')).to_be_enabled()
+    page.evaluate('''() => {
+      const stage=document.querySelector('#video-stage'),v=document.querySelector('#player');
+      stage.requestFullscreen=undefined;stage.webkitRequestFullscreen=undefined;
+      window.originalPlayer=v;window.nativeEntries=0;
+      Object.defineProperty(v,'webkitDisplayingFullscreen',{value:false,writable:true,configurable:true});
+      v.webkitEnterFullscreen=()=>{window.nativeEntries++;v.webkitDisplayingFullscreen=true;v.dispatchEvent(new Event('webkitbeginfullscreen'));};
+    }''')
+    page.get_by_role('button',name='Enter fullscreen',exact=True).click()
+    assert page.evaluate('mediaHandlers.previoustrack === null')
+    assert page.evaluate('typeof mediaHandlers.nexttrack') == 'function'
+    page.evaluate('mediaHandlers.nexttrack()')
+    expect(page.locator('#player')).to_have_attribute('src',re.compile('clip-002.mp4'))
+    page.wait_for_function('() => mediaState.position?.duration === 2')
+    assert page.evaluate('navigator.mediaSession.metadata.title') == 'Clip 02'
+    assert page.evaluate('navigator.mediaSession.metadata.album') == 'Practice <script>'
+    assert page.evaluate('document.querySelector("#player") === originalPlayer && originalPlayer.webkitDisplayingFullscreen')
+    assert page.evaluate('nativeEntries') == 1
+    page.evaluate('mediaHandlers.nexttrack()')
+    expect(page.locator('#player')).to_have_attribute('src',re.compile('clip-003.mp4'))
+    assert page.evaluate('mediaHandlers.nexttrack === null')
+    page.evaluate('mediaHandlers.previoustrack()')
+    expect(page.locator('#player')).to_have_attribute('src',re.compile('clip-002.mp4'))
+    # Native actions follow the same liked-only queue, including an active clip
+    # outside the filter. A saved stale callback must not bypass a disabled button.
+    page.evaluate('window.staleNext=mediaHandlers.nexttrack')
+    page.get_by_role('button',name='♡ Liked only',exact=True).click()
+    page.evaluate('mediaHandlers.nexttrack()')
+    expect(page.locator('#player')).to_have_attribute('src',re.compile('clip-001.mp4'))
+    assert page.evaluate('mediaHandlers.nexttrack === null && mediaHandlers.previoustrack === null')
+    page.evaluate('staleNext()')
+    expect(page.locator('#player')).to_have_attribute('src',re.compile('clip-001.mp4'))
+    # Clip study owns its own playback; the parent must not accept remote skips.
+    page.get_by_role('button',name='Study clip',exact=True).click()
+    page.wait_for_function('() => Object.values(mediaHandlers).every(h => h === null)')
+    page.get_by_role('button',name='← Back to review',exact=True).click()
+    page.wait_for_function('() => typeof mediaHandlers.play === "function"')
+    page.evaluate('window.dispatchEvent(new PageTransitionEvent("pagehide"))')
+    assert page.evaluate('Object.values(mediaHandlers).every(h => h === null)')
+    page.evaluate('window.dispatchEvent(new PageTransitionEvent("pageshow",{persisted:true}))')
+    assert page.evaluate('typeof mediaHandlers.play') == 'function'
+    assert not errors
+    page.close()
+
+
+@pytest.mark.parametrize('available', [False, True])
+def test_media_session_unavailable_or_rejects_actions(browser, ui_server, available):
+    page = browser.new_page()
+    errors = []
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    page.add_init_script('''Object.defineProperty(navigator,'mediaSession',{configurable:true,value:'''+
+                         ('''{setActionHandler(){throw new DOMException('Unsupported action','NotSupportedError');},
+                              setPositionState(){throw new Error('Unavailable');}}''' if available else 'undefined')+'});')
+    page.goto(ui_server+f'/review/{ID}?clip={CLIP}')
+    page.get_by_role('button',name='Next clip',exact=True).click()
+    expect(page.locator('#player')).to_have_attribute('src',re.compile('clip-002.mp4'))
+    page.get_by_role('button',name='Previous clip',exact=True).click()
+    expect(page.locator('#player')).to_have_attribute('src',re.compile('clip-001.mp4'))
+    assert not errors
+    page.close()
+
+
+def test_expanded_player_keeps_navigation_and_native_fullscreen_separate(browser, ui_server):
+    page = browser.new_page(viewport={'width':390,'height':844},has_touch=True)
+    page.goto(ui_server+f'/review/{ID}?clip={CLIP}')
+    expect(page.locator('#video-seek')).to_be_enabled()
+    page.evaluate('window.originalPlayer=document.querySelector("#player")')
+    page.get_by_role('button',name='Expand player',exact=True).click()
+    dialog=page.get_by_role('dialog',name='Expanded video player',exact=True)
+    expect(dialog).to_be_visible()
+    assert page.locator('#clip-list').evaluate('e => !!e.closest("[inert]")')
+    for width,height in [(390,844),(844,390),(320,568)]:
+        page.set_viewport_size({'width':width,'height':height})
+        box=dialog.bounding_box()
+        assert box['x']==0 and box['y']==0
+        assert box['width']==pytest.approx(width,abs=1) and box['height']==pytest.approx(height,abs=1)
+        for selector in ['#previous','#next','#video-play','#video-expand','#video-fullscreen','#video-close-expanded','#video-seek']:
+            control=page.locator(selector).bounding_box()
+            assert 0 <= control['x'] and control['x']+control['width'] <= width+1
+            assert 0 <= control['y'] and control['y']+control['height'] <= height+1
+        if folder:=os.environ.get('TENNIS_UI_SCREENSHOT_DIR'):
+            Path(folder).mkdir(parents=True,exist_ok=True)
+            dialog.screenshot(path=str(Path(folder)/f'expanded-{width}-{browser.browser_type.name}.png'))
+    page.get_by_role('button',name='Next clip',exact=True).click()
+    expect(page.locator('#player')).to_have_attribute('src',re.compile('clip-002.mp4'))
+    page.wait_for_function("() => document.querySelector('#player').readyState >= 2")
+    expect(page.locator('#video-seek')).to_be_enabled()
+    page.locator('#player').evaluate('v => v.pause()')
+    expect(dialog).to_be_visible()
+    assert page.evaluate('originalPlayer === document.querySelector("#player")')
+    page.get_by_role('button',name='Previous clip',exact=True).click()
+    expect(page.locator('#player')).to_have_attribute('src',re.compile('clip-001.mp4'))
+    page.wait_for_function("() => document.querySelector('#player').readyState >= 2")
+    expect(page.locator('#video-seek')).to_be_enabled()
+    page.locator('#player').evaluate('v => v.pause()')
+    page.get_by_role('button',name='Close expanded player',exact=True).focus()
+    page.keyboard.press('Shift+Tab')
+    expect(page.locator('#video-seek')).to_be_focused()
+    page.keyboard.press('Tab')
+    expect(page.get_by_role('button',name='Close expanded player',exact=True)).to_be_focused()
+    page.keyboard.press('Escape')
+    expect(dialog).not_to_be_visible()
+    expect(page.get_by_role('button',name='Expand player',exact=True)).to_be_focused()
+    assert page.locator('#clip-list').evaluate('e => !e.closest("[inert]")')
+    assert page.evaluate('document.body.style.position') == ''
+    # Native fullscreen is a distinct action, even from the expanded mode.
+    page.get_by_role('button',name='Expand player',exact=True).click()
+    page.evaluate('''() => {
+      const stage=document.querySelector('#video-stage'),v=document.querySelector('#player');
+      stage.requestFullscreen=undefined;stage.webkitRequestFullscreen=undefined;
+      window.nativeEntries=0;v.webkitEnterFullscreen=()=>window.nativeEntries++;
+    }''')
+    page.get_by_role('button',name='Enter fullscreen',exact=True).click()
+    assert page.evaluate('nativeEntries') == 1
+    assert page.locator('.player-expanded').count() == 0
+    assert page.evaluate('document.body.style.position') == ''
+    page.close()
