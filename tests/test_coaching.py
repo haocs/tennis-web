@@ -86,7 +86,7 @@ def test_artifact_requires_fenced_manifest(setup):
     claim=post(c,'worker/render/claim',{'worker_id':'media'},'test-worker-secret').json['job']
     fence=hashlib.sha256(claim['token'].encode()).hexdigest()[:24];folder=Path(app.config['COACH_MEDIA_ROOT'])/claim['id']/fence;folder.mkdir(parents=True)
     (folder/'excerpt.mp4').write_bytes(b'video');(folder/'frame-000.jpg').write_bytes(b'frame');(folder/'prompt.txt').write_text('question')
-    payload=dict(recipe=claim['body'],lease_token=claim['token'],frames=[{'file':'frame-000.jpg'}],bytes=5,output_seconds=4,sha256='a'*64,render_seconds=1)
+    payload=dict(recipe=claim['body'],lease_token=claim['token'],frames=[{'file':'frame-000.jpg','sha256':hashlib.sha256(b'frame').hexdigest(),'original_seconds':7,'clip_seconds':2,'excerpt_seconds':2}],bytes=5,output_seconds=4,sha256='a'*64,render_seconds=1)
     (folder/'recipe.json').write_text(json.dumps(payload))
     done=post(c,'worker/jobs/'+claim['id']+'/complete',{'token':claim['token']},'test-worker-secret');assert done.status_code==200
     meta=c.get('/api/coaching/exports/'+claim['id']+'/recipe.json');assert claim['token'] not in meta.get_data(as_text=True)

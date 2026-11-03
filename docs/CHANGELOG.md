@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.8.0 — 2026-11-02
+
+- Guide coaching through Choose moment, Preview, Ask coach and Review suggestions.
+- Save structured observations, cues, drills and uncertainty with original-recording intervals and exact submitted snapshots.
+- Accept, edit or dismiss individual suggestions with conflict checks and revision history; retain provenance after reprocessing.
+- Deduplicate retained evidence separately from temporary previews, and export annotations, raw responses and revisions.
+- Add coaching worker 0.2.0 with capability-gated structured requests and evidence verification before provider calls.
+- Preserve legacy notes and the latest expanded player/native-navigation fixes.
+
+
 ## v0.3.0 — 2026-10-30
 
 - Home practice titles use the saved court name plus original recording date and time of day.

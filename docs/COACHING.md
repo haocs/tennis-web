@@ -112,3 +112,11 @@ browser. No private tennis media was uploaded for this test. Physical iPhone,
 Windows service installation, HDR conversion on actual tennis footage and NAS
 container deployment remain release/device checks. Existing Chromium/WebKit CI was
 not run for this unpushed branch.
+
+## Evidence-linked annotations
+
+The new four-step coaching flow, structured response schema, immutable snapshots,
+review/version rules and reprocessing behavior are documented in
+[COACHING-ANNOTATIONS.md](COACHING-ANNOTATIONS.md). Rollout requires coaching worker
+0.2.0 as well as the updated website; an old AI worker will safely leave new requests
+queued. Prepared-export expiration must not remove retained evidence.

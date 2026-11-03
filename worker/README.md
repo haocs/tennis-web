@@ -111,3 +111,16 @@ directories to 0755 and files to 0644, publishing the manifest last. It does not
 change originals, the published library, application state or unrelated paths.
 This option defaults off; configure the artifact root's own read/traverse access
 explicitly at deployment.
+
+## Structured coaching (worker 0.2.0)
+
+For the evidence-linked coaching UI, upgrade this installed package as well as the
+website container. The AI role advertises `coaching-annotations-v1`; older workers
+leave these requests queued instead of consuming them incorrectly. No new account,
+queue or configuration secret is required. The existing artifact mount needs write
+access to `evidence/frames/`; the website reads it through its existing read-only
+mount. These content-addressed snapshots are retained separately from expiring
+prepared videos. Keep them with coaching database backups; never apply export TTLs
+to evidence. See [the contract](../docs/COACHING-ANNOTATIONS.md) for review, retention,
+reprocessing and recovery rules. The worker verifies/prepares evidence before
+marking a provider call started and uses Codex structured output for new requests.
