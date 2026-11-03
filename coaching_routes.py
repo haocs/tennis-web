@@ -7,6 +7,7 @@ import re
 from flask import Blueprint, abort, jsonify, request, send_file
 from coaching import Coaching, QueueConflict, recipe
 from storage import inside
+from worker.tennis_coach.annotations import CAPABILITY, PROMPT_VERSION, expected_frames, evidence_manifest, coaching_prompt, response_schema
 
 
 def register_coaching(app,library,session):
@@ -29,8 +30,8 @@ def register_coaching(app,library,session):
 
     @routes.get('/api/coaching/sessions/<identity>')
     def list_coaching(identity):
-        session(identity)
-        return jsonify(**queue.listing(identity),enabled=bool(app.config['COACH_WORKER_TOKEN']))
+        data=session(identity)
+        return jsonify(**queue.listing(identity),annotations=queue.annotation_list(identity,data['published_at'],data['clips']),enabled=bool(app.config['COACH_WORKER_TOKEN']))
 
     @routes.post('/api/coaching/exports')
     def export():
@@ -59,7 +60,10 @@ def register_coaching(app,library,session):
         spec=render['body'];data=session(spec['source_id'])
         if spec['publication']!=data['published_at']:abort(409,'Recording changed; prepare a fresh excerpt')
         body=dict(spec,export_id=render['id'],artifact_directory=render['result']['artifact_directory'],prompt=prompt.strip(),provider='chatgpt-codex',consent=True)
-        try:return jsonify(queue.create('ai',body,b.get('request_id'))),201
+        try:
+            body.update(evidence_frames=expected_frames(render),required_capability=CAPABILITY,prompt_version=PROMPT_VERSION,source_sha256=data.get('source',{}).get('sha256',data['id']),processing=data.get('processing'))
+            body.update(submitted_prompt=coaching_prompt(body,{'frames':body['evidence_frames']}),response_contract=response_schema())
+            return jsonify(queue.create('ai',body,b.get('request_id'))),201
         except QueueConflict:raise
         except ValueError as e:abort(400,str(e))
 
@@ -92,7 +96,7 @@ def register_coaching(app,library,session):
     def claim(role):
         worker();b=request.get_json()
         if not isinstance(b,dict):abort(400,'Expected an object')
-        try:return jsonify(job=queue.claim(role,b.get('worker_id')))
+        try:return jsonify(job=queue.claim(role,b.get('worker_id'),b.get('capabilities')))
         except QueueConflict:raise
         except ValueError as e:abort(400,str(e))
 
@@ -103,6 +107,14 @@ def register_coaching(app,library,session):
         job=get(identity);result=b.get('result')
         if action=='complete' and job['state']=='completed':
             return jsonify(queue.worker_update(identity,b.get('token'),action,result))
+        if action=='evidence':
+            try:
+                if result!=evidence_manifest(job):raise ValueError('Evidence manifest mismatch')
+                for frame in result['frames']:
+                    path=inside(root,'evidence/frames/'+frame['sha256']+'.jpg')
+                    if not path.is_file() or not 0<path.stat().st_size<=4*1024*1024:raise ValueError('Missing or oversized evidence image')
+                    if hashlib.sha256(path.read_bytes()).hexdigest()!=frame['sha256']:raise ValueError('Evidence checksum mismatch')
+            except (ValueError,OSError,KeyError,TypeError) as e:abort(400,str(e))
         if action=='complete':
             if job['role']=='render':
                 # Worker writes once to its fenced directory. The NAS only inspects small metadata.
@@ -120,7 +132,7 @@ def register_coaching(app,library,session):
                     result={k:saved[k] for k in ('frames','bytes','output_seconds','sha256','render_seconds')}
                     result['artifact_directory']=fence
                 except (ValueError,OSError,KeyError,TypeError) as e:abort(400,str(e))
-            elif not isinstance(result,dict) or not isinstance(result.get('answer'),str) or not 1<=len(result['answer'])<=20000 or result.get('analysis_mode')!='timestamped_frames':
+            elif not isinstance(result,dict) or not isinstance(result.get('answer'),str) or not 1<=len(result['answer'])<=64000 or result.get('analysis_mode')!='timestamped_frames':
                 abort(400,'Invalid coaching response')
             else:
                 # Explicitly whitelist public result fields; no paths/tokens/provider logs.
@@ -130,5 +142,55 @@ def register_coaching(app,library,session):
         try:return jsonify(queue.worker_update(identity,b.get('token'),action,result))
         except QueueConflict:raise
         except ValueError as e:abort(400,str(e))
+
+
+    @routes.get('/api/coaching/evidence/<identity>')
+    def evidence(identity):
+        try:return jsonify(queue.evidence(identity))
+        except KeyError:abort(404,'No retained evidence for this response')
+
+    @routes.get('/api/coaching/evidence/<identity>/<frame_id>.jpg')
+    def evidence_frame(identity,frame_id):
+        try:
+            manifest=queue.evidence(identity)
+            frame=next(f for f in manifest['frames'] if f['frame_id']==frame_id)
+            path=inside(root,'evidence/frames/'+frame['sha256']+'.jpg')
+            if not path.is_file():abort(410,'Retained evidence is unavailable; the annotation is still saved')
+            return send_file(path,mimetype='image/jpeg',conditional=True)
+        except (KeyError,StopIteration,ValueError):abort(404,'Evidence frame not found')
+
+    @routes.put('/api/coaching/annotations/<identity>')
+    def review_annotation(identity):
+        b=request.get_json()
+        if not isinstance(b,dict):abort(400,'Expected an object')
+        try:
+            with queue.db() as db:row=db.execute('SELECT source_id FROM annotations WHERE id=?',(identity,)).fetchone()
+            if not row:abort(404,'Suggestion not found')
+            data=session(row['source_id'])
+            if b.get('publication')!=data['published_at']:abort(409,'Recording changed. Reload before reviewing this suggestion')
+            queue.review_annotation(identity,b,data['published_at'])
+            return jsonify(next(a for a in queue.annotation_list(data['id'],data['published_at'],data['clips']) if a['id']==identity))
+        except QueueConflict:raise
+        except KeyError:abort(404,'Suggestion not found')
+        except ValueError as e:abort(400,str(e))
+
+    @routes.post('/api/coaching/annotations')
+    def manual_annotation():
+        b=request.get_json()
+        if not isinstance(b,dict):abort(400,'Expected an object')
+        job=get(b.get('job_id',''))
+        data=session(job['body']['source_id'])
+        if b.get('publication')!=data['published_at']:abort(409,'Recording changed. Reload before saving')
+        try:
+            key=queue.manual_annotation(job,b.get('content'),data['published_at'],b.get('request_id'))
+            return jsonify(next(a for a in queue.annotation_list(data['id'],data['published_at'],data['clips']) if a['id']==key)),201
+        except QueueConflict:raise
+        except (ValueError,KeyError) as e:abort(400,str(e))
+
+    @routes.get('/api/coaching/annotations/export/<source>')
+    def export_annotations(source):
+        # Historical annotations remain exportable even after an active publication disappears.
+        if not re.fullmatch('[a-f0-9]{64}',source):abort(404)
+        return jsonify(queue.annotation_export(source,request.args.get('after','')))
 
     app.register_blueprint(routes)

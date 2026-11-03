@@ -32,7 +32,7 @@ def create_app(config=None):
                       LIBRARY_SMB_URL=os.environ.get("TENNIS_LIBRARY_SMB_URL"),
                       MEDIA_SMB_URL=os.environ.get("TENNIS_MEDIA_SMB_URL"),
                       COACH_MEDIA_ROOT=os.environ.get("TENNIS_COACH_MEDIA_ROOT"),
-                      COACH_WORKER_TOKEN=os.environ.get("TENNIS_COACH_WORKER_TOKEN", ""), MAX_CONTENT_LENGTH=32768)
+                      COACH_WORKER_TOKEN=os.environ.get("TENNIS_COACH_WORKER_TOKEN", ""), MAX_CONTENT_LENGTH=131072)
     if config:
         app.config.update(config)
     processing_url = app.config['PROCESSING_ROOM_URL']

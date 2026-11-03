@@ -298,7 +298,6 @@ def test_clip_study_frame_package_is_local_and_resets(browser, ui_server, tmp_pa
 def test_coaching_selection_queues_export_without_ai_upload(browser, ui_server):
     page=browser.new_page()
     page.goto(ui_server+f'/review/{ID}?clip={CLIP}')
-    page.get_by_label('More video actions',exact=True).click()
     page.get_by_role('button',name='Study clip',exact=True).click()
     expect(page.locator('#study-play')).to_be_enabled()
     expect(page.locator('#coach-prepare')).to_be_enabled()
@@ -450,4 +449,50 @@ def test_expanded_player_keeps_navigation_and_native_fullscreen_separate(browser
     assert page.evaluate('nativeEntries') == 1
     assert page.locator('.player-expanded').count() == 0
     assert page.evaluate('document.body.style.position') == ''
+    page.close()
+
+
+@pytest.mark.parametrize('width',[1280,390])
+def test_structured_coaching_evidence_review_and_draft(browser, ui_server, width):
+    """Browser rendering contract; real validation/retention is covered by API tests."""
+    import base64
+    page=browser.new_page(viewport={'width':width,'height':844})
+    errors=[];page.on('pageerror',lambda e:errors.append(str(e)))
+    source=page.request.get(ui_server+'/api/sessions/'+ID).json()
+    publication=source['published_at']
+    frame=dict(frame_id='f_test',order=1,sha256='e'*64,original_seconds=.5,clip_seconds=.5,excerpt_seconds=1)
+    content=dict(title='Balanced reset',topic='Ready position',observation='A narrow stance in this still.',cue='Reset with soft knees.',drill='Recover and hold.',uncertainty='Stills cannot confirm split-step timing.',evidence_frame_ids=['f_test'],applies_to=[dict(start_seconds=.25,end_seconds=1.5)],validation_warnings=[],timing_status='timed')
+    annotation=dict(id='a_test',job_id='job-test',current=content,proposal=copy.deepcopy(content),status='proposed',historical=False,playback_eligible=False,version=1,provenance=dict(clip_id=CLIP,publication=publication),related_clip_ids=[CLIP])
+    job=dict(id='job-test',version=1,role='ai',state='completed',body=dict(source_id=ID,clip_id=CLIP,publication=publication,original_start=0,original_end=1.8,start=0,end=1.8,prompt='Check balance',evidence_frames=[frame]),result=dict(answer='Original test response',structured=dict(summary='One observable improvement.',validation_warnings=[],parse_status='valid')))
+    state=dict(jobs=[job],annotations=[annotation],workers=[],enabled=True)
+    page.route('**/api/coaching/sessions/*',lambda route:route.fulfill(json=state))
+    png=base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jWZkAAAAASUVORK5CYII=')
+    page.route('**/api/coaching/evidence/*/*.jpg',lambda route:route.fulfill(body=png,content_type='image/png'))
+    def update(route):
+        body=route.request.post_data_json
+        assert body['version']==annotation['version']
+        annotation.update(status=body['status'],version=annotation['version']+1,playback_eligible=body['status']=='accepted')
+        route.fulfill(json=annotation)
+    page.route('**/api/coaching/annotations/a_test',update)
+    page.goto(ui_server+f'/review/{ID}?clip={CLIP}')
+    page.get_by_role('button',name='Study clip',exact=True).click()
+    question=page.get_by_role('textbox',name='What would you like help with?',exact=True)
+    question.fill('Keep my custom question')
+    page.locator('#coach-step-4').click()
+    expect(page.get_by_role('heading',name='Balanced reset',exact=True)).to_be_visible()
+    card=page.locator('.coach-suggestion')
+    expect(card.get_by_text('Needs your review',exact=True)).to_be_visible()
+    image=card.locator('img');expect(image).to_be_visible()
+    expect(image).to_have_attribute('src','/api/coaching/evidence/job-test/f_test.jpg')
+    card.get_by_role('button',name=re.compile('Frame 1')).click()
+    assert page.locator('#study-video').evaluate('v=>v.currentTime')==pytest.approx(.5,abs=.08)
+    card.get_by_role('button',name='Accept suggestion',exact=True).click()
+    expect(page.locator('.coach-review-state')).to_have_text('Accepted')
+    assert page.locator('#clip-study').evaluate('d=>d.scrollWidth<=d.clientWidth')
+    page.get_by_role('button',name='← Back to review',exact=True).click()
+    page.get_by_role('button',name='Study clip',exact=True).click()
+    expect(page.locator('#coach-step-4')).to_have_attribute('aria-current','step')
+    page.locator('#coach-step-1').click()
+    expect(question).to_have_value('Keep my custom question')
+    assert not errors
     page.close()

@@ -17,3 +17,9 @@
 
 !coaching.py
 !coaching_routes.py
+
+!coaching_annotations.py
+!worker/
+!worker/tennis_coach/
+!worker/tennis_coach/__init__.py
+!worker/tennis_coach/annotations.py
