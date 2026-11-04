@@ -7,6 +7,7 @@ import re
 from flask import Blueprint, abort, jsonify, request, send_file
 from coaching import Coaching, QueueConflict, recipe
 from storage import inside
+from players import coaching_player
 from worker.tennis_coach.annotations import CAPABILITY, PROMPT_VERSION, expected_frames, evidence_manifest, coaching_prompt, response_schema
 
 
@@ -60,6 +61,11 @@ def register_coaching(app,library,session):
         spec=render['body'];data=session(spec['source_id'])
         if spec['publication']!=data['published_at']:abort(409,'Recording changed; prepare a fresh excerpt')
         body=dict(spec,export_id=render['id'],artifact_directory=render['result']['artifact_directory'],prompt=prompt.strip(),provider='chatgpt-codex',consent=True)
+        body['player_context']=coaching_player(data,spec['clip_id'],app.extensions['state'].all())
+        context=body['player_context']
+        if ('player_id' in b and b['player_id'] != (context['player_id'] if context else None)
+                or 'player_profile_version' in b and b['player_profile_version'] != (context['profile_version'] if context else None)):
+            abort(409,'Main player or profile changed. Refresh the review before asking.')
         try:
             parent_id=b.get('follow_up_of')
             if parent_id is not None:
@@ -67,6 +73,8 @@ def register_coaching(app,library,session):
                 parent=get(parent_id)
                 if parent['role']!='ai' or parent['state']!='completed' or parent['body'].get('export_id')!=render['id'] or parent['body'].get('publication')!=spec['publication']:
                     raise ValueError('Follow-ups must refer to a completed response for this excerpt')
+                if parent['body'].get('player_context') != body['player_context']:
+                    raise ValueError('Main player or profile changed. Start a new review for this excerpt.')
                 answer=parent['result']['answer']
                 body.update(follow_up_of=parent_id,previous_question=parent['body']['prompt'],previous_answer=answer[:12000],previous_answer_truncated=len(answer)>12000)
             body.update(evidence_frames=expected_frames(render),required_capability=CAPABILITY,prompt_version=PROMPT_VERSION,source_sha256=data.get('source',{}).get('sha256',data['id']),processing=data.get('processing'))

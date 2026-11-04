@@ -166,3 +166,39 @@ precise time seeking, looping and zoom/pan. Published processor observations app
 when available. Prepare a clip or small selected-frame package with a coaching
 prompt for manual use in your AI chat. No footage uploads automatically.
 See [Clip study design and local validation](docs/CLIP-STUDY.md).
+
+### Saved players
+
+Saved players (name, initial avatar, optional height in cm and level) live in
+`website.sqlite3`, alongside other shared website preferences. They never modify
+published recording metadata or media. There is no account/login relationship.
+
+- Library **Saved players** creates and edits profiles. Session options →
+  **Players** assigns a roster to every recording atomically. **Players** above
+  a review player edits only that recording's roster.
+- Select a clip, then **Main player** to choose/add its focus player. A recording
+  with exactly one roster player supplies a default; multiple roster players
+  never imply which visible person is the main player. Explicit clip selections
+  (including Unassigned) override the default. Clip main players are included in
+  the recording/session's displayed players, even if not in its explicit roster.
+- Library and review filters narrow sessions/clips by player. Clip navigation and
+  autoplay follow the filtered clip list; existing playback continues on a filter change.
+- Assignments use source ID and original millisecond interval, not generated clip
+  filenames. Exact intervals survive reprocessing with new clip IDs. A changed
+  cut overlapping an explicit assignment requires confirmation; historical
+  assignments remain in app state. They are never remapped by overlap alone.
+- AI requests freeze a local player ID/profile version and height/level snapshot.
+  Only anonymous height/level enter the generated AI prompt. Names and local
+  player IDs are excluded. A profile cannot identify a person visually; crop to
+  the intended player and review uncertainty. Existing annotations/export retain
+  the historical player link. Changing profile/main player requires a new review,
+  rather than reusing a follow-up with mismatched context. Timed player-specific
+  cues do not play for a different currently assigned player.
+
+API: `GET/POST /api/players`, `PUT /api/players/<id>`,
+`PUT /api/sessions/<source>/players` (`player_ids`, `version`),
+`PUT /api/practices/<group>/players` (`player_ids`, per-recording `versions`),
+`PUT /api/sessions/<source>/clips/<clip>/player`
+(`player_id` or null, `publication`, `version`). JSON mutations use the existing
+same-origin/header checks and return 409 for stale shared-state writes. Player
+learning journeys and cross-recording coaching dashboards remain future work.

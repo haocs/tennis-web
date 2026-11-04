@@ -110,16 +110,16 @@ def test_mobile_overlay_layout_and_autoplay(browser, ui_server):
         stage = page.locator('#video-stage').bounding_box()
         video = page.locator('#player').bounding_box()
         assert abs(stage['height']-video['height']) < 1
-        for selector in ['#previous','#next','#video-play','#video-seek','#video-fullscreen']:
+        for selector in ['#previous','#next','#video-play','#video-seek','#video-rate','#video-fullscreen']:
             box = page.locator(selector).bounding_box()
             assert box['y'] >= stage['y'] and box['y']+box['height'] <= stage['y']+stage['height']+1
-        assert page.locator('#video-stage').locator('#video-mute,#video-rate,select[aria-label="Playback speed"]').count() == 0
+        expect(page.locator('#video-rate')).to_be_visible()
         expect(page.locator('#player-download svg')).to_be_visible()
         assert page.locator('#player-download').inner_text().strip() == ''
         expect(page.get_by_role('button',name='Study clip',exact=True)).to_be_visible()
         assert page.locator('#study-clip svg').count() == 1
         assert page.locator('.player-options').evaluate("e => [...e.children].map(c=>c.id)")[:3] == ['player-like','study-clip','player-download']
-        expect(page.locator('.player-chapters summary')).to_have_text('Clips')
+        expect(page.locator('.player-chapters')).to_have_count(0)
         if width == 390 and (folder := os.environ.get('TENNIS_UI_SCREENSHOT_DIR')):
             Path(folder).mkdir(parents=True, exist_ok=True)
             page.screenshot(path=str(Path(folder)/f'mobile-{browser.browser_type.name}.png'),full_page=True)
@@ -168,6 +168,41 @@ def test_iphone_calls_real_native_fullscreen(browser, ui_server):
     expect(page.locator('#native-fullscreen-hint')).to_be_visible()
     expect(page.locator('#native-fullscreen-hint')).to_contain_text('Exit fullscreen')
     assert page.locator('#video-expand').count()==0
+    page.close()
+
+
+def test_watch_speed_and_saved_autoplay(browser, ui_server):
+    page = browser.new_page(viewport={'width':390,'height':844},has_touch=True)
+    page.goto(ui_server+f'/review/{ID}?clip={CLIP}')
+    speed = page.get_by_role('combobox',name='Playback speed',exact=True)
+    expect(page.locator('#video-seek')).to_be_enabled()
+    speed.select_option('0.5')
+    assert page.locator('#player').evaluate('(v)=>v.playbackRate') == 0.5
+    page.get_by_label('Autoplay',exact=True).check()
+    page.reload()
+    expect(page.get_by_label('Autoplay',exact=True)).to_be_checked()
+    expect(page.locator('#video-seek')).to_be_enabled()
+    speed.select_option('1.5')
+    page.get_by_role('button',name='Next clip',exact=True).click()
+    expect(page.locator('#player')).to_have_attribute('src',re.compile('clip-002.mp4'))
+    expect(page.locator('#video-seek')).to_be_enabled()
+    expect(speed).to_have_value('1.5')
+    assert page.locator('#player').evaluate('(v)=>v.playbackRate') == 1.5
+    page.get_by_label('Autoplay',exact=True).uncheck()
+    page.reload()
+    expect(page.get_by_label('Autoplay',exact=True)).not_to_be_checked()
+    page.close()
+
+
+def test_watch_autoplay_storage_unavailable(browser, ui_server):
+    page = browser.new_page()
+    page.add_init_script("""Object.defineProperty(window,'localStorage',{get(){throw new Error('blocked');}});""")
+    page.goto(ui_server+f'/review/{ID}?clip={CLIP}')
+    expect(page.locator('#video-seek')).to_be_enabled()
+    expect(page.get_by_label('Autoplay',exact=True)).not_to_be_checked()
+    page.get_by_label('Autoplay',exact=True).check()
+    page.get_by_role('button',name='Next clip',exact=True).click()
+    expect(page.locator('#player')).to_have_attribute('src',re.compile('clip-002.mp4'))
     page.close()
 
 
@@ -491,4 +526,48 @@ def test_normal_playback_ignores_coaching_end_until_play_selection(browser,ui_se
     assert page.locator('#study-video').evaluate('v=>v.currentTime')<.7
     page.get_by_role('button',name='Play',exact=True).click()
     page.wait_for_function("()=>document.querySelector('#study-video').currentTime>.8&&!document.querySelector('#study-video').paused")
+    page.close()
+
+
+def test_player_profiles_assignments_and_filters(browser, ui_server):
+    # A new fixture player avoids coupling to the other browser's shared registry.
+    page = browser.new_page(viewport={'width':390,'height':844},has_touch=True)
+    name='Player '+browser.browser_type.name
+    page.goto(ui_server+'/')
+    page.get_by_role('button',name='Saved players',exact=True).click()
+    page.get_by_role('button',name='Add player',exact=True).click()
+    page.get_by_label('Name',exact=True).fill(name)
+    page.get_by_label('Height (cm, optional)',exact=True).fill('172')
+    page.get_by_label('Level',exact=True).select_option('intermediate')
+    page.get_by_role('button',name='Save player',exact=True).click()
+    expect(page.locator('#saved-player-list')).to_contain_text(name)
+    page.get_by_role('button',name='Close saved players',exact=True).click()
+    page.goto(ui_server+f'/review/{ID}?clip={CLIP}')
+    expect(page.locator('#video-seek')).to_be_enabled()
+    page.locator('#clip-main-player').click()
+    page.get_by_role('radio',name=name,exact=True).check()
+    page.get_by_role('button',name='Save players',exact=True).click()
+    expect(page.locator('#clip-main-player')).to_contain_text(name)
+    page.get_by_role('combobox',name='Filter clips by player',exact=True).select_option(label=name)
+    expect(page.locator('#clip-list > button')).to_have_count(1)
+    expect(page.locator('#clip-list > button')).to_contain_text(name)
+    page.reload()
+    expect(page.locator('#clip-main-player')).to_contain_text(name)
+    assert not page.evaluate('document.documentElement.scrollWidth > innerWidth')
+    page.get_by_role('button',name='Study clip',exact=True).click()
+    page.locator('#study-mode-coach').click()
+    page.locator('#coach-step-3').click()
+    expect(page.locator('#coach-player-context')).to_contain_text(name)
+    expect(page.locator('#coach-send-question')).not_to_have_value(re.compile('I am a beginner'))
+    page.get_by_role('button',name='← Back to review',exact=True).click()
+    page.goto(ui_server+'/')
+    page.get_by_role('combobox',name='Filter by player',exact=True).select_option(label=name)
+    expect(page.locator('.practice-card')).to_have_count(1)
+    expect(page.locator('.practice-card .player-chip').first).to_be_visible()
+    page.get_by_role('button',name='Saved players',exact=True).click()
+    row=page.locator('.saved-player-row').filter(has_text=name)
+    row.get_by_role('button',name='Edit',exact=True).click()
+    page.get_by_label('Name',exact=True).fill(name+' updated')
+    page.get_by_role('button',name='Save player',exact=True).click()
+    expect(page.locator('#saved-player-list')).to_contain_text(name+' updated')
     page.close()
