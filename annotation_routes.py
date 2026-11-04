@@ -33,8 +33,8 @@ def register_annotations(app, library, session):
         # Keep one authoritative coaching record. No duplicate writes/migration.
         clips = data['clips'] if data else []
         publication = data['published_at'] if data else None
-        if after and not after.startswith('coach:'):return []
-        rows = queue.annotation_list(source, publication, clips, after=after[6:] if after else '')
+        if after and not after.startswith(('coach:','coach-response:')):return []
+        rows = queue.annotation_list(source, publication, clips, after=after[6:] if after.startswith('coach:') else '')
         result = []
         for a in rows:
             provenance = a['provenance']
@@ -52,6 +52,22 @@ def register_annotations(app, library, session):
             value = project(value, data)
             value['playback_eligible'] = value['playback_eligible'] and a['playback_eligible']
             result.append(value)
+        # Retain response-level context too: legacy/unstructured responses may have
+        # no timed suggestions, and must not disappear or acquire invented timing.
+        if not after or after.startswith('coach-response:'):
+            cursor=after[len('coach-response:'):] if after else ''
+            with queue.db() as db:
+                jobs=db.execute("SELECT id,body,result,version,updated FROM jobs WHERE role='ai' AND state='completed' AND json_extract(body,'$.source_id')=? AND id>? ORDER BY id LIMIT 201",(source,cursor)).fetchall()
+            for row in jobs:
+                body=json.loads(row['body']);answer=json.loads(row['result'])
+                target=dict(scope='interval',start_seconds=body['original_start'],end_seconds=body['original_end'])
+                value=dict(id='coach-response:'+row['id'],schema_version=1,source_id=source,kind='coach',target=target,
+                    body=dict(text=answer.get('answer','')[:12000],response=True,timing_verified=False,text_truncated=len(answer.get('answer',''))>12000),
+                    context=dict(publication=body['publication']),origin=dict(type='ai',reference=row['id'],job_id=row['id'],
+                    provenance={k:body.get(k) for k in ('clip_id','publication','export_id','player_context')}),
+                    player_id=(body.get('player_context') or {}).get('player_id'),status='active',version=row['version'],
+                    updated_at=row['updated'],read_only=True,edit_url='/api/coaching/jobs/'+row['id'])
+                value=project(value,data);value['playback_eligible']=False;result.append(value)
         return result
 
     def listing(source, data):
@@ -85,7 +101,7 @@ def register_annotations(app, library, session):
     def export(source):
         check_source(source);items, after=page(listing(source,optional_source(source)),25,25)
         for a in items:
-            if a['id'].startswith('coach:'):
+            if a['id'].startswith(('coach:','coach-response:')):
                 a['revision_source']='/api/annotations/'+a['id']+'/revisions'
                 a['evidence_source']='/api/coaching/evidence/'+a['origin']['job_id']
             else:a['revision_source']='/api/annotations/'+a['id']+'/revisions'
@@ -96,7 +112,11 @@ def register_annotations(app, library, session):
         try:after=int(request.args.get('after',0))
         except ValueError:abort(400,'Invalid revision cursor')
         if after<0:abort(400,'Invalid revision cursor')
-        if identity.startswith('coach:'):
+        if identity.startswith('coach-response:'):
+            with queue.db() as db:row=db.execute("SELECT version,updated,result FROM jobs WHERE id=? AND role='ai' AND state='completed'",(identity[len('coach-response:'):],)).fetchone()
+            if not row:abort(404,'Coaching response not found')
+            values=[dict(version=row['version'],created_at=row['updated'],content=dict(cue=json.loads(row['result']).get('answer','')),status='saved_response',history_complete=False)] if row['version']>after else []
+        elif identity.startswith('coach:'):
             with queue.db() as db:
                 rows=db.execute('SELECT version,created,value FROM annotation_revisions WHERE annotation_id=? AND version>? ORDER BY version LIMIT 101',(identity[6:],after)).fetchall()
             values=[dict(version=r['version'],created_at=r['created'],**json.loads(r['value'])) for r in rows]
@@ -137,7 +157,7 @@ def register_annotations(app, library, session):
 
     @app.put('/api/annotations/<identity>')
     def edit(identity):
-        if identity.startswith('coach:'):
+        if identity.startswith(('coach:','coach-response:')):
             abort(400,'Use the coaching review editor to edit this suggestion')
         try:current=store.get(identity)
         except KeyError:abort(404,'Note not found')

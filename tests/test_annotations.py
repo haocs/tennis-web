@@ -76,7 +76,9 @@ def test_reprocess_mapping_and_retention(setup):
 def test_coaching_adapter_keeps_authority(setup):
     app,c,data,ai,folder=prepared(setup);job=claimed(c);manifest=pin(app,c,job,folder)
     complete(c,job,json.dumps(dict(schema_version=2,summary='Reset',suggestions=[suggestion(manifest)])))
-    a=listing(c)[0];assert a['id'].startswith('coach:') and a['read_only']
+    rows=listing(c);assert len(rows)==2
+    assert any(a['id'].startswith('coach-response:') and not a['playback_eligible'] for a in rows)
+    a=next(a for a in rows if a['id'].startswith('coach:'));assert a['id'].startswith('coach:') and a['read_only']
     assert a['target']['scope']=='interval' and a['target']['start_seconds']==6.4
     assert a['origin']['job_id']==job['id'] and not a['playback_eligible']
     assert put(c,'/api/annotations/'+a['id'],dict(version=1,publication=data['published_at'],status='archived')).status_code==400
@@ -96,3 +98,14 @@ def test_half_open_point_and_pagination(setup):
     one=c.get('/api/annotations/sources/'+ID+'?limit=1').json
     two=c.get('/api/annotations/sources/'+ID+'?limit=1&after='+one['next_after']).json
     assert one['annotations'][0]['id']!=two['annotations'][0]['id'] and two['next_after'] is None
+
+
+def test_unstructured_response_is_selection_context_not_invented_precise_timing(setup):
+    app,c,data,ai,folder=prepared(setup);job=claimed(c);pin(app,c,job,folder)
+    complete(c,job,'A useful response without precise event timing.')
+    rows=listing(c);assert len(rows)==1
+    a=rows[0];assert a['id']=='coach-response:'+job['id']
+    assert a['target']==dict(scope='interval',start_seconds=6,end_seconds=8)
+    assert not a['body']['timing_verified'] and not a['playback_eligible']
+    history=c.get('/api/annotations/'+a['id']+'/revisions').json['revisions']
+    assert not history[0]['history_complete']
