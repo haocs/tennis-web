@@ -64,7 +64,7 @@
     const tabs=el('nav',undefined,'study-mobile-tabs');tabs.id='study-mobile-tabs';tabs.setAttribute('aria-label','Clip study views');
     tabs.append(button('Watch',()=>showMode('watch')),button('Coach',()=>showMode('coach')));tabs.children[0].id='study-mode-watch';tabs.children[1].id='study-mode-coach';document.querySelector('.study-header').after(tabs);$('coach-question-options').open=!mobile();
     const start=button('Get AI coaching →',()=>showMode('coach'),'study-button study-primary study-coach-entry');document.querySelector('.study-transport').append(start);
-    const compact=el('div',undefined,'study-mobile-transport'),play=button('Play clip',()=>{$('study-play').click();});play.id='study-mobile-play';compact.append(play,button('Zoom & playback',()=>showMode('watch')));document.querySelector('.study-workspace').append(compact);
+    const compact=el('div',undefined,'study-mobile-transport'),play=button('Play clip',()=>{$('study-play').click();});play.id='study-mobile-play';const collapse=button('Hide player',()=>{const hidden=$('clip-study').dataset.playerCollapsed==='true';$('clip-study').dataset.playerCollapsed=String(!hidden);collapse.textContent=hidden?'Hide player':'Show player';requestAnimationFrame(mobileOffsets);});collapse.id='study-mobile-collapse';compact.append(play,collapse,button('Zoom & playback',()=>showMode('watch')));document.querySelector('.study-workspace').append(compact);
     const syncPlay=()=>{play.textContent=$('study-video').paused?'Play clip':'Pause clip';};
     for(const event of ['play','pause','ended'])$('study-video').addEventListener(event,syncPlay);
     if(window.ResizeObserver)new ResizeObserver(()=>{if(owner)mobileOffsets();}).observe(document.querySelector('.study-workspace'));
@@ -115,7 +115,7 @@
   }
   function jump(original,annotation){
     const clip=owner.clip;
-    if(original>=clip.original_start_seconds&&original<=clip.original_end_seconds){selectionPlaying=false;$('study-video').pause();$('study-video').currentTime=original-clip.original_start_seconds;message(`Original ${C.clock(original)} · shown in the study player.`);if(mobile())document.querySelector('.study-workspace').scrollIntoView({block:'start',behavior:'smooth'});return;}
+    if(original>=clip.original_start_seconds&&original<=clip.original_end_seconds){selectionPlaying=false;$('clip-study').dataset.playerCollapsed='false';$('study-mobile-collapse').textContent='Hide player';requestAnimationFrame(mobileOffsets);$('study-video').pause();$('study-video').currentTime=original-clip.original_start_seconds;message(`Original ${C.clock(original)} · shown in the study player.`);if(mobile())document.querySelector('.study-workspace').scrollIntoView({block:'start',behavior:'smooth'});return;}
     const target=owner.session.clips.find(c=>c.original_start_seconds<=original&&c.original_end_seconds>=original);
     if(target){location.href=`/review/${owner.session.id}?clip=${target.id}&coach_time=${original}`;}
     else message('This moment is not retained in the current clips. Its original timestamp and saved snapshot remain available.');
@@ -230,7 +230,7 @@
     }catch(e){if(owner===current)message(e.message);}
   }
   window.Coach={
-    open(session,clip){if(!$('coaching-panel'))makePanel();generation++;owner={session,clip};selectedExport=null;selectedAsk=null;requestId=null;busy=false;historyKey='';lastData=null;clearPreview();selectionPlaying=false;followUpId=null;$('coach-follow-up-context').hidden=true;
+    open(session,clip){if(!$('coaching-panel'))makePanel();generation++;owner={session,clip};selectedExport=null;selectedAsk=null;requestId=null;busy=false;historyKey='';lastData=null;clearPreview();$('clip-study').dataset.playerCollapsed='false';$('study-mobile-collapse').textContent='Hide player';selectionPlaying=false;followUpId=null;$('coach-follow-up-context').hidden=true;
       for(const id of ['coach-in','coach-out'])$(id).max=clip.duration_seconds;
       let d={};try{d=JSON.parse(sessionStorage.getItem(draftKey())||'{}');}catch(_){}
       $('coach-in').value=Number.isFinite(d.start)?d.start:0;$('coach-out').value=Number.isFinite(d.end)?d.end:Math.min(30,clip.duration_seconds);$('coach-question').value=typeof d.question==='string'&&d.question!==oldDefault?d.question:defaults;$('coach-quality').value=d.quality==='small'?'small':'balanced';

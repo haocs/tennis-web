@@ -79,7 +79,7 @@ Local checks cover checksums, capability gating, frame-clock bounds, lease fenci
 
 Mobile Clip study separates **Watch** and **Coach**. Watch keeps the full playback,
 zoom and speed controls. Coach keeps a compact player visible above the current
-step, except while viewing the prepared preview or typing a question. Optional
+step, except while viewing the prepared preview or when explicitly hidden. A Hide/Show player control frees space for typing without shifting the layout when input focus changes. Optional
 question/export settings and recording/manual tools are collapsed to keep the
 next action clear. The send step has an editable question. History focuses on
 responses whose original interval overlaps this clip; long questions are folded

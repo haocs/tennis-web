@@ -32,5 +32,6 @@
  #clip-study[data-mobile-mode=coach] .study-stage{height:min(18dvh,120px)}
  .coach-boundary{display:grid;grid-template-columns:minmax(0,1fr) 110px;align-items:center;gap:12px;margin:8px 0}.coach-boundary label{margin:0}.coach-boundary .study-button{margin:0}
  .coaching-panel h4{display:none}
- #clip-study[data-mobile-mode=coach]:has(.coaching-panel textarea:focus) .study-workspace{display:none}
 }
+
+@media(max-width:760px){#clip-study[data-mobile-mode=coach][data-player-collapsed=true] .study-stage{display:none}.study-mobile-transport .study-button{font-size:11px;padding:7px}}
