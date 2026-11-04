@@ -202,3 +202,9 @@ API: `GET/POST /api/players`, `PUT /api/players/<id>`,
 (`player_id` or null, `publication`, `version`). JSON mutations use the existing
 same-origin/header checks and return 409 for stale shared-state writes. Player
 learning journeys and cross-recording coaching dashboards remain future work.
+
+## Clip thumbnails and selection
+
+Each clip uses its own cached JPEG thumbnail in the watch list, liked clips, and player poster. The runtime image includes FFmpeg; thumbnails are generated lazily at 320px and stored under `TENNIS_DATA_ROOT/clip-posters`. Published media remains read-only. Cache keys include the clip, publication, and source-file version; a shared generation lock limits NAS CPU use. HDR posters are tone-mapped to SDR.
+
+Use **Select** in the watch list to choose clips and **Assign main player** to update them together. Selection follows the visible filters. Bulk updates check every clip version and save atomically, so a conflict cannot partially update the selection. Session-card player avatars appear below the location; recording-player editing is under **Edit details** on the watch page. Saved-player and selection dialogs retain full names.

@@ -165,6 +165,38 @@ def register_players(app, library, session, gap_minutes):
             abort(409, 'Players changed in another browser. Reload and try again.')
         return jsonify(saved=True)
 
+    @app.put('/api/sessions/<identity>/clips/players')
+    def clip_players(identity):
+        data = session(identity)
+        body = request.get_json()
+        if not isinstance(body, dict) or set(body)-{'player_id', 'clips', 'publication'}:
+            abort(400, 'Invalid main player selection')
+        if body.get('publication') != data['published_at']:
+            abort(409, 'Recording changed. Refresh before selecting a player.')
+        pid = body.get('player_id')
+        if pid is not None and (not isinstance(pid, str) or 'player:'+pid not in state.all()):
+            abort(400, 'Choose a saved player')
+        choices = body.get('clips')
+        if not isinstance(choices, list) or not 1 <= len(choices) <= 1000:
+            abort(400, 'Select between 1 and 1000 clips')
+        by_id = {c['id']: c for c in data['clips']}
+        changes, seen = [], set()
+        for choice in choices:
+            if (not isinstance(choice, dict) or set(choice) != {'id', 'version'}
+                    or not isinstance(choice['id'], str) or choice['id'] not in by_id
+                    or choice['id'] in seen or type(choice['version']) is not int or choice['version'] < 0):
+                abort(400, 'Invalid clip selection')
+            seen.add(choice['id'])
+            clip = by_id[choice['id']]
+            value = dict(player_id=pid, original_start=clip['original_start_seconds'],
+                         original_end=clip['original_end_seconds'], publication=data['published_at'])
+            changes.append((focus_key(data, clip), value, choice['version']))
+        try:
+            state.update_many(changes)
+        except Conflict:
+            abort(409, 'Players changed in another browser. Reload and try again.')
+        return jsonify(saved=True, updated=len(changes))
+
     @app.put('/api/sessions/<identity>/clips/<clip_id>/player')
     def clip_player(identity, clip_id):
         data = session(identity)
