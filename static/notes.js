@@ -66,7 +66,7 @@ const NoteUI=(()=>{
   $$('[data-note-jump]',box).forEach(b=>{b.style.setProperty('--note-position',b.dataset.notePosition+'%');b.onclick=()=>jump(items.find(a=>a.id===b.dataset.noteJump));});
  }
  function targetLabel(a){const t=a.target;if(t.scope==='video')return 'Whole recording';return 'Original '+preciseTime(t.start_seconds)+(t.scope==='point'?'':'–'+preciseTime(t.end_seconds));}
- function relationLabel(a){return ({needs_review:'Cut changed · review target',unavailable:'Outside current cuts',partly_retained:'Partly outside current cuts',historical_run:'Earlier processed version'})[a.relation]||'';}
+ function relationLabel(a){if(a.archive_reason==='duplicate_highlight'&&a.status==='archived')return 'Duplicate highlight · history retained';return ({needs_review:'Cut changed · review target',unavailable:'Outside current cuts',partly_retained:'Partly outside current cuts',historical_run:'Earlier processed version'})[a.relation]||'';}
  function render(){
   const box=$('#notes-list')||$('#cut-report-list');if(!box)return;
   const cuts=!!$('#cut-report-list'),view=$('#notes-view')?.value||'clip';const c=currentClip();

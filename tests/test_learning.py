@@ -66,3 +66,21 @@ def test_learning_keeps_review_context_after_reprocess_and_media_removal(setup):
     path.unlink()
     row=c.get('/api/learning?player_id='+a['id']).json['entries'][0]
     assert not row['media_available'] and row['reviews'][0]['answer']=='Review historical-review'
+
+
+def test_existing_duplicate_highlights_archive_without_losing_history(setup):
+    app,root,data=setup;c=app.test_client();first=annotation(c,data,'highlight',body=dict(text=''),rid='old-highlight-one').json
+    store=app.extensions['annotations'];duplicate=copy.deepcopy(store.get(first['id']));duplicate['id']='n_legacy_duplicate';duplicate['body']['text']='Keep this caption'
+    from annotations import canonical,AnnotationStore
+    with store.db() as db:
+        db.execute('DROP INDEX unique_active_point_highlight')
+        db.execute('DELETE FROM metadata_migrations')
+        db.execute('INSERT INTO annotations VALUES(?,?,?,?,?)',(duplicate['id'],ID,'highlight',canonical(duplicate),1))
+        db.execute('INSERT INTO revisions VALUES(?,?,?)',(duplicate['id'],1,canonical(duplicate)))
+    migrated=AnnotationStore(store.path);rows=migrated.listing(ID)
+    assert len(rows)==2 and len([a for a in rows if a['status']=='active'])==1
+    assert migrated.get(duplicate['id'])['status']=='active'
+    archived=migrated.get(first['id']);assert archived['status']=='archived' and archived['archive_reason']=='duplicate_highlight'
+    assert [a['version'] for a in migrated.revisions(first['id'])]==[1,2]
+    AnnotationStore(store.path)
+    assert migrated.get(first['id'])['version']==2

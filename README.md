@@ -240,4 +240,6 @@ The clip list uses one content filter: All clips, Liked only, Highlights, or Hid
 less useful. Player and duration controls remain independent. **Select clips** is
 inside the clip list's three-dot menu. Point highlights are unique per original
 source and millisecond; repeated clicks reuse the saved highlight, and conflicting
-retarget/restore edits return a conflict instead of creating duplicates.
+retarget/restore edits return a conflict instead of creating duplicates. Existing
+duplicate point marks are archived with their captions and revision history
+retained; a captioned mark is preferred as the active highlight.

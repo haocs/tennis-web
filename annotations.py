@@ -178,6 +178,23 @@ class AnnotationStore:
             db.execute('CREATE INDEX IF NOT EXISTS annotation_source ON annotations(source_id,id)')
             db.execute('CREATE TABLE IF NOT EXISTS revisions(id TEXT NOT NULL, version INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY(id,version))')
             db.execute('CREATE TABLE IF NOT EXISTS requests(request_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, annotation_id TEXT NOT NULL)')
+            db.execute('CREATE TABLE IF NOT EXISTS metadata_migrations(name TEXT PRIMARY KEY)')
+            if not db.execute('SELECT 1 FROM metadata_migrations WHERE name=?',('unique-point-highlights-v1',)).fetchone():
+                seen=set()
+                rows=[json.loads(r['data']) for r in db.execute("SELECT data FROM annotations WHERE kind='highlight' AND json_extract(data,'$.status')='active' AND json_extract(data,'$.target.scope')='point'")]
+                # Keep a captioned highlight first; never discard an archived
+                # duplicate's text, original selector or immutable old revisions.
+                rows.sort(key=lambda a:(not bool(a['body'].get('text')),a.get('created_at',0),a['id']))
+                for value in rows:
+                    key=(value['source_id'],int(math.floor(value['target']['start_seconds']*1000+.5)))
+                    if key in seen:
+                        value.update(status='archived',version=value['version']+1,updated_at=time.time(),archive_reason='duplicate_highlight',change_origin='system_deduplicate')
+                        encoded=canonical(value)
+                        db.execute('UPDATE annotations SET data=?,version=? WHERE id=?',(encoded,value['version'],value['id']))
+                        db.execute('INSERT INTO revisions VALUES(?,?,?)',(value['id'],value['version'],encoded))
+                    else:seen.add(key)
+                db.execute('INSERT INTO metadata_migrations VALUES(?)',('unique-point-highlights-v1',))
+            db.execute("CREATE UNIQUE INDEX IF NOT EXISTS unique_active_point_highlight ON annotations(source_id,CAST(round(json_extract(data,'$.target.start_seconds')*1000) AS INTEGER)) WHERE kind='highlight' AND json_extract(data,'$.status')='active' AND json_extract(data,'$.target.scope')='point'")
             db.commit()
 
     @contextmanager
@@ -237,7 +254,7 @@ class AnnotationStore:
             value['created_at'] = current['created_at'] if current else time.time()
             value.update(updated_at=time.time(), version=(current['version'] if current else 0)+1)
             encoded = canonical(value)
-            db.execute('INSERT OR REPLACE INTO annotations VALUES(?,?,?,?,?)', (identity, value['source_id'], value['kind'], encoded, value['version']))
+            db.execute('INSERT INTO annotations VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET source_id=excluded.source_id,kind=excluded.kind,data=excluded.data,version=excluded.version', (identity, value['source_id'], value['kind'], encoded, value['version']))
             db.execute('INSERT INTO revisions VALUES(?,?,?)', (identity, value['version'], encoded))
             if request_id:db.execute('INSERT INTO requests VALUES(?,?,?)', (request_id, fingerprint, identity))
             db.commit()
