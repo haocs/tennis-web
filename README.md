@@ -208,3 +208,22 @@ learning journeys and cross-recording coaching dashboards remain future work.
 Each clip uses its own cached JPEG thumbnail in the watch list, liked clips, and player poster. The runtime image includes FFmpeg; thumbnails are generated lazily at 320px and stored under `TENNIS_DATA_ROOT/clip-posters`. Published media remains read-only. Cache keys include the clip, publication, and source-file version; a shared generation lock limits NAS CPU use. HDR posters are tone-mapped to SDR.
 
 Use **Select** in the watch list to choose clips and **Assign main player** to update them together. Selection follows the visible filters. Bulk updates check every clip version and save atomically, so a conflict cannot partially update the selection. Session-card player avatars appear below the location; recording-player editing is under **Edit details** on the watch page. Saved-player and selection dialogs retain full names.
+
+### Moments, notes and cut feedback
+
+Watch pages offer **Highlight moment**, **Less useful**, and **Moments & notes**.
+Notes can refer to a moment, interval, clip or whole original recording. Timeline
+markers and list jumps use current playback positions; saved targets always use
+original-video time. **Clip focus** shows highlights or hides less-useful clips.
+Archive/restore and revision history keep edits reversible. Hearts remain separate.
+
+Use **More video actions → Review cuts** for processing-quality reports, including
+early/late boundaries and downtime. These are tied to the reviewed publication;
+no processing job or training label is generated automatically. Changed cuts and
+removed moments remain visible as historical/unavailable metadata.
+
+The [annotation design and API](docs/ANNOTATION-METADATA.md) describes storage,
+original-clock projection, provenance and the boundary to future training datasets.
+`annotations.sqlite3` is permanent website app data, not a processing output or
+TTL-managed preview. Existing coaching notes appear through the common metadata
+API while retaining their authoritative coaching database, editor and evidence.
