@@ -80,7 +80,7 @@ const NoteUI=(()=>{
    try{
     if(b.dataset.noteAction==='jump')jump(a);
     if(b.dataset.noteAction==='edit')openEditor(a.kind,a);
-    if(b.dataset.noteAction==='archive'){await update(a,{status:a.status==='active'?'archived':'active'});await refresh();}
+    if(b.dataset.noteAction==='archive'){await update(a,{status:a.status==='active'?'archived':'active'});await refresh();toast(a.status==='active'?'Archived.':'Restored.');}
     if(b.dataset.noteAction==='history'){const h=$('.note-history',card);let after=0,versions=[];do{const r=await api('/api/annotations/'+a.id+'/revisions'+(after?'?after='+after:''));versions.push(...r.revisions);after=r.next_after;}while(after);h.textContent=versions.map(r=>'v'+r.version+' · '+(r.status||'')+' · '+(r.body?.text||r.content?.cue||'')).join('\n');h.hidden=!h.hidden;}
     if(b.dataset.noteAction==='coach'){
      const clip=source.clips.find(c=>a.related_clip_ids.includes(c.id));if(!clip)throw new Error('No current clip contains this suggestion. Its history is retained in the export.');
@@ -99,7 +99,8 @@ const NoteUI=(()=>{
   const allowed=kind==='highlight'?['point','interval']:kind==='note'?['point','interval','clip','video']:['clip'];
   $('#note-scope').innerHTML=allowed.map(s=>`<option value="${s}">${({point:'Moment',interval:'Interval',clip:'Current clip',video:'Whole recording'})[s]}</option>`).join('');
   $('#note-target-clip').innerHTML=source.clips.map(c=>`<option value="${c.id}">Clip ${c.index} · Original ${preciseTime(c.original_start_seconds)}–${preciseTime(c.original_end_seconds)}</option>`).join('');
-  const t=a?.target||{scope:kind==='highlight'?'point':kind==='note'?'clip':'clip',start_seconds:0};$('#note-scope').value=t.scope;
+  let at=currentClip()?.original_start_seconds||0;try{at=pointAtPlayer();}catch(_){}
+  const t=a?.target||{scope:kind==='highlight'?'point':'clip',start_seconds:at};$('#note-scope').value=t.scope;
   $('#note-start').value=t.start_seconds??0;$('#note-end').value=t.end_seconds??Math.min(source.source.duration_seconds,(t.start_seconds||0)+1);
   if(!a&&kind==='highlight')try{$('#note-start').value=pointAtPlayer();}catch(_){}
   $('#note-target-clip').value=t.clip_id||currentClip()?.id||source.clips[0]?.id||'';
