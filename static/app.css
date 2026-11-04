@@ -89,3 +89,5 @@ button.clip-row:hover{background:#eef3e0}button.clip-row:focus-visible{outline:3
 .native-fullscreen-hint{font-size:12px;color:var(--muted);line-height:1.5;margin:10px 0 0}
 .native-fullscreen-hint[hidden]{display:none}
 @media(pointer:coarse){.video-view-actions .video-button{width:44px;height:44px}}
+
+#court-picker-hint:empty,#court-picker-gps:empty,#court-editor-note:empty,.status-subtitle:empty{display:none}

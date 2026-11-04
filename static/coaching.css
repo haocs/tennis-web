@@ -21,7 +21,7 @@
  .coaching-panel{scroll-margin-top:var(--coach-anchor-height)}
  .study-sidebar{padding:14px 16px}.coaching-panel .study-kicker,.coaching-panel>h3{display:none}
  .coach-steps{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:4px;margin:8px 0 16px}.coach-steps button{min-height:54px;font-size:10px;padding:6px 3px;display:block;text-align:center}.coach-steps span{display:block;font-size:12px;margin-bottom:3px}.coach-steps button::after{display:none}
- #coach-step-description{font-size:12px;margin:0}.coaching-panel h4{margin-top:12px}.coaching-panel textarea{font-size:16px}.coaching-panel label{font-size:13px}
+ .coaching-panel h4{margin-top:12px}.coaching-panel textarea{font-size:16px}.coaching-panel label{font-size:13px}
  .coaching-panel .study-primary{width:100%;min-height:48px}.coaching-panel #coach-back{width:100%}
  .study-extra-tools{margin-top:20px;border-top:1px solid #36483d}
 }

@@ -165,7 +165,7 @@
     player.pause();
     $('study-heading').textContent='Clip study · '+String(clip.index).padStart(2,'0');
     $('study-description').textContent=`${session.title} · Original ${C.clock(clip.original_start_seconds)}–${C.clock(clip.original_end_seconds)}`;
-    $('study-status').textContent='Paused at your place. Play slowly or step through the clip.';
+    $('study-status').textContent='';
     $('study-current').textContent=C.clock(context.startTime);$('study-duration').textContent='Loading clip…';
     $('study-media-error').hidden=true;$('study-seek').value=0;$('study-seek').max=1;
     $('study-speed').value='0.5';$('study-loop').checked=false;video.loop=false;video.muted=player.muted;video.volume=player.volume;
@@ -174,7 +174,7 @@
     $('study-frames').replaceChildren();$('study-export').disabled=true;$('study-export').textContent='Download frame package';$('study-cancel-capture').hidden=true;
     $('study-prompt').value=C.coachingPrompt(clip);
     $('study-facts').replaceChildren(fact('Original interval',C.clock(clip.original_start_seconds)+'–'+C.clock(clip.original_end_seconds)),fact('Detector',typeof session.algorithm==='string'?session.algorithm:'Not published'));
-    $('study-observations').textContent='No clip-level observations published for this recording.';
+    $('study-observations').textContent='No observations.';
     document.body.classList.add('study-open');dialog.showModal();
     dialog.scrollTop=0;document.querySelector('.study-sidebar').scrollTop=0;
     video.src=url;video.load();setControls();resetView();
@@ -189,7 +189,7 @@
       const data=await response.json();if(context!==owner)return;
       $('study-facts').replaceChildren(fact('Original interval',C.clock(owner.clip.original_start_seconds)+'–'+C.clock(owner.clip.original_end_seconds)),fact('Detector',data.algorithm),fact('Video',data.hdr?'HDR · original export':'SDR · original export'));
       const container=$('study-observations');container.replaceChildren();
-      if(!data.observations.length){const p=document.createElement('p');p.className='study-muted';p.textContent='No clip-level observations published. This detector identifies candidate movement; it does not verify ball contact.';container.append(p);}
+      if(!data.observations.length){const p=document.createElement('p');p.className='study-muted';p.textContent='No observations.';container.append(p);}
       for(const item of data.observations){
         const card=document.createElement('div');card.className='study-observation';const title=document.createElement('strong');title.textContent=item.label;card.append(title);
         if(item.detail){const p=document.createElement('p');p.textContent=item.detail;card.append(p);}
@@ -255,12 +255,12 @@
     video.pause();setControls();$('study-export').disabled=true;$('study-cancel-capture').hidden=false;
     try{
       const times=sample?C.sampleTimes(duration()):[video.currentTime];
-      for(const at of times){status('Preparing frame '+(pending.length+1)+' of '+times.length+' locally…');pending.push(await captureFrame(owner,at,signal));}
+      for(const at of times){status('Preparing frame '+(pending.length+1)+' of '+times.length+'…');pending.push(await captureFrame(owner,at,signal));}
       if(context!==owner||signal.aborted)throw new DOMException('Cancelled','AbortError');
       if(sample)clearFrames(owner);
       owner.frames.push(...pending);pending.length=0;
-      status(owner.frames.length+' '+(owner.frames.length===1?'frame':'frames')+' selected. The frame package stays local until you attach it in your AI chat.');
-    }catch(error){if(context===owner)status(error.name==='AbortError'?'Sampling cancelled. Your previous selection is unchanged.':error.message);}
+      status(owner.frames.length+' '+(owner.frames.length===1?'frame':'frames')+' selected.');
+    }catch(error){if(context===owner)status(error.name==='AbortError'?'Sampling cancelled.':error.message);}
     finally{
       for(const frame of pending)URL.revokeObjectURL(frame.url);
       if(context===owner){
@@ -282,8 +282,8 @@
       legacyCopy:()=>{if(context!==owner)return false;field.focus();field.select();return document.execCommand('copy');}
     });
     if(context!==owner)return;
-    if(copied)status('Prompt copied. Open your AI chat, attach the clip or unzipped JPEGs, then paste.');
-    else{field.focus();field.select();status('Select and copy the prompt above, then attach your clip or JPEGs in your AI chat.');}
+    if(copied)status('Prompt copied.');
+    else{field.focus();field.select();status('Select and copy the prompt.');}
   });
   $('study-export').addEventListener('click',async()=>{
     if(!context||context.capturing||!context.frames.length)return;
@@ -295,7 +295,7 @@
       files.push({name:'review-prompt.txt',data:C.coachingPrompt(owner.clip,frames)},{name:'context.json',data:JSON.stringify(manifest,null,2)});
       const blob=C.zipFiles(files);if(context!==owner)return;
       const url=URL.createObjectURL(blob),link=document.createElement('a');link.href=url;link.download='clip-study-'+String(owner.clip.index).padStart(2,'0')+'.zip';document.body.append(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);
-      status('Frame package prepared ('+(blob.size/1024/1024).toFixed(2)+' MB). Unzip it and attach the JPEGs with the prompt in your AI chat.');
+      status('Frame package prepared ('+(blob.size/1024/1024).toFixed(2)+' MB). Extract the JPEGs to attach them in your chat.');
     }catch(error){if(context===owner)status(error.message);}
     finally{if(context===owner)$('study-export').disabled=!owner.frames.length;}
   });
