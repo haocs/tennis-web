@@ -14,6 +14,18 @@ trap cleanup EXIT
 chmod 755 "$scratch"
 mkdir -p "$scratch/library/metadata/sessions" "$scratch/library/media"
 printf 'read-only fixture' > "$scratch/library/probe.txt"
+python3 - "$scratch/library" <<'FIXTURE'
+import json,sys,shutil
+from pathlib import Path
+root=Path(sys.argv[1]);identity='a'*64;clip='b'*24
+media=root/'media'/identity/'Clips';media.mkdir(parents=True)
+shutil.copyfile('tests/fixtures/clip.mp4',media/'clip-001.mp4')
+shutil.copyfile('tests/fixtures/practice.mp4',media.parent/'Practice.mp4')
+data=dict(schema_version=1,id=identity,title='Container fixture',published_at=1,
+          source=dict(name='fixture.mov',duration_seconds=6),video=dict(file='Practice.mp4',duration_seconds=6,hdr=False),
+          clips=[dict(id=clip,index=1,file='Clips/clip-001.mp4',duration_seconds=2,original_start_seconds=0,original_end_seconds=2,playback_start_seconds=0,playback_end_seconds=2)])
+(root/'metadata/sessions'/f'{identity}.json').write_text(json.dumps(data))
+FIXTURE
 chmod -R a+rX "$scratch/library"
 docker volume create "$volume" >/dev/null
 docker run -d --name "$name" --read-only --cap-drop ALL \
@@ -45,6 +57,10 @@ except OSError:
 else:
     raise AssertionError('Library is writable')
 Path('/data/smoke-state').write_text('persisted')
+import urllib.request
+image=urllib.request.urlopen('http://127.0.0.1:8000/api/sessions/'+('a'*64)+'/clips/'+('b'*24)+'/poster').read()
+assert image.startswith(b'\xff\xd8')
+assert len(list(Path('/data/clip-posters').glob('*.jpg')))==1
 PYTHON
 docker restart "$name" >/dev/null
 wait_healthy
