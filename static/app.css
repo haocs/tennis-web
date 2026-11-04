@@ -105,3 +105,27 @@ button.clip-row:hover{background:#eef3e0}button.clip-row:focus-visible{outline:3
 .clip-row .player-chip{display:flex;margin:6px 0}.clip-row .player-avatar{width:23px;height:23px;font-size:9px}
 .practice-recording{flex-wrap:wrap}.practice-recording .player-chip{font-size:11px}
 @media(max-width:650px){.section-heading{flex-wrap:wrap}.section-heading .toolbar{width:100%}.recording-players .player-chip{font-size:11px}}
+
+/* Compact clip rows keep selection and playback as separate controls. */
+.clip-row{display:flex;align-items:center;gap:4px;padding:4px 8px;border-bottom:1px solid var(--line);background:transparent}
+.clip-row:last-child{border-bottom:0}.clip-row.playing,.clip-row.selected{background:#eaf0df}
+.clip-play{display:grid;grid-template-columns:80px minmax(0,1fr) 48px;align-items:center;gap:12px;min-width:0;min-height:56px;width:100%;flex:1;padding:4px;border:0;border-radius:6px;background:transparent;color:var(--ink);font:inherit;text-align:left;cursor:pointer}
+.clip-play:hover{background:#eef3e0}.clip-play:focus-visible{outline:2px solid #7a9738;outline-offset:0}
+.clip-thumbnail{display:block;width:80px;height:45px;overflow:hidden;border-radius:5px;background:#dbe2d4}
+.clip-thumbnail img{display:block;width:100%;height:100%;object-fit:cover}.clip-thumbnail img[hidden],img.clip-poster[hidden]{display:none}
+.clip-details{min-width:0}.clip-title-line{display:flex;align-items:center;gap:8px;min-height:24px}.clip-row .clip-name{font-size:13px;font-weight:600;white-space:nowrap}
+.clip-row .player-chip{display:inline-flex;margin:0}.clip-row .player-avatar{width:24px;height:24px;font-size:10px}
+.clip-times{display:flex;flex-wrap:wrap;gap:2px 12px;font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums;line-height:1.4}
+.clip-times>span{white-space:nowrap}.clip-play .duration{font-size:12px;text-align:right;font-variant-numeric:tabular-nums}
+.clip-select{display:flex;align-items:center;justify-content:center;flex-shrink:0;width:44px;min-height:48px;margin:0;cursor:pointer}.clip-select[hidden]{display:none}.clip-select input,.clip-select-all input{width:18px;height:18px;margin:0;accent-color:var(--ink)}
+.clip-selection{display:flex;align-items:center;gap:12px;padding:8px 0 12px;font-size:12px}.clip-selection[hidden]{display:none}.clip-selection .button{margin-left:auto}.clip-select-all{display:flex;align-items:center;gap:7px;margin:0;min-height:44px;cursor:pointer}
+.clip-toolbar .toolbar{flex-wrap:wrap}.clip-toolbar select{min-width:0}
+.player-navigation>.clip-player-row{margin:0;gap:6px;flex-wrap:nowrap}.player-navigation>.player-options{margin-left:auto}
+#clip-main-player{padding:0;width:40px;height:40px;min-width:40px;border-radius:50%}#clip-main-player .player-avatar{width:28px;height:28px}
+.review-meta .player-chips{gap:4px}.review-meta .player-avatar{width:24px;height:24px;font-size:10px}
+.card-body>.player-chips:empty,#player-picker-help:empty{display:none}.card-body>.player-chips{margin-top:8px}
+.edit-players{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:20px 0}.edit-players>span{font-size:14px}.edit-players>.button{margin-left:auto}
+.timeline-table th,.timeline-table td{padding:8px 10px;font-size:11px;white-space:nowrap}.timeline-section{margin-top:24px}.timeline-section .decision{font-size:10px;padding:3px 6px}
+@media(max-width:650px){.clip-row{padding:3px 5px;gap:0}.clip-play{grid-template-columns:64px minmax(0,1fr) 35px;gap:8px;min-height:54px}.clip-thumbnail{width:64px;height:40px}.clip-row .clip-name{font-size:12px}.clip-times{font-size:10px;gap:1px 8px}.clip-title-line{gap:6px}.clip-select{width:44px;min-height:48px}.clip-toolbar .toolbar{gap:6px}.clip-toolbar .toolbar .button,.clip-toolbar select{font-size:11px;padding:8px;min-height:40px}.clip-selection{gap:8px}.clip-selection .button{font-size:11px;padding:8px}.player-navigation>.clip-player-row{gap:3px}.player-inherited{font-size:10px}.timeline-table th,.timeline-table td{padding:6px 8px;font-size:10px}}
+
+@media(max-width:650px){#clip-main-player{width:44px;height:44px;min-width:44px}}
