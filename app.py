@@ -131,6 +131,7 @@ def create_app(config=None):
 
     @app.get('/')
     @app.get('/processing')
+    @app.get('/learning')
     @app.get('/review/<identity>')
     @app.get('/review/<identity>/cuts')
     def index(identity=None):

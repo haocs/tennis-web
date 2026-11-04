@@ -227,3 +227,17 @@ original-clock projection, provenance and the boundary to future training datase
 `annotations.sqlite3` is permanent website app data, not a processing output or
 TTL-managed preview. Existing coaching notes appear through the common metadata
 API while retaining their authoritative coaching database, editor and evidence.
+
+### Learning and clip filters
+
+**Learning** in the main navigation lists clips with saved coaching reviews for a
+selected player. Review-time player links remain authoritative; unlabelled older
+reviews appear only through an assigned current main player and are labelled as
+such. Reprocessed or unavailable media keeps its saved review with a clear notice.
+No new AI request is generated.
+
+The clip list uses one content filter: All clips, Liked only, Highlights, or Hide
+less useful. Player and duration controls remain independent. **Select clips** is
+inside the clip list's three-dot menu. Point highlights are unique per original
+source and millisecond; repeated clicks reuse the saved highlight, and conflicting
+retarget/restore edits return a conflict instead of creating duplicates.

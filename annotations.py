@@ -212,6 +212,16 @@ class AnnotationStore:
                     if row['fingerprint'] != fingerprint:raise AnnotationConflict('Request ID already used for different metadata')
                     return json.loads(db.execute('SELECT data FROM annotations WHERE id=?', (row['annotation_id'],)).fetchone()['data'])
             identity = value.get('id')
+            if value['kind']=='highlight' and value['target']['scope']=='point' and value['status']=='active':
+                tick=int(math.floor(value['target']['start_seconds']*1000+.5))
+                duplicate=db.execute("SELECT data FROM annotations WHERE source_id=? AND kind='highlight' AND json_extract(data,'$.status')='active' AND json_extract(data,'$.target.scope')='point' AND CAST(round(json_extract(data,'$.target.start_seconds')*1000) AS INTEGER)=? AND id<>? ORDER BY id LIMIT 1",(value['source_id'],tick,identity or '')).fetchone()
+                if duplicate:
+                    existing=json.loads(duplicate['data'])
+                    if expected is not None or value['body'].get('text'):
+                        raise AnnotationConflict('This moment is already highlighted. Edit the existing highlight instead.',existing)
+                    if request_id:db.execute('INSERT INTO requests VALUES(?,?,?)',(request_id,fingerprint,existing['id']))
+                    db.commit()
+                    return dict(existing,already_highlighted=True)
             if identity is None:
                 if value['kind'] == 'usefulness':
                     selector = [value['source_id'], value['kind'], round(value['target']['start_seconds']*1000), round(value['target']['end_seconds']*1000)]

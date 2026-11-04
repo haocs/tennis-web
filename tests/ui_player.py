@@ -397,7 +397,7 @@ def test_native_media_navigation_uses_current_clip_queue(browser, ui_server):
     # Native actions follow the same liked-only queue, including an active clip
     # outside the filter. A saved stale callback must not bypass a disabled button.
     page.evaluate('window.staleNext=mediaHandlers.nexttrack')
-    page.get_by_role('button',name='♡ Liked only',exact=True).click()
+    page.get_by_role('combobox',name='Clip focus',exact=True).select_option('liked')
     page.evaluate('mediaHandlers.nexttrack()')
     expect(page.locator('#player')).to_have_attribute('src',re.compile('clip-001.mp4'))
     assert page.evaluate('mediaHandlers.nexttrack === null && mediaHandlers.previoustrack === null')
@@ -610,6 +610,7 @@ def test_compact_clip_selection_thumbnails_and_player_editing(browser,ui_server,
     assert not page.evaluate('document.documentElement.scrollWidth>innerWidth')
     page.locator('#player').evaluate('v=>{v.pause();v.currentTime=.5;}')
     source=page.locator('#player').get_attribute('src')
+    page.get_by_label('Clip list actions',exact=True).click()
     page.get_by_role('button',name='Select clips',exact=True).click()
     page.get_by_role('checkbox',name='Select clip 1',exact=True).check()
     page.get_by_role('checkbox',name='Select clip 2',exact=True).check()
@@ -630,6 +631,7 @@ def test_compact_clip_selection_thumbnails_and_player_editing(browser,ui_server,
     page.get_by_role('combobox',name='Filter clips by player',exact=True).select_option(people[1]['id'])
     expect(page.locator('#selected-clip-count')).to_have_text('2 selected')
     expect(page.locator('#clip-list .clip-row')).to_have_count(2)
+    page.get_by_label('Clip list actions',exact=True).click()
     page.get_by_role('button',name='Select clips',exact=True).click()
     page.locator('#clip-list .clip-play').nth(1).click()
     expect(page.locator('#player')).to_have_attribute('poster',re.compile(data['clips'][1]['id']+'/poster'))
@@ -720,4 +722,56 @@ def test_watch_metadata_and_cut_reports(browser,ui_server,width):
     assert not page.evaluate('document.documentElement.scrollWidth>innerWidth')
     _archive_test_metadata(page,ui_server)
     assert not errors
+    page.close()
+
+
+def test_single_clip_filter_and_duplicate_highlight(browser,ui_server):
+    page=browser.new_page(viewport={'width':390,'height':844},has_touch=True)
+    _archive_test_metadata(page,ui_server)
+    page.goto(ui_server+f'/review/{ID}?clip={CLIP}')
+    expect(page.locator('#video-seek')).to_be_enabled()
+    expect(page.locator('#liked-filter')).to_have_count(0)
+    expect(page.get_by_role('button',name='Select clips',exact=True)).not_to_be_visible()
+    page.get_by_role('combobox',name='Clip focus',exact=True).select_option('liked')
+    expect(page.locator('#clip-list .clip-row')).to_have_count(1)
+    page.get_by_role('combobox',name='Clip focus',exact=True).select_option('all')
+    expect(page.locator('#clip-list .clip-row')).to_have_count(3)
+    page.get_by_label('Clip list actions',exact=True).click()
+    page.get_by_role('button',name='Select clips',exact=True).click()
+    expect(page.locator('#clip-selection')).to_be_visible()
+    page.get_by_label('Clip list actions',exact=True).click()
+    page.get_by_role('button',name='Select clips',exact=True).click()
+    expect(page.locator('#clip-selection')).not_to_be_visible()
+    page.get_by_role('button',name='Highlight this moment',exact=True).click()
+    expect(page.locator('.note-marker')).to_have_count(1)
+    page.get_by_role('button',name='Highlight this moment',exact=True).click()
+    expect(page.locator('#toast')).to_contain_text('already highlighted')
+    expect(page.locator('.note-marker')).to_have_count(1)
+    assert not page.evaluate('document.documentElement.scrollWidth>innerWidth')
+    _archive_test_metadata(page,ui_server);page.close()
+
+
+def test_learning_navigation_saved_reviews_and_player_switch(browser,ui_server):
+    page=browser.new_page(viewport={'width':390,'height':844},has_touch=True)
+    # Mock saved review metadata only; video still uses the real fixture routes.
+    players=page.request.get(ui_server+'/api/players').json()['players']
+    if not players:
+        created=page.request.post(ui_server+'/api/players',headers={'X-Tennis-Request':'1'},data={'name':'Learner','height_cm':None,'level':'beginner'}).json()
+        players=[created]
+    person=players[0];c=page.request.get(ui_server+f'/api/sessions/{ID}').json()['clips'][0]
+    entry=dict(id=ID+':'+CLIP,source_id=ID,clip_id=CLIP,clip_index=1,title='Saved coaching fixture',recorded_at='2026-10-24T17:00:00-07:00',original_start=0,original_end=2,duration_seconds=2,media_available=True,poster_url=f'/api/sessions/{ID}/clips/{CLIP}/poster',reviews=[dict(id='saved-review',original_start=.25,original_end=1.25,updated_at=1,summary='Reset with balance.',answer='Recover with soft knees.',historical=False,player_mismatch=False,association='review',answer_truncated=False)])
+    page.route('**/api/learning?*',lambda route:route.fulfill(json={'entries':[entry],'next_after':None}))
+    page.goto(ui_server+'/')
+    page.get_by_role('link',name='Learning',exact=True).click()
+    expect(page.get_by_role('heading',name='Learning',exact=True)).to_be_visible()
+    page.get_by_role('combobox',name='Learning player',exact=True).select_option(person['id'])
+    expect(page.locator('.learning-card')).to_have_count(1)
+    expect(page.locator('.learning-card')).to_contain_text('Reset with balance.')
+    page.locator('.learning-review summary').click()
+    expect(page.locator('.learning-answer')).to_have_text('Recover with soft knees.')
+    page.get_by_role('combobox',name='Learning player',exact=True).select_option('')
+    expect(page.locator('.learning-card')).to_have_count(0)
+    for width in (320,390,1280):
+        page.set_viewport_size({'width':width,'height':844})
+        assert not page.evaluate('document.documentElement.scrollWidth>innerWidth')
     page.close()

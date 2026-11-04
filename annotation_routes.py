@@ -97,6 +97,50 @@ def register_annotations(app, library, session):
         return jsonify(schema_version=1,annotations=items,next_after=after,source_available=data is not None,
                        publication=data['published_at'] if data else None)
 
+    @app.get('/api/learning')
+    def learning():
+        pid=request.args.get('player_id','')
+        if not re.fullmatch('[a-f0-9]{32}',pid) or 'player:'+pid not in app.extensions['state'].all():
+            abort(400,'Choose a saved player')
+        after=request.args.get('after','')
+        if len(after)>100:abort(400,'Invalid review cursor')
+        try:limit=int(request.args.get('limit',30))
+        except ValueError:abort(400,'Invalid page size')
+        if not 1<=limit<=50:abort(400,'Invalid page size')
+        with queue.db() as db:
+            rows=db.execute("SELECT id,body,result,updated FROM jobs WHERE role='ai' AND state='completed' AND id>? AND (json_extract(body,'$.player_context.player_id')=? OR json_extract(body,'$.player_context.player_id') IS NULL) ORDER BY id LIMIT ?",(after,pid,limit+1)).fetchall()
+        entries={};sources={}
+        for row in rows[:limit]:
+            body=json.loads(row['body']);result=json.loads(row['result']);sid=body['source_id']
+            if sid not in sources:sources[sid]=optional_source(sid)
+            data=sources[sid]
+            if data:
+                edits=app.extensions['state'].all().get('meta:'+sid,{}).get('value') or {}
+                data['title']=edits.get('title',data['title'])
+            profile=body.get('player_context') or {};explicit=profile.get('player_id')==pid
+            start,end=body['original_start'],body['original_end']
+            clips=[c for c in data['clips'] if max(start,c['original_start_seconds'])<min(end,c['original_end_seconds'])] if data else []
+            # Never attribute an unlabelled legacy review from a recording roster:
+            # only an explicitly assigned main player can supply that association.
+            if not explicit:clips=[c for c in clips if (c.get('main_player') or {}).get('id')==pid]
+            if not clips and not explicit:continue
+            for clip in clips or [None]:
+                cid=clip['id'] if clip else body.get('clip_id','unavailable')
+                key=sid+':'+cid
+                historical=data is None or body['publication']!=data['published_at']
+                mismatch=bool(clip and explicit and (clip.get('main_player') or {}).get('id')!=pid)
+                entry=entries.setdefault(key,dict(id=key,source_id=sid,clip_id=cid,clip_index=clip['index'] if clip else None,
+                    title=data['title'] if data else 'Recording unavailable',recorded_at=data.get('source',{}).get('recorded_at') if data else None,
+                    original_start=clip['original_start_seconds'] if clip else start,original_end=clip['original_end_seconds'] if clip else end,
+                    duration_seconds=clip['duration_seconds'] if clip else end-start,media_available=clip is not None,
+                    poster_url=f'/api/sessions/{sid}/clips/{cid}/poster?v={data["published_at"]}' if clip else None,reviews=[]))
+                entry['reviews'].append(dict(id=row['id'],original_start=start,original_end=end,updated_at=row['updated'],
+                    summary=(result.get('structured') or {}).get('summary','') or result.get('answer','')[:400],
+                    answer=result.get('answer','')[:12000],answer_truncated=len(result.get('answer',''))>12000,
+                    historical=historical,player_mismatch=mismatch,association='review' if explicit else 'current_clip',
+                    response_url='/api/coaching/jobs/'+row['id']))
+        return jsonify(entries=list(entries.values()),next_after=rows[limit-1]['id'] if len(rows)>limit else None)
+
     @app.get('/api/annotations/sources/<source>/export')
     def export(source):
         check_source(source);items, after=page(listing(source,optional_source(source)),25,25)
