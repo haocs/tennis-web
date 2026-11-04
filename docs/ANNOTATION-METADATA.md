@@ -41,7 +41,7 @@ New metadata lives in `annotations.sqlite3` in the existing /data volume, with
 current rows and append-only revisions. Existing player profiles/preferences
 remain in website.sqlite3. Existing coaching annotations, reviewed revisions and
 pinned evidence remain authoritative in coaching.sqlite3 and are exposed through
-a read adapter to the common contract (`coach:<existing-id>`). Their existing edit
+a read adapter to the common contract (`coach:<existing-id>` and `coach-response:<job-id>`). Their existing edit
 API and evidence views remain the editor, avoiding duplicate copies and fragile
 dual writes. Export includes stable origin references and original evidence links.
 A future store migration can replace the adapter without changing common IDs.
@@ -67,7 +67,10 @@ usefulness(value=less_useful, optional reason), cut_feedback(reason flags/commen
 Registry-based schemas let future kinds add UI renderers and validation. Existing
 coach suggestions map to kind=coach with interval targets, possibly multiple
 applies_to selectors; untimed responses remain selection-level context, not
-invented precise timestamps. Their source/player/job/evidence references persist.
+invented precise timestamps. Legacy/unstructured responses remain selection-level
+metadata even when they contain no structured suggestions. Response history
+explicitly identifies legacy snapshots when earlier revisions were never stored;
+it does not fabricate a review history. Their source/player/job/evidence references persist.
 
 GET /api/annotations/types
 GET /api/annotations/sources/<source> (common human + coaching view, current relations)

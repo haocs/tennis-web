@@ -104,6 +104,7 @@ def register_annotations(app, library, session):
             if a['id'].startswith(('coach:','coach-response:')):
                 a['revision_source']='/api/annotations/'+a['id']+'/revisions'
                 a['evidence_source']='/api/coaching/evidence/'+a['origin']['job_id']
+                a['response_source']='/api/coaching/jobs/'+a['origin']['job_id']
             else:a['revision_source']='/api/annotations/'+a['id']+'/revisions'
         return jsonify(schema_version=1,annotations=items,next_after=after,training_label_status='not_released')
 
@@ -118,6 +119,7 @@ def register_annotations(app, library, session):
             values=[dict(version=row['version'],created_at=row['updated'],content=dict(cue=json.loads(row['result']).get('answer','')),status='saved_response',history_complete=False)] if row['version']>after else []
         elif identity.startswith('coach:'):
             with queue.db() as db:
+                if not db.execute('SELECT 1 FROM annotations WHERE id=?',(identity[6:],)).fetchone():abort(404,'Coaching suggestion not found')
                 rows=db.execute('SELECT version,created,value FROM annotation_revisions WHERE annotation_id=? AND version>? ORDER BY version LIMIT 101',(identity[6:],after)).fetchall()
             values=[dict(version=r['version'],created_at=r['created'],**json.loads(r['value'])) for r in rows]
         else:
