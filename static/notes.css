@@ -1,0 +1,25 @@
+.note-quick-actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:12px 0}
+.note-quick-actions .button{min-height:44px}
+#note-demote[hidden]{display:none}#note-demote[aria-pressed=true]{background:#eee1cd;border-color:#c7ad80}
+.notes-panel{margin:16px 0 24px;border:1px solid var(--line);border-radius:12px;padding:14px 16px;background:var(--white)}
+.notes-panel>summary{font-weight:600;cursor:pointer;min-height:24px}
+.notes-toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:14px 0}
+.notes-toolbar .check-label{margin:0}.notes-toolbar select{max-width:100%}
+.note-item{padding:14px 0;border-bottom:1px solid var(--line)}.note-item:last-child{border:0}
+.note-item.archived{opacity:.65}.note-item-heading{display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.note-item-heading>span,.note-relation,.note-empty{font-size:12px;color:var(--muted)}
+.note-item p{font-size:13px;line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere}
+.note-item-actions{display:flex;gap:8px;flex-wrap:wrap}.note-history{white-space:pre-wrap;font-size:12px;margin:10px 0;max-height:240px;overflow:auto}
+.note-clip-badge{font-size:11px;white-space:nowrap;color:#596d26}.note-less{color:#91673e}
+.note-markers{position:absolute;left:14px;right:14px;bottom:0;height:20px;z-index:3;pointer-events:none}
+.note-marker{position:absolute;left:var(--note-position);transform:translateX(-50%);top:5px;width:12px;height:12px;border:2px solid #fff;border-radius:50%;padding:0;background:#d9ed91;pointer-events:auto;cursor:pointer;box-shadow:0 1px 3px #0008}
+.note-marker.coach-marker{background:#a8d5f2}.note-marker:focus-visible{outline:3px solid #fff;outline-offset:2px}
+.video-stage.controls-hidden .note-markers{visibility:hidden}
+.note-cut-link{display:block;padding:12px;font-size:12px;color:var(--ink)}
+#note-target-fields{border:0;padding:0;margin:0}#note-cut-reasons{border:1px solid var(--line);border-radius:8px;padding:10px 14px}
+#note-cut-reasons[hidden],#note-start-row[hidden],#note-end-row[hidden],#note-clip-row[hidden],#note-reason-row[hidden],#note-retarget-row[hidden]{display:none}
+#note-cut-reasons .check-label input,#note-retarget-row input{width:18px;min-height:18px;margin:0}
+#note-editor select{width:100%}.cut-review-player{display:block;width:100%;max-height:55vh;aspect-ratio:16/9;background:#000;margin:16px 0;border-radius:12px}
+@media(max-width:650px){.note-markers{left:12px;right:12px}.notes-panel{padding:12px}.note-item-actions .button{min-height:40px}}
+
+#note-load-latest[hidden]{display:none}

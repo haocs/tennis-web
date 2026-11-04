@@ -3,6 +3,8 @@
 !Dockerfile
 !requirements.txt
 !app.py
+!annotations.py
+!annotation_routes.py
 !storage.py
 !thumbnails.py
 !state.py

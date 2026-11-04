@@ -57,7 +57,13 @@ except OSError:
 else:
     raise AssertionError('Library is writable')
 Path('/data/smoke-state').write_text('persisted')
-import urllib.request
+import urllib.request,json
+base='http://127.0.0.1:8000'
+body=dict(source_id='a'*64,publication=1,kind='highlight',target=dict(scope='point',start_seconds=.5),body=dict(text='Container metadata'),request_id='container-highlight-001')
+req=urllib.request.Request(base+'/api/annotations',data=json.dumps(body).encode(),headers={'Content-Type':'application/json','X-Tennis-Request':'1'},method='POST')
+note=json.load(urllib.request.urlopen(req));assert note['training_label_status']=='not_released'
+Path('/data/smoke-note-id').write_text(note['id'])
+assert Path('/data/annotations.sqlite3').is_file()
 image=urllib.request.urlopen('http://127.0.0.1:8000/api/sessions/'+('a'*64)+'/clips/'+('b'*24)+'/poster').read()
 assert image.startswith(b'\xff\xd8')
 assert len(list(Path('/data/clip-posters').glob('*.jpg')))==1
@@ -65,4 +71,12 @@ PYTHON
 docker restart "$name" >/dev/null
 wait_healthy
 docker exec "$name" python -c "from pathlib import Path; assert Path('/data/smoke-state').read_text() == 'persisted'"
+docker exec -i "$name" python - <<'PYTHON'
+import json,urllib.request
+from pathlib import Path
+source='a'*64
+items=json.load(urllib.request.urlopen('http://127.0.0.1:8000/api/annotations/sources/'+source))['annotations']
+assert any(a['id']==Path('/data/smoke-note-id').read_text() and a['body']['text']=='Container metadata' for a in items)
+assert Path('/library/probe.txt').read_text()=='read-only fixture'
+PYTHON
 echo 'Container smoke check passed'

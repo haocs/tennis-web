@@ -42,14 +42,17 @@ class Annotations:
         data = dict(content=value, status=status, reviewed_publication=publication, actor=actor or ('human' if version > 1 else 'ai_proposal'), training_label_status='not_released')
         db.execute('INSERT INTO annotation_revisions VALUES(?,?,?,?)', (key, version, canonical(data), self.clock()))
 
-    def annotation_list(self, source, publication, clips):
+    def annotation_list(self, source, publication, clips, after=None, limit=201):
         with self.db() as db:
-            rows = db.execute('SELECT a.*, j.body FROM annotations a JOIN jobs j ON j.id=a.job_id WHERE a.source_id=? ORDER BY a.updated DESC', (source,)).fetchall()
+            if after is None:
+                rows = db.execute('SELECT a.*, j.body FROM annotations a JOIN jobs j ON j.id=a.job_id WHERE a.source_id=? ORDER BY a.updated DESC', (source,)).fetchall()
+            else:
+                rows = db.execute('SELECT a.*, j.body FROM annotations a JOIN jobs j ON j.id=a.job_id WHERE a.source_id=? AND a.id>? ORDER BY a.id LIMIT ?', (source,after,limit)).fetchall()
         result = []
         for row in rows:
             a = dict(row); body = json.loads(a.pop('body'))
             a['proposal'] = json.loads(a['proposal']); a['current'] = json.loads(a['current'])
-            a['provenance'] = {k: body.get(k) for k in ('source_id','source_sha256','clip_id','publication','export_id','prompt_version','processing','player_context')}
+            a['provenance'] = {k: body.get(k) for k in ('source_id','source_sha256','clip_id','publication','export_id','prompt_version','processing','player_context','original_start','original_end')}
             # Even an untimed proposal retains its historical selection without inventing precise cue timing.
             intervals = a['current']['applies_to'] or [dict(start_seconds=body['original_start'], end_seconds=body['original_end'])]
             a['related_clip_ids'] = [c['id'] for c in clips if any(i['start_seconds'] <= c['original_end_seconds'] and i['end_seconds'] >= c['original_start_seconds'] for i in intervals)]

@@ -647,3 +647,77 @@ def test_compact_clip_selection_thumbnails_and_player_editing(browser,ui_server,
     r=page.request.put(ui_server+f'/api/sessions/{ID}/clips/players',data=dict(player_id=None,publication=fresh['published_at'],clips=[dict(id=c['id'],version=c['player_assignment']['version']) for c in fresh['clips']]),headers=headers);assert r.ok
     r=page.request.put(ui_server+f'/api/sessions/{ID}/players',data=dict(player_ids=[],version=fresh['player_assignment']['version']),headers=headers);assert r.ok
     page.close()
+
+
+def _archive_test_metadata(page, ui_server):
+    data=page.request.get(ui_server+f'/api/annotations/sources/{ID}').json()
+    for a in data['annotations']:
+        if a['kind']!='coach' and a['status']=='active':
+            response=page.request.put(ui_server+'/api/annotations/'+a['id'],headers={'X-Tennis-Request':'1'},data={'publication':data['publication'],'version':a['version'],'status':'archived'})
+            assert response.ok
+
+
+@pytest.mark.parametrize('width',[390,1280])
+def test_watch_metadata_and_cut_reports(browser,ui_server,width):
+    page=browser.new_page(viewport={'width':width,'height':900},has_touch=width==390)
+    errors=[];page.on('pageerror',lambda e:errors.append(str(e)))
+    _archive_test_metadata(page,ui_server)
+    page.goto(ui_server+f'/review/{ID}?clip={CLIP}')
+    expect(page.locator('#video-seek')).to_be_enabled()
+    page.locator('#video-seek').focus();page.keyboard.press('ArrowRight')
+    page.get_by_role('button',name='Highlight this moment',exact=True).click()
+    expect(page.locator('.note-marker')).to_have_count(1)
+    page.get_by_role('button',name='Less useful clip',exact=True).click()
+    expect(page.locator('#note-demote')).to_have_attribute('aria-pressed','true')
+    page.get_by_role('combobox',name='Clip focus',exact=True).select_option('highlights')
+    expect(page.locator('#clip-list .clip-row')).to_have_count(1)
+    page.get_by_role('combobox',name='Clip focus',exact=True).select_option('useful')
+    expect(page.locator('#clip-list .clip-row')).to_have_count(2)
+    expect(page.locator('#player')).to_have_attribute('src',re.compile('clip-001.mp4'))
+    page.get_by_role('combobox',name='Clip focus',exact=True).select_option('all')
+    page.locator('#notes-panel > summary').click()
+    page.get_by_role('button',name='Add note',exact=True).click()
+    page.get_by_role('combobox',name='Note target',exact=True).select_option('interval')
+    page.get_by_label('Original start (seconds)',exact=True).fill('0.25')
+    page.get_by_label('Original end (seconds)',exact=True).fill('1.25')
+    text=f'Balanced reset {browser.browser_type.name} {width}'
+    page.get_by_role('textbox',name='Note',exact=True).fill(text)
+    page.get_by_role('button',name='Save note',exact=True).click()
+    row=page.locator('.note-item').filter(has_text=text)
+    expect(row).to_be_visible()
+    row.get_by_role('button',name='Jump to moment',exact=True).click()
+    expect(page.locator('#player')).to_have_js_property('currentTime',0.25)
+    row.get_by_role('button',name='Edit',exact=True).click()
+    expect(page.locator('#note-scope')).to_be_disabled()
+    page.get_by_role('textbox',name='Note',exact=True).fill(text+' revised')
+    page.get_by_role('button',name='Save note',exact=True).click()
+    row=page.locator('.note-item').filter(has_text=text+' revised')
+    row.get_by_role('button',name='History',exact=True).click()
+    expect(row.locator('.note-history')).to_contain_text('v1')
+    expect(row.locator('.note-history')).to_contain_text('v2')
+    row.get_by_role('button',name='Archive',exact=True).click()
+    expect(page.locator('.note-item').filter(has_text=text+' revised')).to_have_count(0)
+    page.get_by_role('checkbox',name='Archived',exact=True).check()
+    row=page.locator('.note-item').filter(has_text=text+' revised')
+    row.get_by_role('button',name='Restore',exact=True).click()
+    expect(row).not_to_have_class(re.compile('archived'))
+    assert not page.evaluate('document.documentElement.scrollWidth>innerWidth')
+    # Processing feedback stays on its own page, with explicit original bounds.
+    page.get_by_label('More video actions',exact=True).click()
+    page.get_by_role('link',name='Review cuts',exact=True).click()
+    page.get_by_role('button',name='Report this cut',exact=True).click()
+    page.get_by_role('checkbox',name='Too much downtime',exact=True).check()
+    page.get_by_role('textbox',name='Comment',exact=True).fill('Waiting before the shot '+text)
+    page.get_by_role('button',name='Save report',exact=True).click()
+    report=page.locator('.note-item').filter(has_text='Waiting before the shot '+text)
+    expect(report).to_be_visible();expect(report).to_contain_text('Too much downtime')
+    report.get_by_role('button',name='Jump to moment',exact=True).click()
+    expect(page.locator('#cut-video')).to_have_js_property('paused',True)
+    report.get_by_role('button',name='Edit',exact=True).click()
+    expect(page.locator('#note-target-clip')).to_be_disabled()
+    expect(page.locator('#note-scope')).to_be_disabled()
+    page.get_by_role('button',name='Close note editor',exact=True).click()
+    assert not page.evaluate('document.documentElement.scrollWidth>innerWidth')
+    _archive_test_metadata(page,ui_server)
+    assert not errors
+    page.close()

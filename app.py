@@ -19,6 +19,7 @@ from practices import recording_time, group_recordings
 from state import State, Conflict
 from clip_study import public_clip_study, number as finite_number
 from coaching_routes import register_coaching
+from annotation_routes import register_annotations
 from players import register_players, decorate_players, decorate_groups, player_list
 from courts import COURT_ID, court_list, validate_court, enrich_groups
 
@@ -67,6 +68,7 @@ def create_app(config=None):
         app.config["COACH_MEDIA_ROOT"] = str(Path(app.config["DATA_ROOT"]) / "coaching-media")
     register_players(app, library, session, gap_minutes)
     register_coaching(app, library, lambda identity: decorate_players(copy.deepcopy(session(identity)), state.all()))
+    register_annotations(app, library, session)
 
     def require_publication(data, parameter):
         expected = request.args.get(parameter)
@@ -130,6 +132,7 @@ def create_app(config=None):
     @app.get('/')
     @app.get('/processing')
     @app.get('/review/<identity>')
+    @app.get('/review/<identity>/cuts')
     def index(identity=None):
         if identity:
             session(identity)

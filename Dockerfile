@@ -4,7 +4,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir -r requirements.txt && groupadd -g 10001 courtside && useradd -u 10001 -g courtside -M courtside && mkdir /data && chown courtside:courtside /data
-COPY --chown=courtside:courtside app.py storage.py thumbnails.py state.py manage.py practices.py players.py courts.py clip_study.py coaching.py coaching_routes.py coaching_annotations.py ./
+COPY --chown=courtside:courtside app.py annotations.py annotation_routes.py storage.py thumbnails.py state.py manage.py practices.py players.py courts.py clip_study.py coaching.py coaching_routes.py coaching_annotations.py ./
 COPY --chown=courtside:courtside worker/tennis_coach/__init__.py worker/tennis_coach/annotations.py ./worker/tennis_coach/
 COPY --chown=courtside:courtside templates ./templates
 COPY --chown=courtside:courtside static ./static
