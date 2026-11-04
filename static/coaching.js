@@ -2,9 +2,10 @@
 (() => {
   'use strict';
   const $=id=>document.getElementById(id), C=window.ClipStudyCore;
-  const defaults='Please suggest one observable improvement and a simple drill for this beginner tennis sequence.';
+  const oldDefault='Please suggest one observable improvement and a simple drill for this beginner tennis sequence.';
+  const defaults='Review the full sequence of supplied snapshots, from first to last. I am a beginner. Assess all clearly visible aspects of my technique: ready position, footwork, spacing, balance, racket preparation, swing positions and recovery. Cover the supported observations across the whole sequence, group repeated issues and prioritise up to six useful improvements. For each, cite the relevant frames and original timestamps, give an actionable cue and a simple drill, and state what the stills cannot establish. Do not limit the review to a single issue or invent unseen movement.';
   const states={queued:'Queued',leased:'Working',calling:'ChatGPT is reviewing frames',needs_review:'Interrupted after sending. Check the worker result before asking again.',failed:'Failed',completed:'Ready',cancelled:'Cancelled'};
-  let owner=null,timer=null,generation=0,selectedExport=null,selectedAsk=null,busy=false,revision=0,requestId=null,askId=null,askFingerprint=null,step=1,lastData=null,historyKey='';
+  let owner=null,timer=null,generation=0,selectedExport=null,selectedAsk=null,busy=false,revision=0,requestId=null,askId=null,askFingerprint=null,step=1,lastData=null,historyKey='',selectionPlaying=false,followUpId=null,mobileMode='watch';
   let stopWatch=()=>{};
   function el(tag,text,cls){const n=document.createElement(tag);if(text!==undefined)n.textContent=text;if(cls)n.className=cls;return n;}
   async function api(path,body,method='POST'){
@@ -14,37 +15,74 @@
   function message(text){$('coach-status').textContent=text;}
   function cryptoId(){return 'coach-'+Array.from(crypto.getRandomValues(new Uint8Array(16)),v=>v.toString(16).padStart(2,'0')).join('');}
   function draftKey(){return `tennis-coach:${owner.session.id}:${owner.session.published_at}:${owner.clip.id}`;}
-  function saveDraft(){if(!owner)return;try{sessionStorage.setItem(draftKey(),JSON.stringify({...times(),quality:$('coach-quality').value,question:$('coach-question').value,selectedExport,selectedAsk,step}));}catch(_){/* Storage may be disabled. */}}
-  function navigate(value){step=value;for(let i=1;i<=4;i++){const button=$('coach-step-'+i);button.setAttribute('aria-current',i===step?'step':'false');$('coach-phase-'+i).hidden=i!==step;}saveDraft();if(lastData)updateProgress(lastData);}
+  function saveDraft(){if(!owner)return;try{sessionStorage.setItem(draftKey(),JSON.stringify({...times(),quality:$('coach-quality').value,question:$('coach-question').value,selectedExport,selectedAsk,followUpId,step}));}catch(_){/* Storage may be disabled. */}}
+  function mobile(){return matchMedia('(max-width:760px)').matches;}
+  function mobileOffsets(){
+    const dialog=$('clip-study'),header=document.querySelector('.study-header'),bar=$('study-mobile-tabs'),workspace=document.querySelector('.study-workspace');
+    const chrome=header.offsetHeight+(mobile()?bar.offsetHeight:0);
+    dialog.style.setProperty('--study-header-height',header.offsetHeight+'px');
+    dialog.style.setProperty('--study-chrome-height',chrome+'px');
+    dialog.style.setProperty('--coach-anchor-height',(chrome+(mobileMode==='coach'?workspace.offsetHeight:0)+12)+'px');
+  }
+  function showMode(mode,scroll=true){
+    if(mode==='watch')$('coach-preview').pause();
+    mobileMode=mode;$('clip-study').dataset.mobileMode=mode;
+    for(const name of ['watch','coach'])$('study-mode-'+name).setAttribute('aria-pressed',String(name===mode));
+    requestAnimationFrame(()=>{mobileOffsets();if(scroll&&mobile())(mode==='coach'?$('coaching-panel'):document.querySelector('.study-workspace')).scrollIntoView({block:'start',behavior:'smooth'});});
+  }
+  function navigate(value,scroll=true){
+    if(step===2&&value!==2)$('coach-preview').pause();
+    step=value;document.querySelector('.study-layout').dataset.coachStep=value;
+    for(let i=1;i<=4;i++){$('coach-step-'+i).setAttribute('aria-current',i===step?'step':'false');$('coach-phase-'+i).hidden=i!==step;}
+    $('coach-back').hidden=step===1;$('coach-step-description').textContent=`Step ${step} of 4 · ${['Select a moment','Check the prepared clip','Write your question','Review and ask follow-ups'][step-1]}`;
+    saveDraft();if(lastData)updateProgress(lastData);
+    requestAnimationFrame(()=>{mobileOffsets();if(scroll&&mobile()&&mobileMode==='coach')$('coaching-panel').scrollIntoView({block:'start',behavior:'smooth'});});
+  }
   function times(){return {start:Number($('coach-in').value),end:Number($('coach-out').value)};}
   function showRange(){const t=times();$('coach-range').textContent=`Clip ${C.clock(t.start)}–${C.clock(t.end)} · original ${C.clock(owner.clip.original_start_seconds+t.start)}–${C.clock(owner.clip.original_start_seconds+t.end)}`;}
   function clearPreview(){const v=$('coach-preview');v.pause();v.removeAttribute('src');v.hidden=true;delete v.dataset.job;$('coach-export-links').replaceChildren();$('coach-ask').disabled=true;$('coach-preview-next').disabled=true;}
-  function selection(){if(!owner)return;showRange();selectedExport=null;selectedAsk=null;revision++;requestId=null;clearPreview();saveDraft();}
+  function selection(){if(!owner)return;selectionPlaying=false;followUpId=null;showRange();selectedExport=null;selectedAsk=null;revision++;requestId=null;clearPreview();saveDraft();}
   function setBusy(value){busy=value;$('coach-prepare').disabled=value||!owner||lastData?.enabled===false;$('coach-question').disabled=value;if(lastData)askAvailability(lastData);else $('coach-ask').disabled=true;}
   function button(text,action,cls='study-button'){const b=el('button',text,cls);b.type='button';b.onclick=action;return b;}
   function makePanel(){
     const panel=el('section',undefined,'study-panel coaching-panel');panel.id='coaching-panel';
     panel.innerHTML=`<p class="study-kicker">ONE MOMENT, ONE QUESTION</p><h3>Ask a coach</h3>
-      <nav class="coach-steps" aria-label="Coaching steps">${['Choose moment','Preview','Ask coach','Review suggestions'].map((name,i)=>`<button type="button" id="coach-step-${i+1}"><span>${i+1}</span>${name}</button>`).join('')}</nav>
+      <p id="coach-step-description" class="study-muted"></p><nav class="coach-steps" aria-label="Coaching steps">${['Choose moment','Preview','Ask coach','Review suggestions'].map((name,i)=>`<button type="button" id="coach-step-${i+1}"><span>${i+1}</span>${name}</button>`).join('')}</nav>
       <section id="coach-phase-1"><h4>1. Choose your moment</h4><p class="study-muted">Select up to 30 seconds. Zoom, focus and speed from the player are included.</p><p id="coach-range"></p>
-      <label>Start<input id="coach-in" type="range" min="0" max="1" step="0.01" value="0" aria-label="Coaching excerpt start"></label><button class="study-button" id="coach-set-in" type="button">Set start here</button>
-      <label>End<input id="coach-out" type="range" min="0" max="1" step="0.01" value="1" aria-label="Coaching excerpt end"></label><button class="study-button" id="coach-set-out" type="button">Set end here</button><button class="study-button" id="coach-play-selection" type="button">Play selection</button>
-      <label>What would you like help with?<textarea id="coach-question" rows="3" maxlength="4000"></textarea></label>
-      <label>Export size<select id="coach-quality"><option value="balanced">Balanced · up to 960px</option><option value="small">Smaller · up to 640px</option></select></label>
+      <div class="coach-boundary"><label>Start<input id="coach-in" type="range" min="0" max="1" step="0.01" value="0" aria-label="Coaching excerpt start"></label><button class="study-button" id="coach-set-in" type="button">Set start here</button></div>
+      <div class="coach-boundary"><label>End<input id="coach-out" type="range" min="0" max="1" step="0.01" value="1" aria-label="Coaching excerpt end"></label><button class="study-button" id="coach-set-out" type="button">Set end here</button></div><button class="study-button" id="coach-play-selection" type="button">Play selection</button>
+      <details id="coach-question-options"><summary>Optional: focus the review on something specific</summary><label>What would you like help with?<textarea id="coach-question" rows="3" maxlength="4000"></textarea></label></details>
+      <details><summary>Export options</summary><label>Export size<select id="coach-quality"><option value="balanced">Balanced · up to 960px</option><option value="small">Smaller · up to 640px</option></select></label></details>
       <p class="study-hint">Preparing stays on your Mac and NAS. Nothing is sent to AI yet.</p><button class="study-button study-primary" id="coach-prepare" type="button">Prepare coaching clip</button></section>
       <section id="coach-phase-2" hidden><h4>2. Check your excerpt</h4><p id="coach-preview-detail" class="study-muted">Prepare a moment first. The preview includes your focus area and playback speed.</p><video id="coach-preview" controls playsinline preload="metadata" hidden aria-label="Prepared coaching excerpt"></video><div id="coach-export-links"></div><button class="study-button study-primary" id="coach-preview-next" type="button">Looks good · continue</button></section>
-      <section id="coach-phase-3" hidden><h4>3. Ask ChatGPT</h4><p class="study-hint">Your Mac sends up to 32 timestamped stills and your question to OpenAI using its ChatGPT account. This is a frame review, not native video analysis. Audio is removed; HDR is converted to SDR.</p><p id="coach-send-question" class="coach-answer"></p><p id="coach-send-detail" class="study-muted">Prepare and check an excerpt first.</p><button class="study-button study-primary" id="coach-ask" type="button" disabled>Ask coach · send frames to OpenAI</button><button class="study-button" id="coach-to-results" type="button">View saved suggestions</button></section>
+      <section id="coach-phase-3" hidden><h4>3. Ask ChatGPT</h4><p class="study-hint">Your Mac sends up to 32 timestamped stills and your question to OpenAI using its ChatGPT account. This is a frame review, not native video analysis. Audio is removed; HDR is converted to SDR.</p><p id="coach-follow-up-context" class="study-hint" hidden></p><label>Your question<textarea id="coach-send-question" rows="5" maxlength="4000"></textarea></label><button type="button" id="coach-use-default" class="study-button">Review the whole sequence</button><p id="coach-send-detail" class="study-muted">Prepare and check an excerpt first.</p><button class="study-button study-primary" id="coach-ask" type="button" disabled>Ask coach · send frames to OpenAI</button><button class="study-button" id="coach-to-results" type="button">View saved suggestions</button></section>
       <section id="coach-phase-4" hidden><h4>4. Review suggestions</h4><p class="study-muted">Check the evidence, then accept, edit or dismiss each suggestion. Accepted, timed cues appear during playback. Original offsets are approximate; snapshots are the exact submitted images. This is coaching feedback, not a cut-accuracy label or verified training data.</p><div id="coach-history"></div></section>
-      <p id="coach-status" role="status" aria-live="polite"></p>`;
-    document.querySelector('.study-sidebar').prepend(panel);
+      <button type="button" id="coach-back" class="study-button" hidden>← Previous step</button><p id="coach-status" role="status" aria-live="polite"></p>`;
+    const sidebar=document.querySelector('.study-sidebar');
+    const extras=el('details',undefined,'study-extra-tools');extras.append(el('summary','Recording context & manual tools'));extras.open=!mobile();
+    while(sidebar.firstChild)extras.append(sidebar.firstChild);sidebar.append(panel,extras);
+    const tabs=el('nav',undefined,'study-mobile-tabs');tabs.id='study-mobile-tabs';tabs.setAttribute('aria-label','Clip study views');
+    tabs.append(button('Watch',()=>showMode('watch')),button('Coach',()=>showMode('coach')));tabs.children[0].id='study-mode-watch';tabs.children[1].id='study-mode-coach';document.querySelector('.study-header').after(tabs);$('coach-question-options').open=!mobile();
+    const start=button('Get AI coaching →',()=>showMode('coach'),'study-button study-primary study-coach-entry');document.querySelector('.study-transport').append(start);
+    const compact=el('div',undefined,'study-mobile-transport'),play=button('Play clip',()=>{$('study-play').click();});play.id='study-mobile-play';compact.append(play,button('Zoom & playback',()=>showMode('watch')));document.querySelector('.study-workspace').append(compact);
+    const syncPlay=()=>{play.textContent=$('study-video').paused?'Play clip':'Pause clip';};
+    for(const event of ['play','pause','ended'])$('study-video').addEventListener(event,syncPlay);
+    if(window.ResizeObserver)new ResizeObserver(()=>{if(owner)mobileOffsets();}).observe(document.querySelector('.study-workspace'));
+    window.addEventListener('resize',()=>{if(owner)mobileOffsets();});
+    $('coach-back').onclick=()=>navigate(Math.max(1,step-1));
+    $('coach-use-default').onclick=()=>{$('coach-send-question').value=defaults;$('coach-send-question').dispatchEvent(new Event('input'));};
     for(let i=1;i<=4;i++)$('coach-step-'+i).onclick=()=>navigate(i);
     for(const id of ['coach-in','coach-out','coach-quality'])$(id).addEventListener('input',selection);
     $('coach-set-in').onclick=()=>{$('coach-in').value=$('study-video').currentTime;selection();};
     $('coach-set-out').onclick=()=>{$('coach-out').value=$('study-video').currentTime;selection();};
-    $('coach-play-selection').onclick=()=>{const t=times(),v=$('study-video');if(t.start>=t.end){message('End must be after start.');return;}v.currentTime=t.start;v.play().catch(()=>message('Tap Play to preview.'));};
-    $('study-video').addEventListener('timeupdate',()=>{if(!owner)return;const t=times(),v=$('study-video');if(v.currentTime>=t.end&&!v.paused)v.pause();});
+    $('coach-play-selection').onclick=()=>{const t=times(),v=$('study-video');if(t.start>=t.end){message('End must be after start.');return;}selectionPlaying=true;v.currentTime=t.start;v.play().catch(()=>message('Tap Play to preview.'));};
+    $('study-video').addEventListener('timeupdate',()=>{if(!owner||!selectionPlaying)return;const t=times(),v=$('study-video');if(v.currentTime>=t.end&&!v.paused){selectionPlaying=false;v.pause();message('Selection finished. Play clip continues normal playback.');}});
+    for(const id of ['study-play','study-seek','study-back','study-forward'])$(id).addEventListener(id==='study-seek'?'input':'click',()=>{selectionPlaying=false;});
+    $('coach-preview').addEventListener('play',()=>{selectionPlaying=false;$('study-video').pause();});
+    $('study-video').addEventListener('play',()=>{$('coach-preview').pause();});
     $('study-speed').addEventListener('change',()=>{selection();navigate(1);});
-    $('coach-question').addEventListener('input',()=>{requestId=null;saveDraft();$('coach-send-question').textContent=$('coach-question').value;if(lastData)askAvailability(lastData);});
+    $('coach-question').addEventListener('input',()=>{requestId=null;saveDraft();$('coach-send-question').value=$('coach-question').value;if(lastData)askAvailability(lastData);});
+    $('coach-send-question').addEventListener('input',()=>{$('coach-question').value=$('coach-send-question').value;askFingerprint=null;askId=null;saveDraft();if(lastData)askAvailability(lastData);});
     $('coach-prepare').onclick=prepare;$('coach-ask').onclick=ask;
     $('coach-preview-next').onclick=()=>{if(!$('coach-preview').dataset.job){message('Wait for the prepared excerpt.');return;}navigate(3);};
     $('coach-to-results').onclick=()=>navigate(4);
@@ -56,12 +94,12 @@
   }
   async function prepare(){
     if(busy||!owner)return;const current=owner,rev=revision;
-    try{const body=recipe();setBusy(true);message('Excerpt queued for the media worker…');requestId=requestId||cryptoId();const j=await api('exports',{...body,request_id:requestId});if(owner!==current||rev!==revision)return;selectedExport=j.id;selectedAsk=null;navigate(2);await refresh();}
+    try{const body=recipe();selectionPlaying=false;$('study-video').pause();setBusy(true);message('Excerpt queued for the media worker…');requestId=requestId||cryptoId();const j=await api('exports',{...body,request_id:requestId});if(owner!==current||rev!==revision)return;selectedExport=j.id;selectedAsk=null;followUpId=null;navigate(2);await refresh();}
     catch(e){if(owner===current)message(e.message);}finally{if(owner===current){setBusy(false);if(rev!==revision)message('Selection changed. Prepare it again.');}}
   }
   async function ask(){
     if(busy||!selectedExport)return;const current=owner;
-    try{setBusy(true);message('Queued for the AI worker…');const fingerprint=JSON.stringify([selectedExport,$('coach-question').value.trim()]);if(fingerprint!==askFingerprint){askFingerprint=fingerprint;askId=cryptoId();}const j=await api('requests',{export_id:selectedExport,prompt:$('coach-question').value,consent:true,request_id:askId});if(owner!==current)return;selectedAsk=j.id;navigate(4);await refresh();}
+    try{setBusy(true);message('Queued for the AI worker…');const fingerprint=JSON.stringify([selectedExport,$('coach-question').value.trim(),followUpId]);if(fingerprint!==askFingerprint){askFingerprint=fingerprint;askId=cryptoId();}const j=await api('requests',{export_id:selectedExport,prompt:$('coach-question').value,consent:true,request_id:askId,...(followUpId?{follow_up_of:followUpId}:{})});if(owner!==current)return;selectedAsk=j.id;navigate(4);await refresh();}
     catch(e){if(owner===current)message(e.message);}finally{if(owner===current){setBusy(false);refresh();}}
   }
   function exportLinks(job){
@@ -69,7 +107,7 @@
     const base='/api/coaching/exports/'+job.id+'/';$('coach-preview').src=base+'excerpt.mp4';$('coach-preview').hidden=false;
     const r=job.result;$('coach-preview-detail').textContent=`${(r.bytes/1024/1024).toFixed(1)} MB · ${C.clock(r.output_seconds)} · ${job.body.speed}× · muted SDR. This prepared focus area is fixed; prepare again to change it.`;
     $('coach-send-detail').textContent=`${r.frames.length} frames · original ${C.clock(job.body.original_start)}–${C.clock(job.body.original_end)}. Exact submitted snapshots are kept with the response.`;
-    $('coach-send-question').textContent=$('coach-question').value;
+    $('coach-send-question').value=$('coach-question').value;
     const box=$('coach-export-links');box.replaceChildren();const manual=el('details');manual.append(el('summary','Use ChatGPT manually instead'));
     for(const [name,file] of [['Download coaching video','excerpt.mp4'],['Timing metadata','recipe.json'],['Prepared prompt','prompt.txt']]){const a=el('a',name,'study-button');a.href=base+file+'?download=1';a.setAttribute('download','');manual.append(a);}
     const chat=el('a','Open ChatGPT ↗','study-button');chat.href='https://chatgpt.com/';chat.target='_blank';chat.rel='noopener noreferrer';manual.append(chat,el('p','Attach the downloaded video and paste your question. This manual chat does not automatically save a structured response here.','study-hint'));box.append(manual);
@@ -77,7 +115,7 @@
   }
   function jump(original,annotation){
     const clip=owner.clip;
-    if(original>=clip.original_start_seconds&&original<=clip.original_end_seconds){$('study-video').pause();$('study-video').currentTime=original-clip.original_start_seconds;message(`Original ${C.clock(original)} · shown in the study player.`);if(matchMedia('(max-width:760px)').matches)document.querySelector('.study-workspace').scrollIntoView({block:'start',behavior:'smooth'});return;}
+    if(original>=clip.original_start_seconds&&original<=clip.original_end_seconds){selectionPlaying=false;$('study-video').pause();$('study-video').currentTime=original-clip.original_start_seconds;message(`Original ${C.clock(original)} · shown in the study player.`);if(mobile())document.querySelector('.study-workspace').scrollIntoView({block:'start',behavior:'smooth'});return;}
     const target=owner.session.clips.find(c=>c.original_start_seconds<=original&&c.original_end_seconds>=original);
     if(target){location.href=`/review/${owner.session.id}?clip=${target.id}&coach_time=${original}`;}
     else message('This moment is not retained in the current clips. Its original timestamp and saved snapshot remain available.');
@@ -123,13 +161,24 @@
     card.append(el('p','Legacy, unstructured note. Frame numbers and timing were not verified; no precise suggestion timestamps have been inferred.','study-hint'));
     const label=el('label','Your playback cue (review before saving)'),input=el('textarea');input.maxLength=400;input.rows=2;input.value=j.result.cue||'';label.append(input);card.append(label,button('Save reviewed cue',async()=>{try{await api('jobs/'+j.id,{action:'cue',cue:input.value,version:j.version},'PUT');await refresh(true);window.dispatchEvent(new Event('coach-notes-changed'));}catch(e){message(e.message);}}));
   }
+  function followUp(job){
+    if(job.body.publication!==owner.session.published_at){message('This response is from a previous publication. Prepare a new moment to ask about the current video.');return;}
+    const exported=lastData.jobs.find(j=>j.id===job.body.export_id&&j.role==='render'&&j.state==='completed');
+    if(!exported){message('The prepared excerpt is no longer available. Choose and prepare a new moment; the earlier advice is retained.');navigate(1);return;}
+    selectedExport=exported.id;selectedAsk=null;followUpId=job.id;askId=null;askFingerprint=null;
+    exportLinks(exported);$('coach-question').value='';$('coach-send-question').value='';
+    $('coach-follow-up-context').textContent='Follow-up on this frame sequence. The previous question and answer are included as context. You can also request another full review.';$('coach-follow-up-context').hidden=false;
+    showMode('coach',false);navigate(3);$('coach-send-question').focus({preventScroll:true});askAvailability(lastData);
+  }
   function history(data){
     const box=$('coach-history');box.replaceChildren();
-    const jobs=data.jobs.filter(j=>j.role==='ai');
+    const jobs=data.jobs.filter(j=>j.role==='ai'&&(j.body.clip_id===owner.clip.id||j.body.original_start<owner.clip.original_end_seconds&&j.body.original_end>owner.clip.original_start_seconds));
     if(!jobs.length)box.append(el('p','No saved suggestions yet. Prepare a moment, check the preview, then ask your coach.','study-muted'));
     for(const j of jobs){
-      const card=el('article',undefined,'coach-note');card.append(el('strong',`${C.clock(j.body.original_start)}–${C.clock(j.body.original_end)} · ${states[j.state]||j.state}`),el('p',j.body.prompt));
+      const card=el('article',undefined,'coach-note');card.append(el('strong',`${C.clock(j.body.original_start)}–${C.clock(j.body.original_end)} · ${states[j.state]||j.state}${j.body.follow_up_of?' · Follow-up':''}`));
+      const question=el('details');question.append(el('summary','Question asked'),el('p',j.body.prompt));card.append(question);
       if(j.state==='completed'){
+        if(j.body.publication===owner.session.published_at)card.append(button('Ask a follow-up',()=>followUp(j),'study-button study-primary'));
         if(j.result.structured){const result=j.result.structured;if(result.summary)card.append(el('p',result.summary,'coach-summary'));for(const warning of result.validation_warnings)card.append(el('p',warning,'coach-warning'));if(result.parse_status==='unstructured')card.append(el('p','This response could not be mapped safely. The raw answer and evidence are retained; do not guess its timing.','study-hint'));
           for(const a of data.annotations.filter(a=>a.job_id===j.id))card.append(suggestionCard(a,j));
           const all=el('details');all.append(el('summary','All submitted snapshots'));const fake={current:{evidence_frame_ids:(j.body.evidence_frames||[]).map(f=>f.frame_id)}};all.append(evidenceStrip(j,fake));card.append(all);
@@ -151,9 +200,9 @@
     }));
   }
   function askAvailability(data){
-      const existing=data.jobs.find(a=>a.role==='ai'&&a.body.export_id===selectedExport&&a.body.prompt===$('coach-question').value.trim()&&!['failed','cancelled'].includes(a.state));
-      $('coach-ask').disabled=busy||data.jobs.find(j=>j.id===selectedExport)?.state!=='completed'||!!existing;
-      $('coach-ask').textContent=existing?'Already asked · see saved suggestions':'Ask coach · send frames to OpenAI';
+      const existing=data.jobs.find(a=>a.role==='ai'&&a.body.export_id===selectedExport&&a.body.prompt===$('coach-question').value.trim()&&(a.body.follow_up_of||null)===followUpId&&!['failed','cancelled'].includes(a.state));
+      $('coach-ask').disabled=busy||data.jobs.find(j=>j.id===selectedExport)?.state!=='completed'||!!existing||!$('coach-question').value.trim();
+      $('coach-ask').textContent=existing?(existing.state==='completed'?'Response saved · ask a follow-up':'Request in progress · view suggestions'):followUpId?'Send follow-up · frames to OpenAI':'Ask coach · send frames to OpenAI';
   }
   function updateProgress(data){
     const exported=data.jobs.find(j=>j.id===selectedExport),asked=data.jobs.find(j=>j.id===selectedAsk);
@@ -181,13 +230,13 @@
     }catch(e){if(owner===current)message(e.message);}
   }
   window.Coach={
-    open(session,clip){if(!$('coaching-panel'))makePanel();generation++;owner={session,clip};selectedExport=null;selectedAsk=null;requestId=null;busy=false;historyKey='';lastData=null;clearPreview();
+    open(session,clip){if(!$('coaching-panel'))makePanel();generation++;owner={session,clip};selectedExport=null;selectedAsk=null;requestId=null;busy=false;historyKey='';lastData=null;clearPreview();selectionPlaying=false;followUpId=null;$('coach-follow-up-context').hidden=true;
       for(const id of ['coach-in','coach-out'])$(id).max=clip.duration_seconds;
       let d={};try{d=JSON.parse(sessionStorage.getItem(draftKey())||'{}');}catch(_){}
-      $('coach-in').value=Number.isFinite(d.start)?d.start:0;$('coach-out').value=Number.isFinite(d.end)?d.end:Math.min(30,clip.duration_seconds);$('coach-question').value=typeof d.question==='string'?d.question:defaults;$('coach-quality').value=d.quality==='small'?'small':'balanced';
-      selectedExport=d.selectedExport||null;selectedAsk=d.selectedAsk||null;showRange();setBusy(false);navigate([1,2,3,4].includes(d.step)?d.step:1);refresh();clearInterval(timer);timer=setInterval(()=>refresh(),4000);
+      $('coach-in').value=Number.isFinite(d.start)?d.start:0;$('coach-out').value=Number.isFinite(d.end)?d.end:Math.min(30,clip.duration_seconds);$('coach-question').value=typeof d.question==='string'&&d.question!==oldDefault?d.question:defaults;$('coach-quality').value=d.quality==='small'?'small':'balanced';
+      selectedExport=d.selectedExport||null;selectedAsk=d.selectedAsk||null;followUpId=d.followUpId||null;if(followUpId){$('coach-follow-up-context').hidden=false;$('coach-follow-up-context').textContent='Follow-up on the saved frame sequence. The previous question and answer are included as context.';}$('coach-send-question').value=$('coach-question').value;showRange();setBusy(false);showMode('watch',false);navigate([1,2,3,4].includes(d.step)?d.step:1,false);refresh();clearInterval(timer);timer=setInterval(()=>refresh(),4000);
     },
-    close(){saveDraft();generation++;owner=null;clearInterval(timer);if($('coach-preview'))clearPreview();},
+    close(){saveDraft();selectionPlaying=false;generation++;owner=null;clearInterval(timer);if($('coach-preview'))clearPreview();},
     watch({session,clip,player}){
       stopWatch();let active=true,notes=[],legacy=[],pendingSeek=null;const badge=el('button','Coach cue','coach-playback-cue');badge.hidden=true;player.parentElement.after(badge);
       const originalTime=()=>{if(clip)return clip.original_start_seconds+player.currentTime;const c=session.clips.find(c=>player.currentTime>=c.playback_start_seconds&&player.currentTime<=c.playback_end_seconds);return c?c.original_start_seconds+player.currentTime-c.playback_start_seconds:null;};

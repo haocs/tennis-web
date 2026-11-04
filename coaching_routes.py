@@ -61,6 +61,14 @@ def register_coaching(app,library,session):
         if spec['publication']!=data['published_at']:abort(409,'Recording changed; prepare a fresh excerpt')
         body=dict(spec,export_id=render['id'],artifact_directory=render['result']['artifact_directory'],prompt=prompt.strip(),provider='chatgpt-codex',consent=True)
         try:
+            parent_id=b.get('follow_up_of')
+            if parent_id is not None:
+                if not isinstance(parent_id,str):raise ValueError('Invalid previous coaching response')
+                parent=get(parent_id)
+                if parent['role']!='ai' or parent['state']!='completed' or parent['body'].get('export_id')!=render['id'] or parent['body'].get('publication')!=spec['publication']:
+                    raise ValueError('Follow-ups must refer to a completed response for this excerpt')
+                answer=parent['result']['answer']
+                body.update(follow_up_of=parent_id,previous_question=parent['body']['prompt'],previous_answer=answer[:12000],previous_answer_truncated=len(answer)>12000)
             body.update(evidence_frames=expected_frames(render),required_capability=CAPABILITY,prompt_version=PROMPT_VERSION,source_sha256=data.get('source',{}).get('sha256',data['id']),processing=data.get('processing'))
             body.update(submitted_prompt=coaching_prompt(body,{'frames':body['evidence_frames']}),response_contract=response_schema())
             return jsonify(queue.create('ai',body,b.get('request_id'))),201

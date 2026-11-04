@@ -56,7 +56,13 @@ class Coaching(Annotations):
         self.path=str(path); self.clock=clock
         Path(path).parent.mkdir(parents=True,exist_ok=True)
         with self.db() as db:
-            db.execute('PRAGMA journal_mode=WAL')
+            # SQLite can reject a concurrent journal-mode transition before its busy handler runs.
+            for attempt in range(10):
+                try:
+                    db.execute('PRAGMA journal_mode=WAL');break
+                except sqlite3.OperationalError as error:
+                    if 'locked' not in str(error) or attempt==9:raise
+                    time.sleep(.02*(attempt+1))
             db.execute('BEGIN IMMEDIATE')
             db.execute('CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY, role TEXT, state TEXT, body TEXT, request_id TEXT UNIQUE, fingerprint TEXT, worker TEXT, token TEXT, expires REAL, version INTEGER, updated REAL, result TEXT)')
             db.execute('CREATE TABLE IF NOT EXISTS workers(id TEXT PRIMARY KEY, role TEXT, updated REAL, status TEXT)')

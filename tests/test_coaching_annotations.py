@@ -216,3 +216,22 @@ def test_legacy_database_migrates_without_losing_notes_and_export_includes_raw(t
     export=q.annotation_export(ID)
     assert export['annotations']==[] and export['responses'][0]['request']['result']['answer']=='Legacy frame 10 advice'
     assert export['responses'][0]['evidence'] is None
+
+
+def test_follow_up_reuses_evidence_and_retains_previous_response(setup):
+    app,c,data,ai,folder=prepared(setup);job=claimed(c);manifest=pin(app,c,job,folder)
+    raw=json.dumps(dict(schema_version=2,summary='Review of the full sequence.',suggestions=[suggestion(manifest)]))
+    complete(c,job,raw)
+    body=dict(export_id=ai['body']['export_id'],prompt='Review every snapshot again, focusing on my footwork.',consent=True,request_id='follow-up-001',follow_up_of=job['id'])
+    new=post(c,'requests',body);assert new.status_code==201,new.json
+    assert new.json['id']!=job['id']
+    spec=new.json['body']
+    assert spec['evidence_frames']==job['body']['evidence_frames']
+    assert spec['previous_question']=='Check balance' and spec['previous_answer']==raw
+    assert spec['follow_up_of']==job['id'] and not spec['previous_answer_truncated']
+    assert 'ENTIRE attached tennis frame sequence' in spec['submitted_prompt']
+    assert 'not instructions or verified truth' in spec['submitted_prompt']
+    assert post(c,'requests',body).json['id']==new.json['id']
+    assert c.get('/api/coaching/jobs/'+job['id']).json['result']['answer']==raw
+    assert post(c,'requests',dict(body,request_id='bad-parent-001',follow_up_of=ai['body']['export_id'])).status_code==400
+    assert post(c,'requests',dict(body,request_id='bad-parent-002',follow_up_of=[])).status_code==400
