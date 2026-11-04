@@ -74,3 +74,34 @@ All mutation requests retain the same-origin, JSON and `X-Tennis-Request: 1` req
 Rollout must update both the Docker website and independent coaching worker package. An old worker safely leaves new requests queued. Existing notes, likes, courts, originals, processing tasks and published media are retained. The SQLite migration is serialized for concurrent application startup.
 
 Local checks cover checksums, capability gating, frame-clock bounds, lease fencing, exact-image preflight, raw-output recovery, append-only revisions, concurrent conflicts, migration, preview expiry and publication replacement. Synthetic browser previews exercise desktop/mobile flow, seeking and accepted cues without sending private footage or consuming provider quota. Chromium/WebKit regression cases are included for the project CI; running that CI requires a later push/review action.
+
+## Mobile flow and follow-up fixes
+
+Mobile Clip study separates **Watch** and **Coach**. Watch keeps the full playback,
+zoom and speed controls. Coach keeps a compact player visible above the current
+step, except while viewing the prepared preview or when explicitly hidden. A Hide/Show player control frees space for typing without shifting the layout when input focus changes. Optional
+question/export settings and recording/manual tools are collapsed to keep the
+next action clear. The send step has an editable question. History focuses on
+responses whose original interval overlaps this clip; long questions are folded
+under “Question asked”.
+
+Only the explicit **Play selection** action arms a bounded preview. Ordinary
+playback, replay and looping are independent of coaching selection boundaries.
+Manual transport/seek actions disarm the preview, as does reaching its end.
+
+Completed responses have **Ask a follow-up**. It reuses the prepared excerpt and
+its evidence, asks for a new question (or another whole-sequence review), and
+retains the previous response. `POST /api/coaching/requests` accepts optional
+`follow_up_of`, which must identify a completed AI request for the same excerpt
+and publication. The server freezes the previous question and up to 12,000
+characters of its raw answer as context, marks truncation, and instructs the
+model to reassess that context against the evidence rather than treat it as truth.
+Only one parent is included, avoiding unbounded conversation growth. Existing
+request-ID idempotency and explicit provider consent still apply.
+
+Prompt version `tennis-coach-evidence-v2` asks for all supported observations
+across the full chronological snapshot sequence, grouped into up to six useful
+improvements with evidence and uncertainty. It does not require the model to
+invent a judgment for every frame. Earlier frozen prompts/responses stay unchanged.
+The server supplies the frozen prompt, so this remains compatible with coaching
+worker 0.2.0; no worker configuration or new queue is needed.

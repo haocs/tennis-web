@@ -463,8 +463,10 @@ def test_structured_coaching_evidence_review_and_draft(browser, ui_server, width
     frame=dict(frame_id='f_test',order=1,sha256='e'*64,original_seconds=.5,clip_seconds=.5,excerpt_seconds=1)
     content=dict(title='Balanced reset',topic='Ready position',observation='A narrow stance in this still.',cue='Reset with soft knees.',drill='Recover and hold.',uncertainty='Stills cannot confirm split-step timing.',evidence_frame_ids=['f_test'],applies_to=[dict(start_seconds=.25,end_seconds=1.5)],validation_warnings=[],timing_status='timed')
     annotation=dict(id='a_test',job_id='job-test',current=content,proposal=copy.deepcopy(content),status='proposed',historical=False,playback_eligible=False,version=1,provenance=dict(clip_id=CLIP,publication=publication),related_clip_ids=[CLIP])
-    job=dict(id='job-test',version=1,role='ai',state='completed',body=dict(source_id=ID,clip_id=CLIP,publication=publication,original_start=0,original_end=1.8,start=0,end=1.8,prompt='Check balance',evidence_frames=[frame]),result=dict(answer='Original test response',structured=dict(summary='One observable improvement.',validation_warnings=[],parse_status='valid')))
-    state=dict(jobs=[job],annotations=[annotation],workers=[],enabled=True)
+    job=dict(id='job-test',version=1,role='ai',state='completed',body=dict(source_id=ID,clip_id=CLIP,publication=publication,export_id='render-test',original_start=0,original_end=1.8,start=0,end=1.8,prompt='Check balance',evidence_frames=[frame]),result=dict(answer='Original test response',structured=dict(summary='One observable improvement.',validation_warnings=[],parse_status='valid')))
+    rendered=dict(id='render-test',version=1,role='render',state='completed',body=dict(source_id=ID,clip_id=CLIP,publication=publication,start=0,end=1.8,original_start=0,original_end=1.8,speed=.5,crop=[0,0,1,1]),result=dict(bytes=1000,output_seconds=3.6,frames=[frame]))
+    state=dict(jobs=[job,rendered],annotations=[annotation],workers=[],enabled=True)
+    page.route('**/api/coaching/exports/render-test/excerpt.mp4',lambda route:route.fulfill(body=(Path(__file__).parent/'fixtures/clip.mp4').read_bytes(),content_type='video/mp4'))
     page.route('**/api/coaching/sessions/*',lambda route:route.fulfill(json=state))
     png=base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jWZkAAAAASUVORK5CYII=')
     page.route('**/api/coaching/evidence/*/*.jpg',lambda route:route.fulfill(body=png,content_type='image/png'))
@@ -476,7 +478,9 @@ def test_structured_coaching_evidence_review_and_draft(browser, ui_server, width
     page.route('**/api/coaching/annotations/a_test',update)
     page.goto(ui_server+f'/review/{ID}?clip={CLIP}')
     page.get_by_role('button',name='Study clip',exact=True).click()
+    if width<761:page.get_by_role('button',name='Coach',exact=True).click()
     question=page.get_by_role('textbox',name='What would you like help with?',exact=True)
+    if width<761:page.locator('#coach-question-options summary').click()
     question.fill('Keep my custom question')
     page.locator('#coach-step-4').click()
     expect(page.get_by_role('heading',name='Balanced reset',exact=True)).to_be_visible()
@@ -492,7 +496,40 @@ def test_structured_coaching_evidence_review_and_draft(browser, ui_server, width
     page.get_by_role('button',name='← Back to review',exact=True).click()
     page.get_by_role('button',name='Study clip',exact=True).click()
     expect(page.locator('#coach-step-4')).to_have_attribute('aria-current','step')
+    if width<761:page.get_by_role('button',name='Coach',exact=True).click()
     page.locator('#coach-step-1').click()
     expect(question).to_have_value('Keep my custom question')
+    page.locator('#coach-step-4').click()
+    page.get_by_role('button',name='Ask a follow-up',exact=True).click()
+    follow=page.get_by_role('textbox',name='Your question',exact=True)
+    expect(follow).to_be_visible()
+    follow.fill('Please reassess all snapshots, including footwork.')
+    sent=[]
+    def ask(route):
+        sent.append(route.request.post_data_json)
+        new=copy.deepcopy(job);new.update(id='follow-up-job',version=1,state='queued');new['body'].update(prompt=sent[-1]['prompt'],follow_up_of='job-test');state['jobs'].insert(0,new)
+        route.fulfill(status=201,json=new)
+    page.route('**/api/coaching/requests',ask)
+    page.get_by_role('button',name='Send follow-up · frames to OpenAI',exact=True).click()
+    expect(page.locator('#coach-history')).to_contain_text('Queued')
+    assert sent[0]['follow_up_of']=='job-test' and sent[0]['export_id']=='render-test'
+    assert sent[0]['prompt']=='Please reassess all snapshots, including footwork.'
     assert not errors
+    page.close()
+
+
+def test_normal_playback_ignores_coaching_end_until_play_selection(browser,ui_server):
+    page=browser.new_page()
+    page.goto(ui_server+f'/review/{ID}?clip={CLIP}')
+    page.get_by_role('button',name='Study clip',exact=True).click()
+    expect(page.locator('#study-play')).to_be_enabled()
+    page.locator('#coach-out').evaluate("e=>{e.value=.3;e.dispatchEvent(new Event('input',{bubbles:true}));}")
+    page.get_by_role('button',name='Play',exact=True).click()
+    page.wait_for_function("()=>document.querySelector('#study-video').currentTime>.6&&!document.querySelector('#study-video').paused")
+    page.get_by_role('button',name='Pause',exact=True).click()
+    page.get_by_role('button',name='Play selection',exact=True).click()
+    page.wait_for_function("()=>document.querySelector('#study-video').paused&&document.querySelector('#study-video').currentTime>=.3")
+    assert page.locator('#study-video').evaluate('v=>v.currentTime')<.7
+    page.get_by_role('button',name='Play',exact=True).click()
+    page.wait_for_function("()=>document.querySelector('#study-video').currentTime>.8&&!document.querySelector('#study-video').paused")
     page.close()
