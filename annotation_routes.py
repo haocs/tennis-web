@@ -225,6 +225,8 @@ def register_annotations(app, library, session):
             if 'player_id' in body:value['player_id']=player_id(body)
             if current['kind']=='usefulness' and value['target'] != current['target']:
                 raise ValueError('Create a separate assessment for a different cut')
+            value['change_origin']='human'
+            if value['status']=='active':value.pop('archive_reason',None)
             return jsonify(project(store.write(value,expected=body['version']),data))
         except ValueError as error:
             if isinstance(error,AnnotationConflict):raise

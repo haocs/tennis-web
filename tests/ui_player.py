@@ -737,6 +737,8 @@ def test_single_clip_filter_and_duplicate_highlight(browser,ui_server):
     page.get_by_role('combobox',name='Clip focus',exact=True).select_option('all')
     expect(page.locator('#clip-list .clip-row')).to_have_count(3)
     page.get_by_label('Clip list actions',exact=True).click()
+    menu=page.locator('.clip-actions-menu > div').bounding_box()
+    assert menu['x']>=0 and menu['x']+menu['width']<=390
     page.get_by_role('button',name='Select clips',exact=True).click()
     expect(page.locator('#clip-selection')).to_be_visible()
     page.get_by_label('Clip list actions',exact=True).click()

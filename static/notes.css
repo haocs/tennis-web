@@ -26,3 +26,5 @@
 .clip-actions-menu{position:relative}.clip-actions-menu>summary{list-style:none;min-width:44px;font-size:20px;padding:7px 12px;cursor:pointer}.clip-actions-menu>summary::-webkit-details-marker{display:none}
 .clip-actions-menu>div{position:absolute;right:0;top:calc(100% + 6px);z-index:5;min-width:160px;padding:6px;border:1px solid var(--line);border-radius:9px;background:var(--white);box-shadow:0 6px 20px #0002}
 .clip-actions-menu button{width:100%;border:0;background:transparent;color:var(--ink);text-align:left;min-height:44px;padding:10px;border-radius:6px;white-space:nowrap}.clip-actions-menu button:hover{background:var(--lime)}
+
+@media(max-width:650px){.clip-toolbar .toolbar{order:2}.clip-actions-menu{margin-left:0}.clip-toolbar .toolbar select{flex:1;min-width:0;padding:10px 8px;font-size:11px}}

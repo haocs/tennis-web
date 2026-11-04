@@ -139,7 +139,7 @@ const NoteUI=(()=>{
   $('#add-note').onclick=()=>openEditor();$('#notes-view').onchange=render;$('#notes-archived').onchange=render;
   $('#notes-panel').addEventListener('toggle',()=>{if($('#notes-panel').open)render();});
   const more=$('.player-more');more.classList.remove('hidden');$('.player-more-list').insertAdjacentHTML('beforeend',`<a class="note-cut-link" href="/review/${s.id}/cuts">Review cuts</a>`);
-  const toolbar=$('.clip-toolbar .toolbar');toolbar.querySelector('.clip-actions-menu').insertAdjacentHTML('beforebegin','<select id="note-clip-filter" aria-label="Clip focus"><option value="all">All clips</option><option value="liked">Liked only</option><option value="highlights">Highlights</option><option value="useful">Hide less useful</option></select>');$('#note-clip-filter').value=model.noteFilter||'all';$('#note-clip-filter').onchange=e=>{model.noteFilter=e.target.value;renderClipList();};
+  const toolbar=$('.clip-toolbar .toolbar');toolbar.insertAdjacentHTML('beforeend','<select id="note-clip-filter" aria-label="Clip focus"><option value="all">All clips</option><option value="liked">Liked only</option><option value="highlights">Highlights</option><option value="useful">Hide less useful</option></select>');$('#note-clip-filter').value=model.noteFilter||'all';$('#note-clip-filter').onchange=e=>{model.noteFilter=e.target.value;renderClipList();};
   refresh();timer=setInterval(refresh,10000);
  }
  function cuts(s){
