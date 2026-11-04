@@ -14,6 +14,7 @@ from werkzeug.exceptions import HTTPException
 from werkzeug.utils import secure_filename
 
 from storage import Library, smb_root, nas_media_address
+from thumbnails import ClipPosters, PosterUnavailable
 from practices import recording_time, group_recordings
 from state import State, Conflict
 from clip_study import public_clip_study, number as finite_number
@@ -52,6 +53,7 @@ def create_app(config=None):
         media_smb = library_smb + '/media'
     state = State(Path(app.config["DATA_ROOT"]) / "website.sqlite3")
     app.extensions.update(library=library, state=state)
+    posters = ClipPosters(Path(app.config["DATA_ROOT"])/"clip-posters", app.config.get("FFMPEG_BINARY", os.environ.get("TENNIS_FFMPEG", "ffmpeg")))
 
     def session(identity):
         try:
@@ -283,6 +285,24 @@ def create_app(config=None):
             abort(404)
         except OSError:
             abort(503, 'Media storage is unavailable')
+
+    @app.get('/api/sessions/<identity>/clips/<clip_id>/poster')
+    def clip_poster(identity, clip_id):
+        data = session(identity)
+        require_publication(data, 'v')
+        clip = next((c for c in data['clips'] if c['id'] == clip_id), None)
+        if clip is None:
+            abort(404, 'Clip not found')
+        try:
+            source = library.media(data, clip['file'])
+            if not source.is_file():
+                abort(404, 'Clip not available')
+            image = posters.get(data, clip, source)
+            return send_file(image, mimetype='image/jpeg', conditional=True, max_age=0)
+        except (KeyError, ValueError):
+            abort(404)
+        except (OSError, PosterUnavailable):
+            abort(503, 'Clip thumbnail unavailable')
 
     @app.get('/api/sessions/<identity>/poster')
     def poster(identity):

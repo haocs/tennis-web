@@ -4,6 +4,7 @@
 !requirements.txt
 !app.py
 !storage.py
+!thumbnails.py
 !state.py
 !manage.py
 !practices.py
