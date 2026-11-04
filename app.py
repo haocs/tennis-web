@@ -18,6 +18,7 @@ from practices import recording_time, group_recordings
 from state import State, Conflict
 from clip_study import public_clip_study, number as finite_number
 from coaching_routes import register_coaching
+from players import register_players, decorate_players, decorate_groups, player_list
 from courts import COURT_ID, court_list, validate_court, enrich_groups
 
 
@@ -62,7 +63,8 @@ def create_app(config=None):
 
     if not app.config["COACH_MEDIA_ROOT"]:
         app.config["COACH_MEDIA_ROOT"] = str(Path(app.config["DATA_ROOT"]) / "coaching-media")
-    register_coaching(app, library, session)
+    register_players(app, library, session, gap_minutes)
+    register_coaching(app, library, lambda identity: decorate_players(copy.deepcopy(session(identity)), state.all()))
 
     def require_publication(data, parameter):
         expected = request.args.get(parameter)
@@ -92,7 +94,7 @@ def create_app(config=None):
         for clip in data["clips"]:
             clip['nas_url'] = nas_media_address(media_smb, directory, clip['file'])
             clip["like"] = shared.get(f"like:{identity}:{clip['id']}", {"value": False, "version": 0})
-        return data
+        return decorate_players(data, shared)
 
     @app.before_request
     def check_mutations():
@@ -139,8 +141,8 @@ def create_app(config=None):
             return jsonify(sessions=[], practice_groups=[], invalid_sessions=0, library_available=False, shared_preferences=True)
         shared = state.all()
         decorated = [decorate(s, shared) for s in sessions]
-        groups = enrich_groups(group_recordings(decorated, gap_minutes), decorated, shared)
-        return jsonify(sessions=decorated, practice_groups=groups, courts=court_list(shared), invalid_sessions=errors,
+        groups = decorate_groups(enrich_groups(group_recordings(decorated, gap_minutes), decorated, shared), decorated)
+        return jsonify(sessions=decorated, practice_groups=groups, players=player_list(shared), courts=court_list(shared), invalid_sessions=errors,
                        library_available=(library.metadata / 'sessions').is_dir(), shared_preferences=True)
 
     @app.get('/api/sessions/<identity>')

@@ -35,3 +35,8 @@ test('copy policy supports secure API, LAN HTTP and denied permissions',async()=
   assert.equal(await C.copyText('denied',{secure:true,writeText:async()=>{throw Error('denied');},legacyCopy:()=>false}),false);
   assert.equal(await C.copyText('fallback',{secure:true,writeText:async()=>{throw Error('denied');},legacyCopy:()=>true}),true);
 });
+
+test('manual coaching prompt includes anonymous profile without name or player ID',()=>{
+  const prompt=C.coachingPrompt({...clip,main_player:{id:'private-player-id',name:'PrivateName',height_cm:181,level:'experienced'}});
+  assert.match(prompt,/181/);assert.match(prompt,/experienced/);assert.doesNotMatch(prompt,/PrivateName|private-player-id|I am a beginner/);
+});

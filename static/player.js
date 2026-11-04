@@ -23,13 +23,13 @@ const ReviewPlayer = {
  <button type="button" class="video-button video-play" id="video-play" aria-label="Play video" title="Play video">${this.icon('play')}</button>
  <button type="button" class="video-button" id="next" aria-label="Next clip" title="Next clip">${this.icon('next')}</button>
  </div>
- <div class="video-bottom"><span id="video-time" class="video-time">0:00 / 0:00</span><div class="video-view-actions"><button type="button" class="video-button" id="video-fullscreen" aria-label="Enter fullscreen" title="Enter fullscreen">${this.icon('fullscreen')}</button></div></div>
+ <div class="video-bottom"><span id="video-time" class="video-time">0:00 / 0:00</span><div class="video-view-actions"><select id="video-rate" class="video-rate" aria-label="Playback speed" title="Playback speed"><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="0.75">0.75×</option><option value="1" selected>1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="2">2×</option></select><button type="button" class="video-button" id="video-fullscreen" aria-label="Enter fullscreen" title="Enter fullscreen">${this.icon('fullscreen')}</button></div></div>
  <label class="video-seek-label"><span class="sr-only">Seek current video</span><input id="video-seek" type="range" min="0" max="0" value="0" step="0.1" disabled></label>
  </div></div><p id="native-fullscreen-hint" class="native-fullscreen-hint" hidden>Exit fullscreen to change clips.</p>`;},
  mount({time,onError}){
   this.controller?.destroy();
   const stage=document.querySelector('#video-stage'),video=document.querySelector('#player');
-  const find=id=>stage.querySelector('#'+id),seek=find('video-seek'),full=find('video-fullscreen'),overlay=stage.querySelector('.video-overlay');
+  const find=id=>stage.querySelector('#'+id),seek=find('video-seek'),full=find('video-fullscreen'),overlay=stage.querySelector('.video-overlay'),rate=find('video-rate');
   let hideTimer,keyboardMode=false,mediaContext=null,suspended=false;
   const media=navigator.mediaSession,study=document.querySelector('#clip-study');
   const mediaActions=['play','pause','seekto','previoustrack','nexttrack'];
@@ -81,7 +81,7 @@ const ReviewPlayer = {
   const elementFullscreen=()=>document.fullscreenElement===stage||document.webkitFullscreenElement===stage||document.fullscreenElement===video;
   const nativeFullscreen=()=>video.webkitDisplayingFullscreen||video.webkitPresentationMode==='fullscreen';
   function hide(){
-   if(video.paused||(keyboardMode&&stage.contains(document.activeElement)))return;
+   if(video.paused||document.activeElement===rate||(keyboardMode&&stage.contains(document.activeElement)))return;
    stage.classList.add('controls-hidden');overlay.inert=true;
   }
   function reveal(){
@@ -135,11 +135,15 @@ const ReviewPlayer = {
   stage.addEventListener('pointermove',event=>{if(event.pointerType!=='touch')reveal();});
   stage.addEventListener('pointerleave',event=>{if(event.pointerType!=='touch')hide();});
   stage.addEventListener('focusin',()=>{if(keyboardMode||document.activeElement===stage)reveal();});
+  rate.addEventListener('change',()=>{video.defaultPlaybackRate=Number(rate.value);video.playbackRate=Number(rate.value);reveal();});
+  rate.addEventListener('focus',reveal);
+  rate.addEventListener('blur',reveal);
+  video.addEventListener('ratechange',()=>{rate.value=String(video.playbackRate);});
   seek.addEventListener('input',()=>{video.currentTime=Number(seek.value);sync();reveal();});
   full.addEventListener('click',()=>toggleFullscreen().catch(()=>onError('Fullscreen is unavailable. Wait for the video to load, then try again.')));
   stage.addEventListener('keydown',event=>{
    keyboardMode=true;reveal();
-   if(event.target.matches('button,input'))return;
+   if(event.target.matches('button,input,select'))return;
    if(event.key===' '||event.key==='k'){event.preventDefault();togglePlay();}
    if(event.key==='ArrowLeft'||event.key==='ArrowRight'){
     event.preventDefault();if(Number.isFinite(video.duration))video.currentTime=Math.max(0,Math.min(video.duration,video.currentTime+(event.key==='ArrowLeft'?-5:5)));

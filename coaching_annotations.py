@@ -49,12 +49,15 @@ class Annotations:
         for row in rows:
             a = dict(row); body = json.loads(a.pop('body'))
             a['proposal'] = json.loads(a['proposal']); a['current'] = json.loads(a['current'])
-            a['provenance'] = {k: body.get(k) for k in ('source_id','source_sha256','clip_id','publication','export_id','prompt_version','processing')}
+            a['provenance'] = {k: body.get(k) for k in ('source_id','source_sha256','clip_id','publication','export_id','prompt_version','processing','player_context')}
             # Even an untimed proposal retains its historical selection without inventing precise cue timing.
             intervals = a['current']['applies_to'] or [dict(start_seconds=body['original_start'], end_seconds=body['original_end'])]
             a['related_clip_ids'] = [c['id'] for c in clips if any(i['start_seconds'] <= c['original_end_seconds'] and i['end_seconds'] >= c['original_start_seconds'] for i in intervals)]
+            context = body.get('player_context')
+            related = [c for c in clips if c['id'] in a['related_clip_ids']]
+            a['player_matches_current'] = not context or bool(related) and all((c.get('main_player') or {}).get('id') == context['player_id'] for c in related)
             a['historical'] = body['publication'] != publication
-            a['playback_eligible'] = a['status'] == 'accepted' and a['reviewed_publication'] == publication and bool(a['current']['applies_to'])
+            a['playback_eligible'] = a['player_matches_current'] and a['status'] == 'accepted' and a['reviewed_publication'] == publication and bool(a['current']['applies_to'])
             a['training_label_status'] = 'not_released'
             result.append(a)
         return result
