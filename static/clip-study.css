@@ -9,3 +9,5 @@ body.study-open{overflow:hidden}#clip-study{--study-bg:#101e1a;--study-panel:#19
 @media(max-width:760px){#clip-study input[type=range]{min-height:44px}}
 
 .study-header>div{min-width:0}.study-header>.study-button{flex-shrink:0}.study-panel{overflow-wrap:anywhere}
+
+.study-status:empty{display:none}.study-control-help{margin-top:12px;font-size:11px;color:var(--study-muted)}.study-control-help summary{cursor:pointer;padding:6px 0}

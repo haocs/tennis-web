@@ -34,7 +34,7 @@
     if(step===2&&value!==2)$('coach-preview').pause();
     step=value;document.querySelector('.study-layout').dataset.coachStep=value;
     for(let i=1;i<=4;i++){$('coach-step-'+i).setAttribute('aria-current',i===step?'step':'false');$('coach-phase-'+i).hidden=i!==step;}
-    $('coach-back').hidden=step===1;$('coach-step-description').textContent=`Step ${step} of 4 · ${['Select a moment','Check the prepared clip','Write your question','Review and ask follow-ups'][step-1]}`;
+    $('coach-back').hidden=step===1;
     saveDraft();if(lastData)updateProgress(lastData);
     requestAnimationFrame(()=>{mobileOffsets();if(scroll&&mobile()&&mobileMode==='coach')$('coaching-panel').scrollIntoView({block:'start',behavior:'smooth'});});
   }
@@ -46,20 +46,20 @@
   function button(text,action,cls='study-button'){const b=el('button',text,cls);b.type='button';b.onclick=action;return b;}
   function makePanel(){
     const panel=el('section',undefined,'study-panel coaching-panel');panel.id='coaching-panel';
-    panel.innerHTML=`<p class="study-kicker">ONE MOMENT, ONE QUESTION</p><h3>Ask a coach</h3>
-      <p id="coach-step-description" class="study-muted"></p><nav class="coach-steps" aria-label="Coaching steps">${['Choose moment','Preview','Ask coach','Review suggestions'].map((name,i)=>`<button type="button" id="coach-step-${i+1}"><span>${i+1}</span>${name}</button>`).join('')}</nav>
-      <section id="coach-phase-1"><h4>1. Choose your moment</h4><p class="study-muted">Select up to 30 seconds. Zoom, focus and speed from the player are included.</p><p id="coach-range"></p>
+    panel.innerHTML=`<h3>Ask a coach</h3>
+      <nav class="coach-steps" aria-label="Coaching steps">${['Choose moment','Preview','Ask coach','Review suggestions'].map((name,i)=>`<button type="button" id="coach-step-${i+1}"><span>${i+1}</span>${name}</button>`).join('')}</nav>
+      <section id="coach-phase-1" aria-labelledby="coach-step-1"><p class="study-muted">Up to 30 seconds · includes zoom and speed</p><p id="coach-range"></p>
       <div class="coach-boundary"><label>Start<input id="coach-in" type="range" min="0" max="1" step="0.01" value="0" aria-label="Coaching excerpt start"></label><button class="study-button" id="coach-set-in" type="button">Set start here</button></div>
       <div class="coach-boundary"><label>End<input id="coach-out" type="range" min="0" max="1" step="0.01" value="1" aria-label="Coaching excerpt end"></label><button class="study-button" id="coach-set-out" type="button">Set end here</button></div><button class="study-button" id="coach-play-selection" type="button">Play selection</button>
-      <details id="coach-question-options"><summary>Optional: focus the review on something specific</summary><label>What would you like help with?<textarea id="coach-question" rows="3" maxlength="4000"></textarea></label></details>
+      <details id="coach-question-options"><summary>Review focus (optional)</summary><label>What would you like help with?<textarea id="coach-question" rows="3" maxlength="4000"></textarea></label></details>
       <details><summary>Export options</summary><label>Export size<select id="coach-quality"><option value="balanced">Balanced · up to 960px</option><option value="small">Smaller · up to 640px</option></select></label></details>
-      <p class="study-hint">Preparing stays on your Mac and NAS. Nothing is sent to AI yet.</p><button class="study-button study-primary" id="coach-prepare" type="button">Prepare coaching clip</button></section>
-      <section id="coach-phase-2" hidden><h4>2. Check your excerpt</h4><p id="coach-preview-detail" class="study-muted">Prepare a moment first. The preview includes your focus area and playback speed.</p><video id="coach-preview" controls playsinline preload="metadata" hidden aria-label="Prepared coaching excerpt"></video><div id="coach-export-links"></div><button class="study-button study-primary" id="coach-preview-next" type="button">Looks good · continue</button></section>
-      <section id="coach-phase-3" hidden><h4>3. Ask ChatGPT</h4><p class="study-hint">Your Mac sends up to 32 timestamped stills and your question to OpenAI using its ChatGPT account. This is a frame review, not native video analysis. Audio is removed; HDR is converted to SDR.</p><p id="coach-follow-up-context" class="study-hint" hidden></p><label>Your question<textarea id="coach-send-question" rows="5" maxlength="4000"></textarea></label><button type="button" id="coach-use-default" class="study-button">Review the whole sequence</button><p id="coach-send-detail" class="study-muted">Prepare and check an excerpt first.</p><button class="study-button study-primary" id="coach-ask" type="button" disabled>Ask coach · send frames to OpenAI</button><button class="study-button" id="coach-to-results" type="button">View saved suggestions</button></section>
-      <section id="coach-phase-4" hidden><h4>4. Review suggestions</h4><p class="study-muted">Check the evidence, then accept, edit or dismiss each suggestion. Accepted, timed cues appear during playback. Original offsets are approximate; snapshots are the exact submitted images. This is coaching feedback, not a cut-accuracy label or verified training data.</p><div id="coach-history"></div></section>
+      <button class="study-button study-primary" id="coach-prepare" type="button">Prepare coaching clip</button></section>
+      <section id="coach-phase-2" aria-labelledby="coach-step-2" hidden><p id="coach-preview-detail" class="study-muted">Prepare a clip to preview.</p><video id="coach-preview" controls playsinline preload="metadata" hidden aria-label="Prepared coaching excerpt"></video><div id="coach-export-links"></div><button class="study-button study-primary" id="coach-preview-next" type="button">Looks good · continue</button></section>
+      <section id="coach-phase-3" aria-labelledby="coach-step-3" hidden><p class="study-hint">Sends your question and up to 32 frames to OpenAI. Reviews stills, without audio.</p><p id="coach-follow-up-context" class="study-hint" hidden></p><label>Your question<textarea id="coach-send-question" rows="5" maxlength="4000"></textarea></label><button type="button" id="coach-use-default" class="study-button">Review the whole sequence</button><p id="coach-send-detail" class="study-muted">Preview a clip first.</p><button class="study-button study-primary" id="coach-ask" type="button" disabled>Ask coach · send frames to OpenAI</button><button class="study-button" id="coach-to-results" type="button">View saved suggestions</button></section>
+      <section id="coach-phase-4" aria-labelledby="coach-step-4" hidden><p class="study-muted">Accept suggestions to show timed cues during playback.</p><div id="coach-history"></div></section>
       <button type="button" id="coach-back" class="study-button" hidden>← Previous step</button><p id="coach-status" role="status" aria-live="polite"></p>`;
     const sidebar=document.querySelector('.study-sidebar');
-    const extras=el('details',undefined,'study-extra-tools');extras.append(el('summary','Recording context & manual tools'));extras.open=!mobile();
+    const extras=el('details',undefined,'study-extra-tools');extras.append(el('summary','Recording & frame tools'));extras.open=!mobile();
     while(sidebar.firstChild)extras.append(sidebar.firstChild);sidebar.append(panel,extras);
     const tabs=el('nav',undefined,'study-mobile-tabs');tabs.id='study-mobile-tabs';tabs.setAttribute('aria-label','Clip study views');
     tabs.append(button('Watch',()=>showMode('watch')),button('Coach',()=>showMode('coach')));tabs.children[0].id='study-mode-watch';tabs.children[1].id='study-mode-coach';document.querySelector('.study-header').after(tabs);$('coach-question-options').open=!mobile();
@@ -76,7 +76,7 @@
     $('coach-set-in').onclick=()=>{$('coach-in').value=$('study-video').currentTime;selection();};
     $('coach-set-out').onclick=()=>{$('coach-out').value=$('study-video').currentTime;selection();};
     $('coach-play-selection').onclick=()=>{const t=times(),v=$('study-video');if(t.start>=t.end){message('End must be after start.');return;}selectionPlaying=true;v.currentTime=t.start;v.play().catch(()=>message('Tap Play to preview.'));};
-    $('study-video').addEventListener('timeupdate',()=>{if(!owner||!selectionPlaying)return;const t=times(),v=$('study-video');if(v.currentTime>=t.end&&!v.paused){selectionPlaying=false;v.pause();message('Selection finished. Play clip continues normal playback.');}});
+    $('study-video').addEventListener('timeupdate',()=>{if(!owner||!selectionPlaying)return;const t=times(),v=$('study-video');if(v.currentTime>=t.end&&!v.paused){selectionPlaying=false;v.pause();message('Selection finished.');}});
     for(const id of ['study-play','study-seek','study-back','study-forward'])$(id).addEventListener(id==='study-seek'?'input':'click',()=>{selectionPlaying=false;});
     $('coach-preview').addEventListener('play',()=>{selectionPlaying=false;$('study-video').pause();});
     $('study-video').addEventListener('play',()=>{$('coach-preview').pause();});
@@ -94,31 +94,31 @@
   }
   async function prepare(){
     if(busy||!owner)return;const current=owner,rev=revision;
-    try{const body=recipe();selectionPlaying=false;$('study-video').pause();setBusy(true);message('Excerpt queued for the media worker…');requestId=requestId||cryptoId();const j=await api('exports',{...body,request_id:requestId});if(owner!==current||rev!==revision)return;selectedExport=j.id;selectedAsk=null;followUpId=null;navigate(2);await refresh();}
+    try{const body=recipe();selectionPlaying=false;$('study-video').pause();setBusy(true);message('Clip queued…');requestId=requestId||cryptoId();const j=await api('exports',{...body,request_id:requestId});if(owner!==current||rev!==revision)return;selectedExport=j.id;selectedAsk=null;followUpId=null;navigate(2);await refresh();}
     catch(e){if(owner===current)message(e.message);}finally{if(owner===current){setBusy(false);if(rev!==revision)message('Selection changed. Prepare it again.');}}
   }
   async function ask(){
     if(busy||!selectedExport)return;const current=owner;
-    try{setBusy(true);message('Queued for the AI worker…');const fingerprint=JSON.stringify([selectedExport,$('coach-question').value.trim(),followUpId]);if(fingerprint!==askFingerprint){askFingerprint=fingerprint;askId=cryptoId();}const j=await api('requests',{export_id:selectedExport,prompt:$('coach-question').value,consent:true,request_id:askId,...(followUpId?{follow_up_of:followUpId}:{})});if(owner!==current)return;selectedAsk=j.id;navigate(4);await refresh();}
+    try{setBusy(true);message('Review queued…');const fingerprint=JSON.stringify([selectedExport,$('coach-question').value.trim(),followUpId]);if(fingerprint!==askFingerprint){askFingerprint=fingerprint;askId=cryptoId();}const j=await api('requests',{export_id:selectedExport,prompt:$('coach-question').value,consent:true,request_id:askId,...(followUpId?{follow_up_of:followUpId}:{})});if(owner!==current)return;selectedAsk=j.id;navigate(4);await refresh();}
     catch(e){if(owner===current)message(e.message);}finally{if(owner===current){setBusy(false);refresh();}}
   }
   function exportLinks(job){
     if($('coach-preview').dataset.job===job.id)return;$('coach-preview').dataset.job=job.id;
     const base='/api/coaching/exports/'+job.id+'/';$('coach-preview').src=base+'excerpt.mp4';$('coach-preview').hidden=false;
-    const r=job.result;$('coach-preview-detail').textContent=`${(r.bytes/1024/1024).toFixed(1)} MB · ${C.clock(r.output_seconds)} · ${job.body.speed}× · muted SDR. This prepared focus area is fixed; prepare again to change it.`;
-    $('coach-send-detail').textContent=`${r.frames.length} frames · original ${C.clock(job.body.original_start)}–${C.clock(job.body.original_end)}. Exact submitted snapshots are kept with the response.`;
+    const r=job.result;$('coach-preview-detail').textContent=`${(r.bytes/1024/1024).toFixed(1)} MB · ${C.clock(r.output_seconds)} · ${job.body.speed}×`;
+    $('coach-send-detail').textContent=`${r.frames.length} frames · original ${C.clock(job.body.original_start)}–${C.clock(job.body.original_end)}`;
     $('coach-send-question').value=$('coach-question').value;
     const box=$('coach-export-links');box.replaceChildren();const manual=el('details');manual.append(el('summary','Use ChatGPT manually instead'));
     for(const [name,file] of [['Download coaching video','excerpt.mp4'],['Timing metadata','recipe.json'],['Prepared prompt','prompt.txt']]){const a=el('a',name,'study-button');a.href=base+file+'?download=1';a.setAttribute('download','');manual.append(a);}
-    const chat=el('a','Open ChatGPT ↗','study-button');chat.href='https://chatgpt.com/';chat.target='_blank';chat.rel='noopener noreferrer';manual.append(chat,el('p','Attach the downloaded video and paste your question. This manual chat does not automatically save a structured response here.','study-hint'));box.append(manual);
+    const chat=el('a','Open ChatGPT ↗','study-button');chat.href='https://chatgpt.com/';chat.target='_blank';chat.rel='noopener noreferrer';manual.append(chat,el('p','Attach the video and paste your question. Replies stay in that chat.','study-hint'));box.append(manual);
     $('coach-ask').disabled=busy;$('coach-preview-next').disabled=false;
   }
   function jump(original,annotation){
     const clip=owner.clip;
-    if(original>=clip.original_start_seconds&&original<=clip.original_end_seconds){selectionPlaying=false;$('clip-study').dataset.playerCollapsed='false';$('study-mobile-collapse').textContent='Hide player';requestAnimationFrame(mobileOffsets);$('study-video').pause();$('study-video').currentTime=original-clip.original_start_seconds;message(`Original ${C.clock(original)} · shown in the study player.`);if(mobile())document.querySelector('.study-workspace').scrollIntoView({block:'start',behavior:'smooth'});return;}
+    if(original>=clip.original_start_seconds&&original<=clip.original_end_seconds){selectionPlaying=false;$('clip-study').dataset.playerCollapsed='false';$('study-mobile-collapse').textContent='Hide player';requestAnimationFrame(mobileOffsets);$('study-video').pause();$('study-video').currentTime=original-clip.original_start_seconds;message(`Original ${C.clock(original)}`);if(mobile())document.querySelector('.study-workspace').scrollIntoView({block:'start',behavior:'smooth'});return;}
     const target=owner.session.clips.find(c=>c.original_start_seconds<=original&&c.original_end_seconds>=original);
     if(target){location.href=`/review/${owner.session.id}?clip=${target.id}&coach_time=${original}`;}
-    else message('This moment is not retained in the current clips. Its original timestamp and saved snapshot remain available.');
+    else message('This moment was cut from the current video. See the saved frame.');
   }
   function evidenceStrip(job,annotation){
     const strip=el('div',undefined,'coach-evidence');const refs=annotation.current.evidence_frame_ids;
@@ -128,7 +128,7 @@
     return strip;
   }
   async function review(a,status,content){
-    try{await api('annotations/'+a.id,{version:a.version,publication:owner.session.published_at,status,...(content?{content}:{})},'PUT');await refresh(true);window.dispatchEvent(new Event('coach-notes-changed'));message(status==='accepted'?'Suggestion accepted. Timed advice is enabled for this publication.':'Review saved.');}
+    try{await api('annotations/'+a.id,{version:a.version,publication:owner.session.published_at,status,...(content?{content}:{})},'PUT');await refresh(true);window.dispatchEvent(new Event('coach-notes-changed'));message(status==='accepted'?'Suggestion accepted.':'Review saved.');}
     catch(e){message(e.message);/* Keep the unsaved edit visible after a conflict. */}
   }
   function editor(a,job,manual=false){
@@ -137,7 +137,7 @@
     const names={title:'Title',topic:'Topic',observation:'Observation',cue:'Playback cue',drill:'Drill',uncertainty:'Uncertainty'};
     const limits={title:120,topic:80,observation:1600,cue:400,drill:1200,uncertainty:1200};
     for(const [key,name] of Object.entries(names)){const label=el('label',name),input=el('textarea');input.rows=key==='cue'?2:1;input.value=a.current[key];input.maxLength=limits[key];label.append(input);form.append(label);fields[key]=input;}
-    form.append(el('p','Applicable times in the original recording. Leave empty for untimed advice.','study-hint'));
+    form.append(el('p','Original recording times · optional','study-hint'));
     const ranges=el('div'),rows=[];
     function addRange(start,end){const row=el('div',undefined,'coach-time-row'),inputs=[];for(const [name,value] of [['Start',start],['End',end]]){const label=el('label',name+' seconds'),input=el('input');input.type='number';input.min=job.body.original_start;input.max=job.body.original_end;input.step='.001';input.required=true;input.value=value;label.append(input);row.append(label);inputs.push(input);}row.append(button('Remove',()=>{row.remove();rows.splice(rows.indexOf(inputs),1);}));rows.push(inputs);ranges.append(row);}
     for(const i of a.current.applies_to)addRange(i.start_seconds,i.end_seconds);
@@ -145,41 +145,41 @@
     const refs=el('fieldset');refs.append(el('legend','Evidence frames'));const checks=[];
     for(const f of job.body.evidence_frames||[]){const label=el('label',`Frame ${f.order} · original ${C.clock(f.original_seconds)}`),input=el('input');input.type='checkbox';input.checked=a.current.evidence_frame_ids.includes(f.frame_id);label.prepend(input);refs.append(label);checks.push([input,f.frame_id]);}form.append(refs);
     const submit=el('button',manual?'Save reviewed suggestion':'Save edits and accept','study-button study-primary');submit.type='submit';form.append(submit);
-    form.onsubmit=event=>{event.preventDefault();const content=Object.fromEntries(Object.entries(fields).map(([k,v])=>[k,v.value]));content.evidence_frame_ids=checks.filter(([check])=>check.checked).map(([,id])=>id);content.applies_to=rows.map(([s,e])=>({start_seconds:Number(s.value),end_seconds:Number(e.value)}));if(manual){const requestId=details.dataset.requestId||(details.dataset.requestId=cryptoId());api('annotations',{job_id:job.id,publication:owner.session.published_at,content,request_id:requestId}).then(()=>{refresh(true);window.dispatchEvent(new Event('coach-notes-changed'));message('Your suggestion is saved with human provenance.');}).catch(e=>message(e.message));}else review(a,'accepted',content);};details.append(form);return details;
+    form.onsubmit=event=>{event.preventDefault();const content=Object.fromEntries(Object.entries(fields).map(([k,v])=>[k,v.value]));content.evidence_frame_ids=checks.filter(([check])=>check.checked).map(([,id])=>id);content.applies_to=rows.map(([s,e])=>({start_seconds:Number(s.value),end_seconds:Number(e.value)}));if(manual){const requestId=details.dataset.requestId||(details.dataset.requestId=cryptoId());api('annotations',{job_id:job.id,publication:owner.session.published_at,content,request_id:requestId}).then(()=>{refresh(true);window.dispatchEvent(new Event('coach-notes-changed'));message('Suggestion saved.');}).catch(e=>message(e.message));}else review(a,'accepted',content);};details.append(form);return details;
   }
   function suggestionCard(a,job){
     const card=el('article',undefined,'coach-suggestion');card.dataset.annotation=a.id;
     card.append(el('p',`${a.status==='accepted'?'Accepted':a.status==='dismissed'?'Dismissed':'Needs your review'}${a.historical?' · Previous publication':''}`,'coach-review-state'),el('h5',a.current.title));
-    if(a.historical)card.append(el('p',a.playback_eligible?'Reviewed for this publication. Original provenance retained.':'Linked by original time. Review again to enable cues for this publication.','study-hint'));
+    if(a.historical)card.append(el('p',a.playback_eligible?'Reviewed for this video.':'Older video version. Review again to show cues.','study-hint'));
     for(const [key,title] of [['observation','Observed'],['cue','Try'],['drill','Practice'],['uncertainty','Uncertainty']])if(a.current[key]){const p=el('p');p.append(el('strong',title+': '),document.createTextNode(a.current[key]));card.append(p);}
-    const timing=el('div',undefined,'coach-timing');if(a.current.applies_to.length)for(const i of a.current.applies_to)timing.append(button(`Original ${C.clock(i.start_seconds)}–${C.clock(i.end_seconds)}`,()=>jump(i.start_seconds,a)));else timing.append(el('p','Untimed advice · no playback cue until you add a relevant interval.','study-muted'));card.append(timing,evidenceStrip(job,a));
+    const timing=el('div',undefined,'coach-timing');if(a.current.applies_to.length)for(const i of a.current.applies_to)timing.append(button(`Original ${C.clock(i.start_seconds)}–${C.clock(i.end_seconds)}`,()=>jump(i.start_seconds,a)));else timing.append(el('p','Add timing to show a playback cue.','study-muted'));card.append(timing,evidenceStrip(job,a));
     for(const warning of a.current.validation_warnings||[])card.append(el('p',warning+'. Edit references before accepting.','coach-warning'));
     card.append(button(a.historical?'Accept for current video':'Accept suggestion',()=>review(a,'accepted')),button('Dismiss',()=>review(a,'dismissed')),editor(a,job));
-    const provenance=el('details');provenance.append(el('summary','Provenance'),el('p',`Original clip ${a.provenance.clip_id} · publication ${a.provenance.publication} · annotation ${a.id} · revision ${a.version}. AI proposal and human revisions are retained. Not a verified training label.`,'study-hint'));card.append(provenance);return card;
+    return card;
   }
   function legacyCard(card,j){
-    card.append(el('p','Legacy, unstructured note. Frame numbers and timing were not verified; no precise suggestion timestamps have been inferred.','study-hint'));
+    card.append(el('p','Older response · timing unverified','study-hint'));
     const label=el('label','Your playback cue (review before saving)'),input=el('textarea');input.maxLength=400;input.rows=2;input.value=j.result.cue||'';label.append(input);card.append(label,button('Save reviewed cue',async()=>{try{await api('jobs/'+j.id,{action:'cue',cue:input.value,version:j.version},'PUT');await refresh(true);window.dispatchEvent(new Event('coach-notes-changed'));}catch(e){message(e.message);}}));
   }
   function followUp(job){
-    if(job.body.publication!==owner.session.published_at){message('This response is from a previous publication. Prepare a new moment to ask about the current video.');return;}
+    if(job.body.publication!==owner.session.published_at){message('Older video version. Prepare a new clip to ask about this video.');return;}
     const exported=lastData.jobs.find(j=>j.id===job.body.export_id&&j.role==='render'&&j.state==='completed');
-    if(!exported){message('The prepared excerpt is no longer available. Choose and prepare a new moment; the earlier advice is retained.');navigate(1);return;}
+    if(!exported){message('Clip unavailable. Prepare a new selection.');navigate(1);return;}
     selectedExport=exported.id;selectedAsk=null;followUpId=job.id;askId=null;askFingerprint=null;
     exportLinks(exported);$('coach-question').value='';$('coach-send-question').value='';
-    $('coach-follow-up-context').textContent='Follow-up on this frame sequence. The previous question and answer are included as context. You can also request another full review.';$('coach-follow-up-context').hidden=false;
+    $('coach-follow-up-context').textContent='Includes the previous question and response.';$('coach-follow-up-context').hidden=false;
     showMode('coach',false);navigate(3);$('coach-send-question').focus({preventScroll:true});askAvailability(lastData);
   }
   function history(data){
     const box=$('coach-history');box.replaceChildren();
     const jobs=data.jobs.filter(j=>j.role==='ai'&&(j.body.clip_id===owner.clip.id||j.body.original_start<owner.clip.original_end_seconds&&j.body.original_end>owner.clip.original_start_seconds));
-    if(!jobs.length)box.append(el('p','No saved suggestions yet. Prepare a moment, check the preview, then ask your coach.','study-muted'));
+    if(!jobs.length)box.append(el('p','No suggestions yet.','study-muted'));
     for(const j of jobs){
       const card=el('article',undefined,'coach-note');card.append(el('strong',`${C.clock(j.body.original_start)}–${C.clock(j.body.original_end)} · ${states[j.state]||j.state}${j.body.follow_up_of?' · Follow-up':''}`));
       const question=el('details');question.append(el('summary','Question asked'),el('p',j.body.prompt));card.append(question);
       if(j.state==='completed'){
         if(j.body.publication===owner.session.published_at)card.append(button('Ask a follow-up',()=>followUp(j),'study-button study-primary'));
-        if(j.result.structured){const result=j.result.structured;if(result.summary)card.append(el('p',result.summary,'coach-summary'));for(const warning of result.validation_warnings)card.append(el('p',warning,'coach-warning'));if(result.parse_status==='unstructured')card.append(el('p','This response could not be mapped safely. The raw answer and evidence are retained; do not guess its timing.','study-hint'));
+        if(j.result.structured){const result=j.result.structured;if(result.summary)card.append(el('p',result.summary,'coach-summary'));for(const warning of result.validation_warnings)card.append(el('p',warning,'coach-warning'));if(result.parse_status==='unstructured')card.append(el('p','Timing unavailable. See the original response and frames.','study-hint'));
           for(const a of data.annotations.filter(a=>a.job_id===j.id))card.append(suggestionCard(a,j));
           const all=el('details');all.append(el('summary','All submitted snapshots'));const fake={current:{evidence_frame_ids:(j.body.evidence_frames||[]).map(f=>f.frame_id)}};all.append(evidenceStrip(j,fake));card.append(all);
           const blank={current:{title:'',topic:'',observation:'',cue:'',drill:'',uncertainty:'',evidence_frame_ids:[],applies_to:[]}};card.append(editor(blank,j,true));
@@ -208,8 +208,7 @@
     const exported=data.jobs.find(j=>j.id===selectedExport),asked=data.jobs.find(j=>j.id===selectedAsk);
     const completed=[!!exported,exported?.state==='completed',asked?.state==='completed',!!asked&&data.annotations.some(a=>a.job_id===asked.id&&a.status!=='proposed')];
     for(let i=1;i<=4;i++){$('coach-step-'+i).dataset.complete=completed[i-1]?'true':'false';$('coach-step-'+i).title=completed[i-1]?'Completed':'';}
-    if(step===3&&exported?.state==='completed'&&!asked)message('Ready to ask. Sending shares the listed frames and your question with OpenAI.');
-    if(step===2&&exported?.state==='completed')message('Excerpt ready. Check its focus and speed, then continue.');
+    if(step===2&&exported?.state==='completed')message('Clip ready.');
   }
   async function refresh(force=false){
     if(!owner)return;const current=owner,gen=generation;
@@ -222,10 +221,10 @@
       askAvailability(data);
       const online=data.workers.filter(w=>w.online),roles=online.map(w=>w.role);
       if(!data.enabled)message('Coaching workers are not configured yet.');
-      else if(ai&&ai.state!=='completed')message(ai.state==='queued'&&!online.some(w=>w.role==='ai'&&JSON.parse(w.capabilities||'[]').includes('coaching-annotations-v1'))?'Coaching queued. Waiting for an updated AI worker on your Mac.':states[ai.state]+(ai.result?.error?': '+ai.result.error:''));
-      else if(ai?.state==='completed')message('Response saved. Review each suggestion and its evidence.');
-      else if(j?.state==='completed')message('Excerpt ready. Check the preview, then continue to Ask coach.');
-      else if(j)message(j.state==='queued'&&!roles.includes('render')?'Excerpt queued. Waiting for the media worker on your Mac.':states[j.state]+(j.result?.error?': '+j.result.error:''));
+      else if(ai&&ai.state!=='completed')message(ai.state==='queued'&&!online.some(w=>w.role==='ai'&&JSON.parse(w.capabilities||'[]').includes('coaching-annotations-v1'))?'Queued · waiting for AI worker update.':states[ai.state]+(ai.result?.error?': '+ai.result.error:''));
+      else if(ai?.state==='completed')message('Response saved.');
+      else if(j?.state==='completed')message('Clip ready.');
+      else if(j)message(j.state==='queued'&&!roles.includes('render')?'Queued · waiting for media worker.':states[j.state]+(j.result?.error?': '+j.result.error:''));
       updateProgress(data);
     }catch(e){if(owner===current)message(e.message);}
   }
@@ -234,7 +233,7 @@
       for(const id of ['coach-in','coach-out'])$(id).max=clip.duration_seconds;
       let d={};try{d=JSON.parse(sessionStorage.getItem(draftKey())||'{}');}catch(_){}
       $('coach-in').value=Number.isFinite(d.start)?d.start:0;$('coach-out').value=Number.isFinite(d.end)?d.end:Math.min(30,clip.duration_seconds);$('coach-question').value=typeof d.question==='string'&&d.question!==oldDefault?d.question:defaults;$('coach-quality').value=d.quality==='small'?'small':'balanced';
-      selectedExport=d.selectedExport||null;selectedAsk=d.selectedAsk||null;followUpId=d.followUpId||null;if(followUpId){$('coach-follow-up-context').hidden=false;$('coach-follow-up-context').textContent='Follow-up on the saved frame sequence. The previous question and answer are included as context.';}$('coach-send-question').value=$('coach-question').value;showRange();setBusy(false);showMode('watch',false);navigate([1,2,3,4].includes(d.step)?d.step:1,false);refresh();clearInterval(timer);timer=setInterval(()=>refresh(),4000);
+      selectedExport=d.selectedExport||null;selectedAsk=d.selectedAsk||null;followUpId=d.followUpId||null;if(followUpId){$('coach-follow-up-context').hidden=false;$('coach-follow-up-context').textContent='Includes the previous question and response.';}$('coach-send-question').value=$('coach-question').value;showRange();setBusy(false);showMode('watch',false);navigate([1,2,3,4].includes(d.step)?d.step:1,false);refresh();clearInterval(timer);timer=setInterval(()=>refresh(),4000);
     },
     close(){saveDraft();selectionPlaying=false;generation++;owner=null;clearInterval(timer);if($('coach-preview'))clearPreview();},
     watch({session,clip,player}){

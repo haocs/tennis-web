@@ -25,7 +25,7 @@ const ReviewPlayer = {
  </div>
  <div class="video-bottom"><span id="video-time" class="video-time">0:00 / 0:00</span><div class="video-view-actions"><button type="button" class="video-button" id="video-fullscreen" aria-label="Enter fullscreen" title="Enter fullscreen">${this.icon('fullscreen')}</button></div></div>
  <label class="video-seek-label"><span class="sr-only">Seek current video</span><input id="video-seek" type="range" min="0" max="0" value="0" step="0.1" disabled></label>
- </div></div><p id="native-fullscreen-hint" class="native-fullscreen-hint" hidden>Fullscreen clip controls depend on your browser. Exit fullscreen to use previous/next here.</p>`;},
+ </div></div><p id="native-fullscreen-hint" class="native-fullscreen-hint" hidden>Exit fullscreen to change clips.</p>`;},
  mount({time,onError}){
   this.controller?.destroy();
   const stage=document.querySelector('#video-stage'),video=document.querySelector('#player');
