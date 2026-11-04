@@ -64,7 +64,7 @@ def test_review_rows_actions_and_courts(browser, ui_server, tmp_path):
     page.on('pageerror', lambda error: errors.append(str(error)))
     page.goto(ui_server+f'/review/{ID}')
     expect(page.locator('#review-location')).to_have_text('⌾ Park <West>')
-    rows = page.locator('#clip-list > button')
+    rows = page.locator('#clip-list .clip-play')
     expect(rows).to_have_count(3)
     assert rows.locator('button,a').count() == 0
     expect(page.get_by_role('link',name='Download full practice',exact=True)).to_be_visible()
@@ -547,12 +547,12 @@ def test_player_profiles_assignments_and_filters(browser, ui_server):
     page.locator('#clip-main-player').click()
     page.get_by_role('radio',name=name,exact=True).check()
     page.get_by_role('button',name='Save players',exact=True).click()
-    expect(page.locator('#clip-main-player')).to_contain_text(name)
+    expect(page.locator('#clip-main-player')).to_have_attribute('aria-label',re.compile(re.escape(name)))
     page.get_by_role('combobox',name='Filter clips by player',exact=True).select_option(label=name)
-    expect(page.locator('#clip-list > button')).to_have_count(1)
-    expect(page.locator('#clip-list > button')).to_contain_text(name)
+    expect(page.locator('#clip-list .clip-play')).to_have_count(1)
+    expect(page.locator('#clip-list .player-chip')).to_have_attribute('aria-label',name)
     page.reload()
-    expect(page.locator('#clip-main-player')).to_contain_text(name)
+    expect(page.locator('#clip-main-player')).to_have_attribute('aria-label',re.compile(re.escape(name)))
     assert not page.evaluate('document.documentElement.scrollWidth > innerWidth')
     page.get_by_role('button',name='Study clip',exact=True).click()
     page.locator('#study-mode-coach').click()
@@ -577,5 +577,73 @@ def test_player_profiles_assignments_and_filters(browser, ui_server):
     page.locator('#clip-main-player').click()
     page.get_by_role('radio',name='Unassigned',exact=True).check()
     page.get_by_role('button',name='Save players',exact=True).click()
-    expect(page.locator('#clip-main-player')).to_contain_text('Assign main player')
+    expect(page.locator('#clip-main-player')).to_have_attribute('aria-label',re.compile('unassigned'))
+    page.close()
+
+
+@pytest.mark.parametrize('width',[1280,390])
+def test_compact_clip_selection_thumbnails_and_player_editing(browser,ui_server,width):
+    page=browser.new_page(viewport={'width':width,'height':844},has_touch=width<761)
+    headers={'X-Tennis-Request':'1'}
+    people=[]
+    for suffix in ['A','B']:
+        r=page.request.post(ui_server+'/api/players',data=dict(name=f'Batch {browser.browser_type.name} {width} {suffix}',height_cm=170,level='beginner'),headers=headers)
+        assert r.status==201;people.append(r.json())
+    page.goto(ui_server+f'/review/{ID}?clip={CLIP}')
+    expect(page.locator('#video-seek')).to_be_enabled()
+    page.get_by_role('button',name='Edit details',exact=True).click()
+    expect(page.get_by_role('button',name='Edit players',exact=True)).to_be_visible()
+    page.get_by_role('button',name='Edit players',exact=True).click()
+    for person in people:page.get_by_role('checkbox',name=person['name'],exact=True).check()
+    page.get_by_role('button',name='Save players',exact=True).click()
+    expect(page.locator('#edit-dialog')).to_be_visible()
+    page.get_by_role('button',name='Save details',exact=True).click()
+    for person in people:expect(page.locator('#recording-player-badges').get_by_role('img',name=person['name'],exact=True)).to_be_visible()
+    assert all(p['name'] not in page.locator('#recording-player-badges').inner_text() for p in people)
+    assert page.locator('.review-meta').evaluate("e=>[...e.children].findIndex(n=>n.id==='recording-player-badges') === [...e.children].findIndex(n=>n.id==='review-location')+1")
+    expect(page.locator('.recording-players')).to_have_count(0)
+    page.locator('#clip-list').scroll_into_view_if_needed()
+    page.wait_for_function("()=>[...document.querySelectorAll('#clip-list img')].length===3 && [...document.querySelectorAll('#clip-list img')].every(i=>i.complete&&i.naturalWidth>0)")
+    posters=page.locator('#clip-list img').evaluate_all('els=>els.map(e=>e.src)')
+    assert len(set(posters))==3 and all('/clips/' in p and '/poster' in p for p in posters)
+    for row in page.locator('.clip-row').all():assert row.bounding_box()['height']<=76
+    assert not page.evaluate('document.documentElement.scrollWidth>innerWidth')
+    page.locator('#player').evaluate('v=>{v.pause();v.currentTime=.5;}')
+    source=page.locator('#player').get_attribute('src')
+    page.get_by_role('button',name='Select clips',exact=True).click()
+    page.get_by_role('checkbox',name='Select clip 1',exact=True).check()
+    page.get_by_role('checkbox',name='Select clip 2',exact=True).check()
+    expect(page.locator('#selected-clip-count')).to_have_text('2 selected')
+    assert page.locator('#select-all-clips').evaluate('e=>e.indeterminate')
+    assert page.locator('#player').get_attribute('src')==source
+    assert page.locator('#player').evaluate('v=>v.paused&&Math.abs(v.currentTime-.5)<.05')
+    page.get_by_role('button',name='Assign main player',exact=True).click()
+    page.get_by_role('radio',name=people[1]['name'],exact=True).check()
+    page.get_by_role('button',name='Save players',exact=True).click()
+    expect(page.locator('#selected-clip-count')).to_have_text('0 selected')
+    data=page.request.get(ui_server+f'/api/sessions/{ID}').json()
+    assert [c['main_player']['id'] if c['main_player'] else None for c in data['clips']]==[people[1]['id'],people[1]['id'],None]
+    expect(page.locator('#clip-list .player-chip')).to_have_count(2)
+    assert all(p['name'] not in page.locator('#clip-list').inner_text() for p in people)
+    # Selection is bounded to the currently shown list when filters change.
+    page.get_by_role('checkbox',name='Select all shown clips',exact=True).check()
+    page.get_by_role('combobox',name='Filter clips by player',exact=True).select_option(people[1]['id'])
+    expect(page.locator('#selected-clip-count')).to_have_text('2 selected')
+    expect(page.locator('#clip-list .clip-row')).to_have_count(2)
+    page.get_by_role('button',name='Select clips',exact=True).click()
+    page.locator('#clip-list .clip-play').nth(1).click()
+    expect(page.locator('#player')).to_have_attribute('poster',re.compile(data['clips'][1]['id']+'/poster'))
+    if folder:=os.environ.get('TENNIS_UI_SCREENSHOT_DIR'):
+        page.locator('#clip-list').scroll_into_view_if_needed();page.screenshot(path=str(Path(folder)/f'compact-clips-{width}-{browser.browser_type.name}.png'),full_page=True)
+    page.goto(ui_server+'/')
+    card=page.locator('.practice-card').filter(has=page.locator(f'[data-player-id="{people[1]["id"]}"]')).first
+    expect(card).to_be_visible()
+    assert card.locator('.practice-recording .player-chip').count()==0
+    assert card.locator('.card-body').evaluate("e=>[...e.children].findIndex(n=>n.classList.contains('card-location')) < [...e.children].findIndex(n=>n.classList.contains('player-chips'))")
+    page.goto(ui_server+'/#liked')
+    expect(page.locator('.session-card .card-visual img').first).to_have_attribute('src',re.compile('/clips/'+CLIP+'/poster'))
+    # Restore fixture assignments for the other engine and existing scenarios.
+    fresh=page.request.get(ui_server+f'/api/sessions/{ID}').json()
+    r=page.request.put(ui_server+f'/api/sessions/{ID}/clips/players',data=dict(player_id=None,publication=fresh['published_at'],clips=[dict(id=c['id'],version=c['player_assignment']['version']) for c in fresh['clips']]),headers=headers);assert r.ok
+    r=page.request.put(ui_server+f'/api/sessions/{ID}/players',data=dict(player_ids=[],version=fresh['player_assignment']['version']),headers=headers);assert r.ok
     page.close()

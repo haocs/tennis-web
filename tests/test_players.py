@@ -133,3 +133,30 @@ def test_coaching_profile_snapshot_is_anonymous_and_retained(setup):
     assert stale.status_code==409
     r=post(c,'requests',dict(export_id=body['export_id'],prompt='Again',consent=True,request_id='changed-profile-followup',follow_up_of=ai['id']))
     assert r.status_code==400
+
+
+def test_bulk_clip_assignment_is_atomic_versioned_and_explicit(setup):
+    app,root,data=setup;c=app.test_client();a=create(c);b=create(c,'Blair')
+    second=copy.deepcopy(data['clips'][0]);second.update(id='d'*24,index=2,file='Clips/clip-002.mp4',duration_seconds=5,original_start_seconds=15,original_end_seconds=20,playback_start_seconds=10,playback_end_seconds=15)
+    data['clips'].append(second);data['video']['duration_seconds']=15
+    manifest=root/'metadata/sessions'/f'{ID}.json';manifest.write_text(json.dumps(data))
+    roster(c,[a['id']])
+    url=f'/api/sessions/{ID}/clips/players'
+    body=dict(player_id=b['id'],publication=data['published_at'],clips=[dict(id=CLIP,version=0),dict(id=second['id'],version=0)])
+    assert put(c,url,body).json==dict(saved=True,updated=2)
+    assert all(x['main_player']['id']==b['id'] for x in current(c)['clips'])
+    assert focus(c,data,a['id'],1).status_code==200
+    stale=copy.deepcopy(body);stale['player_id']=None
+    for item in stale['clips']:item['version']=1
+    assert put(c,url,stale).status_code==409
+    clips=current(c)['clips'];assert clips[0]['main_player']['id']==a['id'] and clips[1]['main_player']['id']==b['id']
+    stale['clips'][0]['version']=2
+    assert put(c,url,stale).status_code==200
+    assert all(x['main_player'] is None and not x['player_assignment']['inherited'] for x in current(c)['clips'])
+    assert manifest.read_text()==json.dumps(data)
+    for bad in [[],[dict(id=CLIP,version=True)],[dict(id=CLIP,version=3)]*2,[dict(id='e'*24,version=0)],[dict(id=CLIP,version=-1)]]:
+        assert put(c,url,dict(body,clips=bad)).status_code==400
+    assert put(c,url,dict(body,player_id='unknown')).status_code==400
+    assert put(c,url,dict(body,publication=0)).status_code==409
+    assert c.put(url,json=body).status_code==415
+    assert put(c,url,body,Origin='http://elsewhere').status_code==403
