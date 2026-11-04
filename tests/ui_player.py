@@ -165,6 +165,9 @@ def test_iphone_calls_real_native_fullscreen(browser, ui_server):
     assert page.locator('#video-stage').evaluate('(e)=>getComputedStyle(e).position') == 'relative'
     page.get_by_role('button',name='Exit fullscreen',exact=True).click()
     expect(page.get_by_role('button',name='Enter fullscreen',exact=True)).to_be_visible()
+    expect(page.locator('#native-fullscreen-hint')).to_be_visible()
+    expect(page.locator('#native-fullscreen-hint')).to_contain_text('Exit fullscreen')
+    assert page.locator('#video-expand').count()==0
     page.close()
 
 
@@ -395,60 +398,16 @@ def test_media_session_unavailable_or_rejects_actions(browser, ui_server, availa
     page.close()
 
 
-def test_expanded_player_keeps_navigation_and_native_fullscreen_separate(browser, ui_server):
-    page = browser.new_page(viewport={'width':390,'height':844},has_touch=True)
+def test_single_fullscreen_action_across_mobile_and_desktop(browser, ui_server):
+    page=browser.new_page()
     page.goto(ui_server+f'/review/{ID}?clip={CLIP}')
     expect(page.locator('#video-seek')).to_be_enabled()
-    page.evaluate('window.originalPlayer=document.querySelector("#player")')
-    page.get_by_role('button',name='Expand player',exact=True).click()
-    dialog=page.get_by_role('dialog',name='Expanded video player',exact=True)
-    expect(dialog).to_be_visible()
-    assert page.locator('#clip-list').evaluate('e => !!e.closest("[inert]")')
-    for width,height in [(390,844),(844,390),(320,568)]:
+    for width,height in [(390,844),(844,390),(320,568),(1280,800)]:
         page.set_viewport_size({'width':width,'height':height})
-        box=dialog.bounding_box()
-        assert box['x']==0 and box['y']==0
-        assert box['width']==pytest.approx(width,abs=1) and box['height']==pytest.approx(height,abs=1)
-        for selector in ['#previous','#next','#video-play','#video-expand','#video-fullscreen','#video-close-expanded','#video-seek']:
-            control=page.locator(selector).bounding_box()
-            assert 0 <= control['x'] and control['x']+control['width'] <= width+1
-            assert 0 <= control['y'] and control['y']+control['height'] <= height+1
-        if folder:=os.environ.get('TENNIS_UI_SCREENSHOT_DIR'):
-            Path(folder).mkdir(parents=True,exist_ok=True)
-            dialog.screenshot(path=str(Path(folder)/f'expanded-{width}-{browser.browser_type.name}.png'))
-    page.get_by_role('button',name='Next clip',exact=True).click()
-    expect(page.locator('#player')).to_have_attribute('src',re.compile('clip-002.mp4'))
-    page.wait_for_function("() => document.querySelector('#player').readyState >= 2")
-    expect(page.locator('#video-seek')).to_be_enabled()
-    page.locator('#player').evaluate('v => v.pause()')
-    expect(dialog).to_be_visible()
-    assert page.evaluate('originalPlayer === document.querySelector("#player")')
-    page.get_by_role('button',name='Previous clip',exact=True).click()
-    expect(page.locator('#player')).to_have_attribute('src',re.compile('clip-001.mp4'))
-    page.wait_for_function("() => document.querySelector('#player').readyState >= 2")
-    expect(page.locator('#video-seek')).to_be_enabled()
-    page.locator('#player').evaluate('v => v.pause()')
-    page.get_by_role('button',name='Close expanded player',exact=True).focus()
-    page.keyboard.press('Shift+Tab')
-    expect(page.locator('#video-seek')).to_be_focused()
-    page.keyboard.press('Tab')
-    expect(page.get_by_role('button',name='Close expanded player',exact=True)).to_be_focused()
-    page.keyboard.press('Escape')
-    expect(dialog).not_to_be_visible()
-    expect(page.get_by_role('button',name='Expand player',exact=True)).to_be_focused()
-    assert page.locator('#clip-list').evaluate('e => !e.closest("[inert]")')
-    assert page.evaluate('document.body.style.position') == ''
-    # Native fullscreen is a distinct action, even from the expanded mode.
-    page.get_by_role('button',name='Expand player',exact=True).click()
-    page.evaluate('''() => {
-      const stage=document.querySelector('#video-stage'),v=document.querySelector('#player');
-      stage.requestFullscreen=undefined;stage.webkitRequestFullscreen=undefined;
-      window.nativeEntries=0;v.webkitEnterFullscreen=()=>window.nativeEntries++;
-    }''')
-    page.get_by_role('button',name='Enter fullscreen',exact=True).click()
-    assert page.evaluate('nativeEntries') == 1
-    assert page.locator('.player-expanded').count() == 0
-    assert page.evaluate('document.body.style.position') == ''
+        expect(page.locator('.video-view-actions button')).to_have_count(1)
+        expect(page.get_by_role('button',name='Enter fullscreen',exact=True)).to_be_visible()
+        assert page.locator('#video-expand,#video-close-expanded,.player-expanded').count()==0
+        assert page.locator('#video-stage').get_attribute('role')=='region'
     page.close()
 
 
