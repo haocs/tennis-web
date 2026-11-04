@@ -570,4 +570,12 @@ def test_player_profiles_assignments_and_filters(browser, ui_server):
     page.get_by_label('Name',exact=True).fill(name+' updated')
     page.get_by_role('button',name='Save player',exact=True).click()
     expect(page.locator('#saved-player-list')).to_contain_text(name+' updated')
+    # The fixture library is shared across browser engines; restore this test's
+    # assignment so unrelated playback tests do not inherit a player label.
+    page.get_by_role('button',name='Close saved players',exact=True).click()
+    page.goto(ui_server+f'/review/{ID}?clip={CLIP}')
+    page.locator('#clip-main-player').click()
+    page.get_by_role('radio',name='Unassigned',exact=True).check()
+    page.get_by_role('button',name='Save players',exact=True).click()
+    expect(page.locator('#clip-main-player')).to_contain_text('Assign main player')
     page.close()
