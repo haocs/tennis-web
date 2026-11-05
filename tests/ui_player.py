@@ -591,7 +591,8 @@ def test_compact_clip_selection_thumbnails_and_player_editing(browser,ui_server,
         assert r.status==201;people.append(r.json())
     page.goto(ui_server+f'/review/{ID}?clip={CLIP}')
     expect(page.locator('#video-seek')).to_be_enabled()
-    page.get_by_role('button',name='Edit details',exact=True).click()
+    page.get_by_role('button',name='Full practice ↗',exact=True).click()
+    page.get_by_role('button',name='Edit video',exact=True).click()
     expect(page.get_by_role('button',name='Edit players',exact=True)).to_be_visible()
     page.get_by_role('button',name='Edit players',exact=True).click()
     for person in people:page.get_by_role('checkbox',name=person['name'],exact=True).check()
@@ -602,6 +603,7 @@ def test_compact_clip_selection_thumbnails_and_player_editing(browser,ui_server,
     assert all(p['name'] not in page.locator('#recording-player-badges').inner_text() for p in people)
     assert page.locator('.review-meta').evaluate("e=>[...e.children].findIndex(n=>n.id==='recording-player-badges') === [...e.children].findIndex(n=>n.id==='review-location')+1")
     expect(page.locator('.recording-players')).to_have_count(0)
+    page.locator('#clip-list [data-play]').first.click()
     page.locator('#clip-list').scroll_into_view_if_needed()
     page.wait_for_function("()=>[...document.querySelectorAll('#clip-list img')].length===3 && [...document.querySelectorAll('#clip-list img')].every(i=>i.complete&&i.naturalWidth>0)")
     posters=page.locator('#clip-list img').evaluate_all('els=>els.map(e=>e.src)')
@@ -803,4 +805,48 @@ def test_session_metadata_and_entity_note_targets(browser,ui_server,width):
     page.get_by_role('textbox',name='Note',exact=True).fill('')
     page.get_by_role('button',name='Save',exact=True).click()
     expect(page.locator('#practice-editor')).not_to_be_visible()
+    page.close()
+
+
+@pytest.mark.parametrize('width',[390,1280])
+def test_review_actions_follow_video_or_clip_and_editor_keeps_its_target(browser,ui_server,width):
+    page=browser.new_page(viewport={'width':width,'height':900})
+    page.goto(ui_server+f'/review/{ID}?clip={CLIP}')
+    expect(page.locator('#review-kind')).to_have_text('Clip review')
+    expect(page.locator('#player-like button')).to_have_attribute('data-like-item',CLIP)
+    expect(page.locator('#review-like button')).to_have_attribute('data-like-item',CLIP)
+    page.get_by_role('button',name='Edit clip',exact=True).click()
+    expect(page.get_by_role('dialog',name='Clip details',exact=True)).to_be_visible()
+    expect(page.locator('#edit-location')).not_to_be_visible()
+    expect(page.get_by_role('button',name='Edit players',exact=True)).not_to_be_visible()
+    expect(page.get_by_role('button',name='Edit main player',exact=True)).to_be_visible()
+    page.get_by_role('textbox',name='Title',exact=True).fill('Recovery cut')
+    # Playback/current selection can change while an editor is open. Its saved
+    # target must remain the clip for which the dialog was opened.
+    page.evaluate("()=>{model.current='cccccccccccccccccccccccc';updatePlayerState();}")
+    page.get_by_role('button',name='Save details',exact=True).click()
+    expect(page.locator('#edit-dialog')).not_to_be_visible()
+    fresh=page.request.get(ui_server+f'/api/sessions/{ID}').json()
+    assert fresh['title']=='Practice <script>'
+    assert fresh['clips'][0]['title']=='Recovery cut' and fresh['clips'][1]['title']!='Recovery cut'
+    page.get_by_role('button',name='Full practice ↗',exact=True).click()
+    expect(page.locator('#review-kind')).to_have_text('Video review')
+    expect(page.locator('#review-title')).to_have_text('Practice <script>')
+    expect(page.locator('#player-like button')).to_have_attribute('data-like-item','video')
+    expect(page.locator('#review-like button')).to_have_attribute('data-like-item','video')
+    old_clip_likes=[c['like'] for c in fresh['clips']]
+    page.locator('#player-like button').click()
+    expect(page.locator('#player-like button')).to_have_attribute('aria-pressed',str(not fresh['like']['value']).lower())
+    updated=page.request.get(ui_server+f'/api/sessions/{ID}').json()
+    assert [c['like'] for c in updated['clips']]==old_clip_likes
+    page.locator('#player-like button').click()  # Restore the fixture's video favorite.
+    page.get_by_role('button',name='Edit video',exact=True).click()
+    expect(page.get_by_role('dialog',name='Video details',exact=True)).to_be_visible()
+    expect(page.locator('#edit-location')).to_be_visible()
+    expect(page.get_by_role('button',name='Edit main player',exact=True)).not_to_be_visible()
+    page.get_by_role('button',name='Close',exact=True).click()
+    assert not page.evaluate('document.documentElement.scrollWidth>innerWidth')
+    # Restore the clip title so subsequent engines exercise the same fixture.
+    clip=updated['clips'][0]
+    r=page.request.put(ui_server+f'/api/videos/{ID}/clips/{CLIP}/details',data=dict(title='Clip 01',publication=updated['published_at'],version=clip['details']['version']),headers={'X-Tennis-Request':'1'});assert r.ok
     page.close()

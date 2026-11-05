@@ -137,3 +137,22 @@ No production migration or deployment is performed by editing this repository.
 All browser writes retain same-origin checks, explicit desired values, optimistic
 concurrency and safe text rendering. No new authentication, NAS permission changes,
 worker queue changes, model training or automatic media retention policy is added.
+
+## Review action scope
+
+`/review/{video-id}` reviews a Video, not a practice Session. With an active clip
+(including a `?clip=` deep link), the heading, details editor and both hearts target
+that Clip. Full-practice playback uses the Video's details and favorite; advancing
+through chapters does not change that target. Video capture date/location and
+recording-player context remain inherited information, not clip-editable fields.
+Clip title edits are stored against the versioned clip entity in shared website
+state (`clip-meta:{entity-id}`), with optimistic concurrency and a publication
+guard. Notes remain in entity metadata. Session details stay on the home page.
+
+An opened details editor captures its video/clip identity and publication until
+closed. Changing playback while it is open never redirects its save. A reprocessed
+clip must be reloaded before editing or liking through the new API. Old favorites
+are retained as recorded; no inference moves historical clip likes onto videos.
+`/api/videos/{id}/details`, `/api/videos/{id}/clips/{clip-id}/details`, and
+`/api/videos/{id}/likes/{video|clip-id}` give these actions explicit names while
+retaining the old compatibility endpoints.
