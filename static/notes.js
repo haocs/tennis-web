@@ -1,6 +1,7 @@
 'use strict';
 const NoteUI=(()=>{
  let source=null,items=[],generation=0,timer=null,editing=null,editingKind='note',saveRequest=null,saving=false,markerKey='',lastCurrent=null,pendingHighlight=null,saveFingerprint=null;
+ let cueTimer=null,cueKey='',mediaKey='',cueClock=new MomentPlayback.CueClock();
  const names={comment:'Comment',note:'Note',highlight:'Highlight',usefulness:'Less useful',cut_feedback:'Cut report',coach:'Coach suggestion'};
  const reasons={poor_cut:'Poor cut',no_play:'No tennis play',downtime:'Too much downtime',too_short:'Too short',wrong_player:'Wrong player',start_early:'Start too early',start_late:'Start too late',end_early:'End too early',end_late:'End too late'};
  const active=a=>a.status==='active';
@@ -46,24 +47,45 @@ const NoteUI=(()=>{
  function current(){
   const b=$('#note-demote');if(!b)return;const c=currentClip();b.disabled=!c;b.hidden=model.mode!=='clip';b.setAttribute('aria-pressed',String(!!lessUseful(c)));b.title=lessUseful(c)?'Remove less useful mark':'Mark clip as less useful';
   const h=$('#note-highlight');if(h)h.disabled=!c;
-  if(lastCurrent!==model.current){lastCurrent=model.current;render();}markers();
+  if(lastCurrent!==model.current){lastCurrent=model.current;render();}markers();cueTick();
  }
- function jump(a){
-  if(!a.playback_eligible||!a.visible_intervals.length)return toast('This moment is outside the current cuts. Its original timestamp is retained.');
-  const fragment=a.visible_intervals.find(f=>f.clip_id===model.current)||a.visible_intervals[0];
+ function jump(a,selectedFragment=null){
+  if(!MomentPlayback.canPlay(a,items)||!a.visible_intervals.length)return toast('This moment is outside the current cuts. Its original timestamp is retained.');
+  const fragment=selectedFragment||a.visible_intervals.find(f=>f.clip_id===model.current)||a.visible_intervals[0];
   if($('#cut-video')){const video=$('#cut-video'),choice=$('#cut-clip');const seek=()=>{video.currentTime=fragment.local_start;video.pause();};if(choice.value===fragment.clip_id&&video.readyState>=1)seek();else{video.addEventListener('loadedmetadata',seek,{once:true});choice.value=fragment.clip_id;choice.dispatchEvent(new Event('change'));}return;}
   if(model.mode==='full'){playFull(fragment.playback_start,false);}else{playClip(fragment.clip_id,false);setSource(mediaURL(source,source.clips.find(c=>c.id===fragment.clip_id).file),fragment.local_start,false);}
   $('#player').pause();model.playerControls?.reveal();$('.player-shell')?.scrollIntoView({behavior:'smooth',block:'start'});
  }
+ function momentEvents(mode=model.mode){return MomentPlayback.timeline(items,{mode,clipId:model.current,clips:source?.clips||[]});}
+ function cueTick(discontinuity=false){
+  clearTimeout(cueTimer);const v=$('#player'),box=$('#moment-cues');if(!v||!box||!source)return;
+  const key=source.id+':'+source.published_at+':'+model.mode+':'+(model.mode==='clip'?model.current:'');
+  if(key!==mediaKey){mediaKey=key;cueClock.reset();cueKey='';box.replaceChildren();}
+  if(document.hidden||v.readyState<1||v.seeking)return;
+  const active=cueClock.tick(momentEvents(),v.currentTime,performance.now(),{discontinuity,playing:!v.paused,rate:v.playbackRate});
+  const fingerprint=JSON.stringify(active.map(e=>[e.id,e.annotation.version]));
+  if(fingerprint!==cueKey){
+   cueKey=fingerprint;
+   box.innerHTML=active.map(e=>{const a=e.annotation;return `<article class="moment-cue ${a.kind==='coach'?'moment-coach':''}" data-active-moment="${esc(a.id)}"><div><strong>${esc(a.kind==='coach'?(a.body.response?'Coach review · excerpt':'Coach'):a.kind==='highlight'?'★ Highlight':'Comment')}</strong><span>Original ${esc(preciseTime(a.target.start_seconds))}</span></div>${a.body.text?`<p>${esc(a.body.text)}</p>`:''}</article>`;}).join('');
+  }
+  const expiries=active.filter(e=>e.expiresAt).map(e=>e.expiresAt-performance.now());
+  if(expiries.length)cueTimer=setTimeout(()=>cueTick(),Math.max(1,Math.min(...expiries)+10));
+  const next=$('#next-highlight');if(next){const c=currentClip(),at=model.mode==='clip'?(c?.playback_start_seconds||0)+v.currentTime:v.currentTime;next.disabled=!MomentPlayback.nextHighlight(items,at,{clips:source.clips});}
+ }
+ function nextHighlight(){
+  const v=$('#player'),c=currentClip();if(!v||!source)return;
+  const at=model.mode==='clip'?(c?.playback_start_seconds||0)+v.currentTime:v.currentTime;
+  const next=MomentPlayback.nextHighlight(items,at,{clips:source.clips});
+  if(!next)return toast('No later highlights.');jump(next.annotation,next.fragment);
+ }
  function markers(){
   const box=$('#note-markers'),v=$('#player');if(!box||!v)return;
-  const duration=v.duration;if(!Number.isFinite(duration)||duration<=0){box.replaceChildren();return;}
-  const selected=model.mode==='clip'?model.current:null;const key=JSON.stringify([selected,duration,items.map(a=>[a.id,a.version,a.status,a.playback_eligible,a.visible_intervals])]);if(key===markerKey)return;markerKey=key;
-  const visible=items.filter(a=>active(a)&&a.playback_eligible&&['highlight','coach'].includes(a.kind));
-  box.innerHTML=visible.flatMap(a=>a.visible_intervals.filter(f=>!selected||f.clip_id===selected).map(f=>{
-   const at=selected?f.local_start:f.playback_start;return `<button type="button" class="note-marker ${a.kind==='coach'?'coach-marker':''}" data-note-jump="${esc(a.id)}" data-note-position="${Math.max(0,Math.min(100,100*at/duration))}" aria-label="${a.kind==='coach'?'Coach suggestion':'Highlight'} at original ${esc(preciseTime(f.original_start))}" title="${a.kind==='coach'?'Coach':'Highlight'} · Original ${esc(preciseTime(f.original_start))}"></button>`;
-  })).join('');
-  $$('[data-note-jump]',box).forEach(b=>{b.style.setProperty('--note-position',b.dataset.notePosition+'%');b.onclick=()=>jump(items.find(a=>a.id===b.dataset.noteJump));});
+  const duration=v.duration;if(!Number.isFinite(duration)||duration<=0){box.replaceChildren();markerKey='';return;}
+  const key=JSON.stringify([model.mode,model.current,duration,items.map(a=>[a.id,a.version,a.status,a.playback_eligible,a.visible_intervals])]);if(key===markerKey)return;markerKey=key;
+  const events=momentEvents(),groups=new Map();
+  events.forEach(e=>{const tick=Math.round(e.start*1000);if(!groups.has(tick))groups.set(tick,[]);groups.get(tick).push(e);});
+  box.innerHTML=[...groups.values()].map(group=>{const e=group[0],a=e.annotation,kind=group.some(e=>e.kind==='coach')?'coach':a.kind;return `<button type="button" class="note-marker ${kind==='coach'?'coach-marker':''}" data-note-jump="${esc(e.key)}" data-note-position="${Math.max(0,Math.min(100,100*e.start/duration))}" aria-label="${esc(group.length>1?group.length+' moments':a.kind==='coach'?(a.body.response?'Coach review':'Coach suggestion'):a.kind==='highlight'?'Highlight':'Comment')} at original ${esc(preciseTime(e.fragment.original_start))}" title="${esc(group.length>1?group.length+' moments':names[a.kind]||'Moment')} · Original ${esc(preciseTime(e.fragment.original_start))}"></button>`;}).join('');
+  $$('[data-note-jump]',box).forEach(b=>{b.style.setProperty('--note-position',b.dataset.notePosition+'%');b.onclick=()=>{const e=events.find(e=>e.key===b.dataset.noteJump);if(e)jump(e.annotation,e.fragment);};});
  }
  function targetLabel(a){const t=a.target;if(t.scope==='video')return 'Whole recording';return 'Original '+preciseTime(t.start_seconds)+(t.scope==='point'?'':'–'+preciseTime(t.end_seconds));}
  function relationLabel(a){if(a.archive_reason==='duplicate_highlight'&&a.status==='archived')return 'Duplicate highlight · history retained';return ({needs_review:'Cut changed · review target',unavailable:'Outside current cuts',partly_retained:'Partly outside current cuts',historical_run:'Earlier processed version'})[a.relation]||'';}
@@ -71,6 +93,7 @@ const NoteUI=(()=>{
   const box=$('#notes-list')||$('#cut-report-list');if(!box)return;
   const cuts=!!$('#cut-report-list'),view=$('#notes-view')?.value||'clip';const c=currentClip();
   let rows=items.filter(a=>cuts?a.kind==='cut_feedback':a.record_class!=='processing_annotation');
+  if(!cuts&&view==='moments')rows=rows.filter(a=>a.record_class==='moment');
   if(!cuts&&view==='clip')rows=rows.filter(a=>a.target.scope==='video'||related(a,c));
   const archived=$('#notes-archived')?.checked||false;rows=rows.filter(a=>archived||active(a));
   rows.sort((a,b)=>(a.target.start_seconds??-1)-(b.target.start_seconds??-1)||a.id.localeCompare(b.id));
@@ -131,13 +154,17 @@ const NoteUI=(()=>{
   };
  }
  function mount(s){
-  source=s;items=[];markerKey='';lastCurrent=null;generation++;clearInterval(timer);
-  const markers=document.createElement('div');markers.id='note-markers';markers.className='note-markers';$('#video-stage').append(markers);
-  $('#player').addEventListener('loadedmetadata',()=>{current();});$('#player').addEventListener('timeupdate',()=>{current();});
-  $('.player-shell').insertAdjacentHTML('afterend',`<div class="note-quick-actions"><button type="button" class="button small" id="note-highlight" aria-label="Highlight this moment" title="Highlight this moment">★ Highlight moment</button><button type="button" class="button small" id="note-demote" aria-label="Less useful clip" aria-pressed="false">↓ Less useful</button></div><details id="notes-panel" class="notes-panel"><summary>Moments & notes</summary><div class="notes-toolbar"><button type="button" class="button small" id="add-note">Add note</button><button type="button" class="button small" id="add-timed-comment">Timed comment</button><select id="notes-view" aria-label="Notes view"><option value="clip">This clip</option><option value="all">Whole recording</option></select><label class="check-label"><input id="notes-archived" type="checkbox">Archived</label><a class="button small" href="/api/annotations/sources/${s.id}/export">Export metadata</a></div><p id="notes-status" role="status"></p><div id="notes-list"></div></details>`);
-  $('#note-highlight').onclick=highlight;$('#note-demote').onclick=demote;
+  source=s;items=[];markerKey='';lastCurrent=null;generation++;clearInterval(timer);clearTimeout(cueTimer);cueClock.reset();mediaKey='';cueKey='';
+  const markers=document.createElement('div');markers.id='note-markers';markers.className='note-markers';markers.setAttribute('aria-label','Moments on playback timeline');$('#video-seek').after(markers);
+  const player=$('#player');player.addEventListener('loadedmetadata',()=>current());player.addEventListener('timeupdate',()=>current());
+  player.addEventListener('seeked',()=>cueTick(true));player.addEventListener('play',()=>cueTick());player.addEventListener('pause',()=>cueTick());player.addEventListener('ended',()=>cueTick());
+  player.addEventListener('emptied',()=>{clearTimeout(cueTimer);cueClock.reset();cueKey='';$('#moment-cues')?.replaceChildren();});
+  window.addEventListener('coach-notes-changed',refresh);document.addEventListener('visibilitychange',()=>cueTick(true));
+  $('.player-shell').insertAdjacentHTML('afterend',`<section id="moments-area" aria-label="Moments"><div id="moment-cues" class="moment-cues" role="status" aria-live="polite" aria-atomic="true"></div><details id="notes-panel" class="notes-panel"><summary>Moments & notes</summary><div class="notes-toolbar"><button type="button" class="button small" id="note-highlight" aria-label="Highlight this moment">★ Highlight moment</button><button type="button" class="button small" id="next-highlight" disabled>Next highlight</button><button type="button" class="button small" id="show-all-moments">Show all moments</button></div><div class="notes-toolbar"><button type="button" class="button small" id="add-note">Add note</button><button type="button" class="button small" id="add-timed-comment">Timed comment</button><select id="notes-view" aria-label="Notes view"><option value="clip">This clip</option><option value="all">Whole video</option><option value="moments">All moments</option></select><label class="check-label"><input id="notes-archived" type="checkbox">Archived</label><a class="button small" href="/api/annotations/sources/${s.id}/export">Export metadata</a></div><p id="notes-status" role="status"></p><div id="notes-list"></div></details></section><div class="note-quick-actions"><button type="button" class="button small" id="note-demote" aria-label="Less useful clip" aria-pressed="false">↓ Less useful</button></div>`);
+  $('#note-highlight').onclick=highlight;$('#note-demote').onclick=demote;$('#next-highlight').onclick=nextHighlight;
+  $('#show-all-moments').onclick=()=>{$('#notes-view').value='moments';render();};
   $('#add-note').onclick=()=>openEditor();$('#add-timed-comment').onclick=()=>openEditor('comment');$('#notes-view').onchange=render;$('#notes-archived').onchange=render;
-  $('#notes-panel').addEventListener('toggle',()=>{if($('#notes-panel').open)render();});
+  $('#notes-panel').addEventListener('toggle',()=>{if($('#notes-panel').open){render();cueTick();}});
   const more=$('.player-more');more.classList.remove('hidden');$('.player-more-list').insertAdjacentHTML('beforeend',`<a class="note-cut-link" href="/review/${s.id}/cuts">Review cuts</a>`);
   const toolbar=$('.clip-toolbar .toolbar');toolbar.insertAdjacentHTML('beforeend','<select id="note-clip-filter" aria-label="Clip focus"><option value="all">All clips</option><option value="liked">Liked only</option><option value="highlights">Highlights</option><option value="useful">Hide less useful</option></select>');$('#note-clip-filter').value=model.noteFilter||'all';$('#note-clip-filter').onchange=e=>{model.noteFilter=e.target.value;renderClipList();};
   refresh();timer=setInterval(refresh,10000);

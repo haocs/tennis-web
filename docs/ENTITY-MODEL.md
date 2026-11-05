@@ -156,3 +156,28 @@ are retained as recorded; no inference moves historical clip likes onto videos.
 `/api/videos/{id}/details`, `/api/videos/{id}/clips/{clip-id}/details`, and
 `/api/videos/{id}/likes/{video|clip-id}` give these actions explicit names while
 retaining the old compatibility endpoints.
+
+## Moments during playback
+
+The watch page projects saved original-time moments onto the selected Clip or
+full processed Video. Small keyboard-accessible marks sit on the actual seek bar;
+overlapping starts share a mark. Playback cues appear in a dedicated area directly
+below the player, without pausing playback, moving focus, scrolling the page or
+opening the collapsed Moments controls. Those controls offer Highlight, Next
+highlight (strictly after the playhead, across clips), and Show all moments.
+Existing notes, edit/archive/history/export and cut-report flows remain available.
+
+A point highlight displays for one wall-clock second; point coaching/comments use
+three seconds. Expiration still works while paused or at a different playback
+speed. Explicit-end moments follow playback time until their projected end,
+including while paused. Seeking reconciles the landing position; it does not fire
+all moments skipped by a seek. Replaying a position can trigger its cue again.
+Changing media clears stale cues. Multiple simultaneous cues remain accessible in
+a compact scrollable area. A moment outside retained cuts remains in the all-moments
+list, with its original timestamp and availability label.
+
+Saved unstructured AI responses can appear as **Coach review · excerpt**, anchored
+to the selected excerpt, without claiming verified technique-event timing. Reviewed
+timed suggestions supersede that job's response-level automatic cue. The complete
+response, evidence and provenance remain authoritative in coaching storage. No AI
+request is sent by playback or by opening the Moments area.

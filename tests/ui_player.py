@@ -669,6 +669,7 @@ def test_watch_metadata_and_cut_reports(browser,ui_server,width):
     page.goto(ui_server+f'/review/{ID}?clip={CLIP}')
     expect(page.locator('#video-seek')).to_be_enabled()
     page.locator('#video-seek').focus();page.keyboard.press('ArrowRight')
+    page.locator('#notes-panel > summary').click()
     page.get_by_role('button',name='Highlight this moment',exact=True).click()
     expect(page.locator('.note-marker')).to_have_count(1)
     page.get_by_role('button',name='Less useful clip',exact=True).click()
@@ -679,7 +680,6 @@ def test_watch_metadata_and_cut_reports(browser,ui_server,width):
     expect(page.locator('#clip-list .clip-row')).to_have_count(2)
     expect(page.locator('#player')).to_have_attribute('src',re.compile('clip-001.mp4'))
     page.get_by_role('combobox',name='Clip focus',exact=True).select_option('all')
-    page.locator('#notes-panel > summary').click()
     page.get_by_role('button',name='Timed comment',exact=True).click()
     page.get_by_role('combobox',name='Note target',exact=True).select_option('interval')
     page.get_by_label('Original start (seconds)',exact=True).fill('0.25')
@@ -746,6 +746,7 @@ def test_single_clip_filter_and_duplicate_highlight(browser,ui_server):
     page.get_by_label('Clip list actions',exact=True).click()
     page.get_by_role('button',name='Select clips',exact=True).click()
     expect(page.locator('#clip-selection')).not_to_be_visible()
+    page.locator('#notes-panel > summary').click()
     page.get_by_role('button',name='Highlight this moment',exact=True).click()
     expect(page.locator('.note-marker')).to_have_count(1)
     page.get_by_role('button',name='Highlight this moment',exact=True).click()
@@ -849,4 +850,82 @@ def test_review_actions_follow_video_or_clip_and_editor_keeps_its_target(browser
     # Restore the clip title so subsequent engines exercise the same fixture.
     clip=updated['clips'][0]
     r=page.request.put(ui_server+f'/api/videos/{ID}/clips/{CLIP}/details',data=dict(title='Clip 01',publication=updated['published_at'],version=clip['details']['version']),headers={'X-Tennis-Request':'1'});assert r.ok
+    page.close()
+
+
+def _playback_moment(identity,kind,start,end=None,clip=CLIP,clip_start=0):
+    local=start-clip_start
+    return dict(id=identity,kind=kind,record_class='moment',status='active',version=1,
+        target=dict(scope='point' if end is None else 'interval',start_seconds=start,**({} if end is None else dict(end_seconds=end))),
+        body=dict(text='Cue '+identity),player_id=None,origin=dict(type='human'),read_only=kind=='coach',
+        playback_eligible=True,related_clip_ids=[clip],visible_intervals=[dict(clip_id=clip,
+        original_start=start,original_end=end or start,local_start=local,local_end=local if end is None else end-clip_start,
+        playback_start=start,playback_end=end or start)],relation='retained')
+
+
+def _mock_playback_moments(page,ui_server,items):
+    page.route('**/api/recordings/'+ID+'/metadata*',lambda route:route.fulfill(json=dict(annotations=items,next_after=None)))
+
+
+@pytest.mark.parametrize('width',[390,1280])
+def test_moment_cues_default_durations_ranges_and_collapsed_area(browser,ui_server,width):
+    page=browser.new_page(viewport={'width':width,'height':900})
+    errors=[];page.on('pageerror',lambda error:errors.append(str(error)))
+    rows=[_playback_moment('point','highlight',.25),_playback_moment('coach-point','coach',.5),_playback_moment('range','note',.1,1.7)]
+    _mock_playback_moments(page,ui_server,rows)
+    page.goto(ui_server+f'/review/{ID}?clip={CLIP}')
+    expect(page.locator('#video-seek')).to_be_enabled()
+    expect(page.locator('#notes-panel')).not_to_have_attribute('open','')
+    expect(page.get_by_role('button',name='Highlight this moment',exact=True)).not_to_be_visible()
+    expect(page.locator('.note-marker')).to_have_count(3)
+    assert page.locator('#note-markers').evaluate("e=>e.parentElement.classList.contains('video-seek-label')")
+    page.locator('#player').evaluate('v=>{v.pause();v.currentTime=.25;}')
+    expect(page.locator('[data-active-moment="point"]')).to_be_visible()
+    expect(page.locator('[data-active-moment="range"]')).to_be_visible()
+    expect(page.locator('[data-active-moment="point"]')).to_have_count(0,timeout=2500)
+    # A point expiry does not repeatedly re-trigger at a paused playhead.
+    expect(page.locator('[data-active-moment="range"]')).to_be_visible()
+    page.locator('#player').evaluate('v=>{v.currentTime=.5;}')
+    expect(page.locator('[data-active-moment="coach-point"]')).to_be_visible()
+    expect(page.locator('[data-active-moment="coach-point"]')).to_have_count(0,timeout=4500)
+    expect(page.locator('[data-active-moment="range"]')).to_be_visible()
+    page.locator('#player').evaluate('v=>{v.currentTime=1.75;}')
+    expect(page.locator('[data-active-moment="range"]')).to_have_count(0)
+    page.locator('#player').evaluate('v=>{v.currentTime=.25;}')
+    expect(page.locator('[data-active-moment="point"]')).to_be_visible()
+    expect(page.locator('#player')).to_have_js_property('paused',True)
+    expect(page.locator('#notes-panel')).not_to_have_attribute('open','')
+    assert not page.evaluate('document.documentElement.scrollWidth>innerWidth')
+    assert not errors
+    page.close()
+
+
+@pytest.mark.parametrize('width',[390,1280])
+def test_moments_next_highlight_across_clips_all_list_and_full_video_markers(browser,ui_server,width):
+    page=browser.new_page(viewport={'width':width,'height':900})
+    rows=[_playback_moment('first','highlight',.25),_playback_moment('later','highlight',4.25,clip='d'*24,clip_start=4)]
+    _mock_playback_moments(page,ui_server,rows)
+    page.goto(ui_server+f'/review/{ID}?clip={CLIP}')
+    expect(page.locator('#video-seek')).to_be_enabled();expect(page.locator('.note-marker')).to_have_count(1)
+    assert abs(float(page.locator('.note-marker').get_attribute('data-note-position'))-12.5)<.01
+    page.locator('#notes-panel > summary').click()
+    expect(page.get_by_role('button',name='Highlight this moment',exact=True)).to_be_visible()
+    page.get_by_role('button',name='Show all moments',exact=True).click()
+    expect(page.locator('#notes-view')).to_have_value('moments')
+    expect(page.locator('#notes-list .note-item')).to_have_count(2)
+    page.locator('#player').evaluate('v=>{v.pause();v.currentTime=.3;}')
+    page.get_by_role('button',name='Next highlight',exact=True).click()
+    expect(page.locator('#player')).to_have_attribute('src',re.compile('clip-003.mp4'))
+    expect(page.locator('#player')).to_have_js_property('currentTime',.25)
+    expect(page.locator('#player')).to_have_js_property('paused',True)
+    expect(page.get_by_role('button',name='Next highlight',exact=True)).to_be_disabled()
+    page.get_by_role('button',name='Full practice ↗',exact=True).click()
+    expect(page.locator('.note-marker')).to_have_count(2)
+    positions=page.locator('.note-marker').evaluate_all('nodes=>nodes.map(n=>Number(n.dataset.notePosition))')
+    assert abs(positions[0]-100*.25/6)<.01 and abs(positions[1]-100*4.25/6)<.01
+    # Markers provide keyboard focus and explicit activation, without a video overlay cue.
+    page.locator('.note-marker').first.focus();page.keyboard.press('Enter')
+    expect(page.locator('#player')).to_have_js_property('currentTime',.25)
+    expect(page.locator('.coach-playback-cue')).to_have_count(0)
+    assert not page.evaluate('document.documentElement.scrollWidth>innerWidth')
     page.close()

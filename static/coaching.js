@@ -240,13 +240,9 @@
     },
     close(){saveDraft();selectionPlaying=false;generation++;owner=null;clearInterval(timer);if($('coach-preview'))clearPreview();},
     watch({session,clip,player}){
-      stopWatch();let active=true,notes=[],legacy=[],pendingSeek=null;const badge=el('button','Coach cue','coach-playback-cue');badge.hidden=true;player.parentElement.after(badge);
-      const originalTime=()=>{if(clip)return clip.original_start_seconds+player.currentTime;const c=session.clips.find(c=>player.currentTime>=c.playback_start_seconds&&player.currentTime<=c.playback_end_seconds);return c?c.original_start_seconds+player.currentTime-c.playback_start_seconds:null;};
-      const sync=()=>{if(!badge.isConnected)return;const original=originalTime();const currentClip=clip||session.clips.find(c=>player.currentTime>=c.playback_start_seconds&&player.currentTime<=c.playback_end_seconds);const cues=notes.filter(a=>(!a.provenance?.player_context||a.provenance.player_context.player_id===currentClip?.main_player?.id)&&original!==null&&a.current.applies_to.some(i=>original>=i.start_seconds&&original<=i.end_seconds)).map(a=>a.current.cue);for(const j of legacy)if(original!==null&&original>=j.body.original_start&&original<=j.body.original_end)cues.push(j.result.cue);badge.hidden=!cues.length;badge.textContent=cues.join(' · ');};
-      const load=()=>api('sessions/'+session.id).then(data=>{if(active){notes=data.annotations.filter(a=>a.playback_eligible);legacy=data.jobs.filter(j=>j.role==='ai'&&j.state==='completed'&&!j.result.structured&&j.result.cue_reviewed&&j.body.publication===session.published_at);sync();}}).catch(()=>{});
+      stopWatch();let pendingSeek=null;
       const requested=new URL(location.href).searchParams.get('coach_time');if(requested!==null&&clip){const t=Number(requested);if(Number.isFinite(t)&&t>=clip.original_start_seconds&&t<=clip.original_end_seconds){const seek=()=>{player.currentTime=t-clip.original_start_seconds;pendingSeek=null;};if(player.readyState)seek();else{pendingSeek=seek;player.addEventListener('loadedmetadata',seek,{once:true});}}}
-      badge.onclick=()=>{player.pause();badge.classList.toggle('coach-expanded');};
-      stopWatch=()=>{active=false;if(pendingSeek)player.removeEventListener('loadedmetadata',pendingSeek);window.removeEventListener('coach-notes-changed',load);player.removeEventListener('timeupdate',sync);badge.remove();};window.addEventListener('coach-notes-changed',load);player.addEventListener('timeupdate',sync);load();
+      stopWatch=()=>{if(pendingSeek)player.removeEventListener('loadedmetadata',pendingSeek);};
     }
   };
 })();
