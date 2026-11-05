@@ -10,7 +10,7 @@ const NoteUI=(()=>{
  function lessUseful(c){return items.find(a=>a.kind==='usefulness'&&active(a)&&a.playback_eligible&&related(a,c));}
  function highlights(c){return items.filter(a=>a.kind==='highlight'&&active(a)&&a.playback_eligible&&related(a,c));}
  function clipBadge(c){const n=highlights(c).length;return `${n?`<span class="note-clip-badge" title="${n} highlighted moment${n===1?'':'s'}">★${n>1?n:''}</span>`:''}${lessUseful(c)?'<span class="note-clip-badge note-less" title="Marked less useful">↓</span>':''}`;}
- function filterClip(c){return model.noteFilter==='highlights'?highlights(c).length>0:model.noteFilter==='useful'?!lessUseful(c):true;}
+ function filterClip(c){return model.noteFilter==='liked'?!!c.like.value:model.noteFilter==='highlights'?highlights(c).length>0:model.noteFilter==='useful'?!lessUseful(c):true;}
  function pointAtPlayer(){
   const v=$('#player'),c=currentClip();if(!v||!c||v.readyState<1)throw new Error('Wait for the clip to load');
   if(model.mode==='clip')return Math.min(Math.max(c.original_start_seconds,c.original_end_seconds-.001),c.original_start_seconds+v.currentTime);
@@ -34,7 +34,7 @@ const NoteUI=(()=>{
  }
  async function update(a,changes){return api('/api/annotations/'+a.id,{method:'PUT',body:JSON.stringify({publication:source.published_at,version:a.version,...changes})});}
  async function highlight(){
-  if(saving)return;try{if(!pendingHighlight)pendingHighlight={target:{scope:'point',start_seconds:pointAtPlayer()},id:requestId()};saving=true;await create('highlight',pendingHighlight.target,{text:''},pendingHighlight.id);pendingHighlight=null;await refresh();toast('Moment highlighted.');}catch(e){if(e.status)pendingHighlight=null;toast(e.status?e.message:'Could not confirm the save. Tap Highlight again to retry the same moment.');}finally{saving=false;}
+  if(saving)return;try{if(!pendingHighlight)pendingHighlight={target:{scope:'point',start_seconds:pointAtPlayer()},id:requestId()};saving=true;const result=await create('highlight',pendingHighlight.target,{text:''},pendingHighlight.id);pendingHighlight=null;await refresh();toast(result.already_highlighted?'Moment already highlighted.':'Moment highlighted.');}catch(e){if(e.status)pendingHighlight=null;toast(e.status?e.message:'Could not confirm the save. Tap Highlight again to retry the same moment.');}finally{saving=false;}
  }
  async function demote(){
   if(saving)return;try{saving=true;const c=currentClip();const existing=items.find(a=>a.kind==='usefulness'&&related(a,c)&&a.relation==='exact');
@@ -66,7 +66,7 @@ const NoteUI=(()=>{
   $$('[data-note-jump]',box).forEach(b=>{b.style.setProperty('--note-position',b.dataset.notePosition+'%');b.onclick=()=>jump(items.find(a=>a.id===b.dataset.noteJump));});
  }
  function targetLabel(a){const t=a.target;if(t.scope==='video')return 'Whole recording';return 'Original '+preciseTime(t.start_seconds)+(t.scope==='point'?'':'–'+preciseTime(t.end_seconds));}
- function relationLabel(a){return ({needs_review:'Cut changed · review target',unavailable:'Outside current cuts',partly_retained:'Partly outside current cuts',historical_run:'Earlier processed version'})[a.relation]||'';}
+ function relationLabel(a){if(a.archive_reason==='duplicate_highlight'&&a.status==='archived')return 'Duplicate highlight · history retained';return ({needs_review:'Cut changed · review target',unavailable:'Outside current cuts',partly_retained:'Partly outside current cuts',historical_run:'Earlier processed version'})[a.relation]||'';}
  function render(){
   const box=$('#notes-list')||$('#cut-report-list');if(!box)return;
   const cuts=!!$('#cut-report-list'),view=$('#notes-view')?.value||'clip';const c=currentClip();
@@ -139,7 +139,7 @@ const NoteUI=(()=>{
   $('#add-note').onclick=()=>openEditor();$('#notes-view').onchange=render;$('#notes-archived').onchange=render;
   $('#notes-panel').addEventListener('toggle',()=>{if($('#notes-panel').open)render();});
   const more=$('.player-more');more.classList.remove('hidden');$('.player-more-list').insertAdjacentHTML('beforeend',`<a class="note-cut-link" href="/review/${s.id}/cuts">Review cuts</a>`);
-  const toolbar=$('.clip-toolbar .toolbar');toolbar.insertAdjacentHTML('beforeend','<select id="note-clip-filter" aria-label="Clip focus"><option value="all">All clips</option><option value="highlights">Highlights</option><option value="useful">Hide less useful</option></select>');$('#note-clip-filter').value=model.noteFilter||'all';$('#note-clip-filter').onchange=e=>{model.noteFilter=e.target.value;renderClipList();};
+  const toolbar=$('.clip-toolbar .toolbar');toolbar.insertAdjacentHTML('beforeend','<select id="note-clip-filter" aria-label="Clip focus"><option value="all">All clips</option><option value="liked">Liked only</option><option value="highlights">Highlights</option><option value="useful">Hide less useful</option></select>');$('#note-clip-filter').value=model.noteFilter||'all';$('#note-clip-filter').onchange=e=>{model.noteFilter=e.target.value;renderClipList();};
   refresh();timer=setInterval(refresh,10000);
  }
  function cuts(s){
