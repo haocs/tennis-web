@@ -71,9 +71,10 @@ def register_annotations(app, library, session):
                 value=project(value,data);value['playback_eligible']=False;result.append(value)
         return result
 
-    def listing(source, data):
+    def listing(source, data, category=None):
         after=request.args.get('after','')
-        return sorted([project(a,data) for a in store.listing(source,after)]+coaches(source,data,after), key=lambda a:a['id'])
+        coaching=coaches(source,data,after) if category in (None,'moment') else []
+        return sorted([project(a,data) for a in store.listing(source,after,category=category)]+coaching, key=lambda a:a['id'])
 
     def page(items, default=200, maximum=200):
         try:limit = int(request.args.get('limit',default))
@@ -102,13 +103,13 @@ def register_annotations(app, library, session):
     @app.get('/api/recordings/<source>/moments')
     def moments(source):
         check_source(source)
-        items,after=page([a for a in listing(source,optional_source(source)) if a['record_class']=='moment'])
+        items,after=page(listing(source,optional_source(source),category='moment'))
         return jsonify(schema_version=2,moments=[moment_view(a) for a in items],next_after=after,clock='original_milliseconds')
 
     @app.get('/api/processing-annotations/sources/<source>')
     def processing_annotations(source):
         check_source(source)
-        items,after=page([a for a in listing(source,optional_source(source)) if a['record_class']=='processing_annotation'])
+        items,after=page(listing(source,optional_source(source),category='processing_annotation'))
         return jsonify(schema_version=2,annotations=items,next_after=after,training_label_status='not_released')
 
     @app.get('/api/entities/videos/<source>/metadata')

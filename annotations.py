@@ -232,9 +232,11 @@ class AnnotationStore:
         if not row:raise KeyError(identity)
         return json.loads(row['data'])
 
-    def listing(self, source, after='', limit=201):
+    def listing(self, source, after='', limit=201, category=None):
         with self.db() as db:
-            return [json.loads(r['data']) for r in db.execute('SELECT data FROM annotations WHERE source_id=? AND id>? ORDER BY id LIMIT ?', (source,after,limit))]
+            clause=' AND record_class=?' if category else ''
+            args=(source,after,category,limit) if category else (source,after,limit)
+            return [json.loads(r['data']) for r in db.execute('SELECT data FROM annotations WHERE source_id=? AND id>?'+clause+' ORDER BY id LIMIT ?', args)]
 
     def revisions(self, identity, after=0, limit=101):
         with self.db() as db:

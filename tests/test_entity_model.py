@@ -164,3 +164,17 @@ def test_processing_labels_accept_original_time_and_video_without_becoming_momen
     assert len(c.get('/api/processing-annotations/sources/'+ID).json['annotations'])==3
     response=c.post('/api/processing-annotations',json={**body,'body':dict(label='invalid label',value=True)},headers=H)
     assert response.status_code==400
+
+
+def test_typed_pagination_does_not_drop_moments_behind_other_metadata(setup):
+    app,root,data=setup;c=app.test_client();store=app.extensions['annotations']
+    template=dict(schema_version=2,source_id=ID,kind='note',target=dict(scope='video'),body=dict(text='Note'),context=dict(publication=data['published_at']),origin=dict(type='human'),status='active')
+    for i in range(205):store.write({**template,'id':'n_000'+str(i).zfill(4)})
+    for i in range(2):
+        store.write({**template,'id':'n_zzz'+str(i),'target':dict(scope='point',start_seconds=8+i)})
+        store.write({**template,'id':'n_yyy'+str(i),'kind':'processing_label','body':dict(label='tennis.playing',value=True)})
+    for path,key in [('/api/recordings/'+ID+'/moments','moments'),('/api/processing-annotations/sources/'+ID,'annotations')]:
+        first=c.get(path+'?limit=1').json;assert len(first[key])==1 and first['next_after']
+        second=c.get(path+'?limit=1&after='+first['next_after']).json
+        assert len(second[key])==1 and not second['next_after']
+        assert first[key][0]['id']!=second[key][0]['id']
