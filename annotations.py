@@ -9,6 +9,7 @@ import re
 import sqlite3
 import time
 import uuid
+from entity_model import classify, record_class, output_version
 
 SCOPES = {'point', 'interval', 'clip', 'video'}
 CUT_REASONS = {'poor_cut', 'no_play', 'downtime', 'too_short', 'wrong_player',
@@ -16,8 +17,9 @@ CUT_REASONS = {'poor_cut', 'no_play', 'downtime', 'too_short', 'wrong_player',
 KINDS = {
     'note': dict(domain='application', scopes=sorted(SCOPES)),
     'highlight': dict(domain='application', scopes=['point', 'interval']),
-    'usefulness': dict(domain='application', scopes=['clip']),
+    'usefulness': dict(domain='entity_metadata', scopes=['clip', 'video']),
     'cut_feedback': dict(domain='processing_feedback', scopes=['clip']),
+    'processing_label': dict(domain='processing_feedback', scopes=sorted(SCOPES)),
     'coach': dict(domain='coaching', scopes=['interval'], read_only=True),
 }
 SOURCE_ID = re.compile(r'[a-f0-9]{64}')
@@ -63,6 +65,17 @@ def validate_body(kind, body):
                 or len(set(reasons)) != len(reasons)):
             raise ValueError('Choose at least one cut issue')
         result['reasons'] = sorted(reasons)
+    if kind == 'processing_label':
+        allowed |= {'label','value','confidence'}
+        label=body.get('label');confidence=body.get('confidence')
+        if not isinstance(label,str) or not re.fullmatch(r'[a-z][a-z0-9_.-]{0,79}',label):
+            raise ValueError('Choose a valid processing label')
+        if confidence is not None and (not finite(confidence) or not 0<=confidence<=1):
+            raise ValueError('Confidence must be between zero and one')
+        try:encoded=canonical(body.get('value'))
+        except (ValueError,TypeError):raise ValueError('Use a finite JSON label value')
+        if len(encoded)>8000:raise ValueError('Processing label value is too large')
+        result.update(label=label,value=body.get('value'),confidence=confidence)
     if set(body)-allowed:
         raise ValueError('Unknown note details')
     return result
@@ -112,16 +125,16 @@ def coverage(spans):
 
 def project(annotation, data):
     """Return a derived view. Never mutate a saved selector to fit a new cut."""
-    result = copy.deepcopy(annotation)
+    result = classify(annotation)
     target = result['target'];scope = target['scope']
     result.update(related_clip_ids=[], visible_intervals=[], relation='unavailable', playback_eligible=False,
                   training_label_status='not_released')
     if data is None:
         return result
     clips = data['clips']
-    historical_run = result['kind'] == 'cut_feedback' and result['context']['publication'] != data['published_at']
+    historical_run = (result['kind'] in ('cut_feedback', 'processing_label', 'usefulness') or (result['kind']=='note' and scope=='clip')) and result['context']['publication'] != data['published_at']
     if scope == 'video':
-        result['relation'] = 'recording'
+        result['relation'] = 'historical_run' if historical_run else 'recording'
         result['related_clip_ids'] = [c['id'] for c in clips]
         return result
     spans = target.get('selectors') or [target]
@@ -144,7 +157,9 @@ def project(annotation, data):
                 exact_clips.append(clip['id'])
     if historical_run:
         result['relation'] = 'historical_run'
+        result['matched_clip_ids'] = []
     elif scope == 'clip':
+        exact_clips = [c for c in exact_clips if c == target['clip_id']]
         result['relation'] = 'exact' if exact_clips else ('needs_review' if result['related_clip_ids'] else 'unavailable')
         # A clip judgment cannot decorate a split/merged/expanded cut by overlap.
         result['playback_eligible'] = bool(exact_clips)
@@ -179,6 +194,13 @@ class AnnotationStore:
             db.execute('CREATE TABLE IF NOT EXISTS revisions(id TEXT NOT NULL, version INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY(id,version))')
             db.execute('CREATE TABLE IF NOT EXISTS requests(request_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, annotation_id TEXT NOT NULL)')
             db.execute('CREATE TABLE IF NOT EXISTS metadata_migrations(name TEXT PRIMARY KEY)')
+            if 'record_class' not in {r['name'] for r in db.execute('PRAGMA table_info(annotations)')}:
+                db.execute("ALTER TABLE annotations ADD COLUMN record_class TEXT NOT NULL DEFAULT 'unclassified'")
+            for row in db.execute("SELECT id,data FROM annotations WHERE record_class='unclassified'").fetchall():
+                db.execute('UPDATE annotations SET record_class=? WHERE id=?',(record_class(json.loads(row['data'])),row['id']))
+            for name, category in [('serving_moments','moment'),('entity_metadata','entity_metadata'),('processing_annotations','processing_annotation')]:
+                db.execute(f"CREATE VIEW IF NOT EXISTS {name} AS SELECT id,source_id,kind,data,version FROM annotations WHERE record_class='{category}'")
+            db.execute("INSERT OR IGNORE INTO metadata_migrations VALUES('serving-entities-v2')")
             if not db.execute('SELECT 1 FROM metadata_migrations WHERE name=?',('unique-point-highlights-v1',)).fetchone():
                 seen=set()
                 rows=[json.loads(r['data']) for r in db.execute("SELECT data FROM annotations WHERE kind='highlight' AND json_extract(data,'$.status')='active' AND json_extract(data,'$.target.scope')='point'")]
@@ -210,16 +232,18 @@ class AnnotationStore:
         if not row:raise KeyError(identity)
         return json.loads(row['data'])
 
-    def listing(self, source, after='', limit=201):
+    def listing(self, source, after='', limit=201, category=None):
         with self.db() as db:
-            return [json.loads(r['data']) for r in db.execute('SELECT data FROM annotations WHERE source_id=? AND id>? ORDER BY id LIMIT ?', (source,after,limit))]
+            clause=' AND record_class=?' if category else ''
+            args=(source,after,category,limit) if category else (source,after,limit)
+            return [json.loads(r['data']) for r in db.execute('SELECT data FROM annotations WHERE source_id=? AND id>?'+clause+' ORDER BY id LIMIT ?', args)]
 
     def revisions(self, identity, after=0, limit=101):
         with self.db() as db:
             return [json.loads(r['data']) for r in db.execute('SELECT data FROM revisions WHERE id=? AND version>? ORDER BY version LIMIT ?', (identity,after,limit))]
 
     def write(self, value, expected=None, request_id=None):
-        value = copy.deepcopy(value)
+        value = classify(value)
         fingerprint = canonical(value)
         with self.db() as db:
             db.execute('BEGIN IMMEDIATE')
@@ -229,6 +253,14 @@ class AnnotationStore:
                     if row['fingerprint'] != fingerprint:raise AnnotationConflict('Request ID already used for different metadata')
                     return json.loads(db.execute('SELECT data FROM annotations WHERE id=?', (row['annotation_id'],)).fetchone()['data'])
             identity = value.get('id')
+            if identity is None and value['kind']=='usefulness':
+                # Legacy singleton IDs were derived from bounds; recover the same
+                # field by its output subject instead of creating a second value.
+                candidates=db.execute("SELECT data FROM annotations WHERE source_id=? AND kind='usefulness'",(value['source_id'],)).fetchall()
+                for candidate in candidates:
+                    old=classify(json.loads(candidate['data']))
+                    if old['subject']==value['subject']:
+                        identity=old['id'];value['id']=identity;break
             if value['kind']=='highlight' and value['target']['scope']=='point' and value['status']=='active':
                 tick=int(math.floor(value['target']['start_seconds']*1000+.5))
                 duplicate=db.execute("SELECT data FROM annotations WHERE source_id=? AND kind='highlight' AND json_extract(data,'$.status')='active' AND json_extract(data,'$.target.scope')='point' AND CAST(round(json_extract(data,'$.target.start_seconds')*1000) AS INTEGER)=? AND id<>? ORDER BY id LIMIT 1",(value['source_id'],tick,identity or '')).fetchone()
@@ -241,7 +273,7 @@ class AnnotationStore:
                     return dict(existing,already_highlighted=True)
             if identity is None:
                 if value['kind'] == 'usefulness':
-                    selector = [value['source_id'], value['kind'], round(value['target']['start_seconds']*1000), round(value['target']['end_seconds']*1000)]
+                    selector = [value['source_id'], value['kind'], value['subject']]
                     identity = 'n_'+hashlib.sha256(canonical(selector).encode()).hexdigest()[:32]
                 else:identity = 'n_'+uuid.uuid4().hex
                 value['id'] = identity
@@ -254,7 +286,7 @@ class AnnotationStore:
             value['created_at'] = current['created_at'] if current else time.time()
             value.update(updated_at=time.time(), version=(current['version'] if current else 0)+1)
             encoded = canonical(value)
-            db.execute('INSERT INTO annotations VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET source_id=excluded.source_id,kind=excluded.kind,data=excluded.data,version=excluded.version', (identity, value['source_id'], value['kind'], encoded, value['version']))
+            db.execute('INSERT INTO annotations(id,source_id,kind,data,version,record_class) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET source_id=excluded.source_id,kind=excluded.kind,data=excluded.data,version=excluded.version,record_class=excluded.record_class', (identity, value['source_id'], value['kind'], encoded, value['version'], value['record_class']))
             db.execute('INSERT INTO revisions VALUES(?,?,?)', (identity, value['version'], encoded))
             if request_id:db.execute('INSERT INTO requests VALUES(?,?,?)', (request_id, fingerprint, identity))
             db.commit()

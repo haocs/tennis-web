@@ -17,6 +17,7 @@ from storage import Library, smb_root, nas_media_address
 from thumbnails import ClipPosters, PosterUnavailable
 from practices import recording_time, group_recordings
 from state import State, Conflict
+from entity_model import EntityCatalog
 from clip_study import public_clip_study, number as finite_number
 from coaching_routes import register_coaching
 from annotation_routes import register_annotations
@@ -53,7 +54,12 @@ def create_app(config=None):
     if media_smb is None and library.media_root == library.root / 'media' and library_smb:
         media_smb = library_smb + '/media'
     state = State(Path(app.config["DATA_ROOT"]) / "website.sqlite3")
-    app.extensions.update(library=library, state=state)
+    catalog = EntityCatalog(Path(app.config["DATA_ROOT"]) / "website.sqlite3")
+    app.extensions.update(library=library, state=state, entity_catalog=catalog)
+
+    def serving_groups(recordings, gap=gap_minutes):
+        return catalog.sync(recordings, gap)
+    app.extensions['serving_groups'] = serving_groups
     posters = ClipPosters(Path(app.config["DATA_ROOT"])/"clip-posters", app.config.get("FFMPEG_BINARY", os.environ.get("TENNIS_FFMPEG", "ffmpeg")))
 
     def session(identity):
@@ -66,6 +72,8 @@ def create_app(config=None):
 
     if not app.config["COACH_MEDIA_ROOT"]:
         app.config["COACH_MEDIA_ROOT"] = str(Path(app.config["DATA_ROOT"]) / "coaching-media")
+    try:catalog.sync(library.sessions()[0], gap_minutes)
+    except OSError:pass
     register_players(app, library, session, gap_minutes)
     register_coaching(app, library, lambda identity: decorate_players(copy.deepcopy(session(identity)), state.all()))
     register_annotations(app, library, session)
@@ -98,7 +106,7 @@ def create_app(config=None):
         for clip in data["clips"]:
             clip['nas_url'] = nas_media_address(media_smb, directory, clip['file'])
             clip["like"] = shared.get(f"like:{identity}:{clip['id']}", {"value": False, "version": 0})
-        return decorate_players(data, shared)
+        return catalog.decorate(decorate_players(data, shared))
 
     @app.before_request
     def check_mutations():
@@ -147,9 +155,67 @@ def create_app(config=None):
             return jsonify(sessions=[], practice_groups=[], invalid_sessions=0, library_available=False, shared_preferences=True)
         shared = state.all()
         decorated = [decorate(s, shared) for s in sessions]
-        groups = decorate_groups(enrich_groups(group_recordings(decorated, gap_minutes), decorated, shared), decorated)
+        groups = decorate_groups(enrich_groups(serving_groups(decorated), decorated, shared), decorated)
+        for group in groups:
+            group['title'] = group['metadata'].get('title') or group['title']
         return jsonify(sessions=decorated, practice_groups=groups, players=player_list(shared), courts=court_list(shared), invalid_sessions=errors,
                        library_available=(library.metadata / 'sessions').is_dir(), shared_preferences=True)
+
+    @app.get('/api/practices')
+    def practices():
+        response = list_sessions()
+        return jsonify(sessions=response.get_json()['practice_groups'])
+
+    @app.get('/api/entities/sessions/<identity>')
+    def session_entity(identity):
+        groups=practices().get_json()['sessions']
+        result=next((g for g in groups if g['id']==identity),None)
+        if result:return jsonify(result)
+        with catalog.db() as db:
+            row=db.execute('SELECT * FROM practice_sessions WHERE id=?',(identity,)).fetchone()
+            ids=[r['video_id'] for r in db.execute('SELECT video_id FROM session_members WHERE session_id=?',(identity,))]
+        if not row:abort(404,'Session not found')
+        return jsonify(entity_type='session',id=identity,video_ids=ids,metadata=json.loads(row['metadata']),metadata_version=row['version'],media_available=False)
+
+    @app.get('/api/entities/video-versions/<identity>')
+    def version_entity(identity):
+        with catalog.db() as db:row=db.execute('SELECT * FROM video_versions WHERE id=?',(identity,)).fetchone()
+        if not row:abort(404,'Video version not found')
+        return jsonify(entity_type='video_version',id=identity,video_id=row['video_id'],manifest=json.loads(row['manifest']))
+
+    @app.get('/api/entities/clips/<identity>')
+    def clip_entity(identity):
+        with catalog.db() as db:row=db.execute('SELECT * FROM clips WHERE id=?',(identity,)).fetchone()
+        if not row:abort(404,'Clip not found')
+        return jsonify(entity_type='clip',id=identity,video_version_id=row['video_version_id'],metadata=json.loads(row['data']))
+
+    @app.put('/api/practices/<identity>/metadata')
+    def practice_metadata(identity):
+        body=request.get_json()
+        if not isinstance(body,dict) or set(body)-{'version','title','note'} or type(body.get('version')) is not int or body['version']<0:
+            abort(400,'A current version and session details are required')
+        values={}
+        for field,limit in [('title',160),('note',2000)]:
+            if field in body:
+                if not isinstance(body[field],str) or len(body[field])>limit:abort(400,'Invalid session '+field)
+                values[field]=body[field].strip()
+        if not values:abort(400,'Enter session details')
+        try:return jsonify(catalog.edit_session(identity,values,body['version']))
+        except KeyError:abort(404,'Session not found')
+        except Conflict as error:return jsonify(error='Session changed in another browser. Reload before saving.',current=error.current),409
+
+    @app.get('/api/entities/videos/<identity>')
+    def video_entity(identity):
+        data=get_session(identity).get_json()
+        return jsonify(entity_type='video',id=identity,original_recording_id=identity,
+                       title=data['title'],location=data['location_label'],metadata=data['overrides'],
+                       current_version_id=data['video_version_id'],clips=data['clips'],versions=catalog.versions(identity))
+
+    @app.get('/api/entities/original-recordings/<identity>')
+    def original_entity(identity):
+        with catalog.db() as db:row=db.execute('SELECT data FROM original_recordings WHERE id=?',(identity,)).fetchone()
+        if not row:abort(404,'Original recording not found')
+        return jsonify(entity_type='original_recording',id=identity,metadata=json.loads(row['data']))
 
     @app.get('/api/sessions/<identity>')
     def get_session(identity):
@@ -163,7 +229,7 @@ def create_app(config=None):
         recordings = [decorate(s, shared) for s in recordings if s['id'] != identity]
         result = decorate(data, shared)
         recordings.append(result)
-        enrich_groups(group_recordings(recordings, gap_minutes), recordings, shared)
+        enrich_groups(serving_groups(recordings), recordings, shared)
         return jsonify(result)
 
     @app.get('/api/sessions/<identity>/clips/<clip_id>/study')
@@ -214,7 +280,7 @@ def create_app(config=None):
         except OSError:
             abort(503,'The recording library is unavailable')
         decorated = [decorate(v,shared) for v in videos]
-        group = next((g for g in group_recordings(decorated,gap_minutes) if g['id']==identity),None)
+        group = next((g for g in serving_groups(decorated) if g['id']==identity),None)
         if group is None:
             if any(v['id']==identity for v in decorated):
                 return jsonify(error='This practice now includes different recordings. Reload and try again.'),409
