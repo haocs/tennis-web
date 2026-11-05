@@ -164,7 +164,9 @@ full processed Video. Small keyboard-accessible marks sit on the actual seek bar
 overlapping starts share a mark. Playback cues appear in a dedicated area directly
 below the player, without pausing playback, moving focus, scrolling the page or
 opening the collapsed Moments controls. Those controls offer Highlight, Next
-highlight (strictly after the playhead, across clips), and Show all moments.
+highlight (strictly after the playhead, across clips), and a compact view selector
+with All moments. Notes, archived items and export live in a three-dot menu; each
+list row keeps Jump/Review primary and puts editing/history in its own menu.
 Existing notes, edit/archive/history/export and cut-report flows remain available.
 
 A point highlight displays for one wall-clock second; point coaching/comments use
