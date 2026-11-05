@@ -93,7 +93,7 @@ const NoteUI=(()=>{
   const jumpButton=MomentPlayback.canPlay(a,items)&&a.visible_intervals.length?'<button class="button small" type="button" data-note-action="jump" aria-label="Jump to moment">Jump</button>':'';
   const editButtons=a.read_only?'':'<button type="button" data-note-action="edit">Edit</button><button type="button" data-note-action="archive">'+(a.status==='active'?'Archive':'Restore')+'</button>';
   const history='<button type="button" data-note-action="history">History</button>';
-  if(cuts)return jumpButton+editButtons+history;
+  if(cuts)return jumpButton+(editButtons+history).replaceAll('<button type=','<button class="button small" type=');
   const coach=a.read_only?'<button class="button small" type="button" data-note-action="coach" aria-label="Review coaching">Review</button>':'';
   return jumpButton+coach+'<details class="moment-more note-actions-menu"><summary class="button small" aria-label="Moment actions">⋯</summary><div>'+editButtons+history+'</div></details>';
  }
