@@ -159,6 +159,7 @@ def test_processing_labels_accept_original_time_and_video_without_becoming_momen
                   body=dict(label='tennis.playing',value=True,confidence=.8),request_id='processing-label-'+str(i))
         response=c.post('/api/processing-annotations',json=body,headers=H)
         assert response.status_code==201 and response.json['record_class']=='processing_annotation'
+        if target['scope']=='video':assert response.json['subject']['type']=='video_version'
     assert not c.get('/api/recordings/'+ID+'/moments').json['moments']
     assert len(c.get('/api/processing-annotations/sources/'+ID).json['annotations'])==3
     response=c.post('/api/processing-annotations',json={**body,'body':dict(label='invalid label',value=True)},headers=H)

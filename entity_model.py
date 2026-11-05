@@ -31,7 +31,7 @@ def subject(value):
     if target['scope'] == 'clip':
         return dict(type='clip', id='c_'+hashlib.sha256((version+':'+target['clip_id']).encode()).hexdigest()[:32],
                     video_id=source, video_version_id=version, clip_id=target['clip_id'])
-    if value['kind'] == 'usefulness':
+    if value['kind'] in ('usefulness','cut_feedback','processing_label'):
         return dict(type='video_version', id=version, video_id=source, video_version_id=version)
     return dict(type='video', id=source, video_id=source)
 
