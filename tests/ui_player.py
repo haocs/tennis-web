@@ -75,7 +75,7 @@ def test_review_rows_actions_and_courts(browser, ui_server, tmp_path):
     expect(page.get_by_role('link', name='Download clip 02',exact=True)).to_be_visible()
     expect(rows.nth(1)).to_have_attribute('aria-current','true')
     page.locator('#player').evaluate('(v)=>v.pause()')
-    expect(page.get_by_role('button',name='Like clip 2',exact=True)).to_be_visible()
+    expect(page.locator('#player-like').get_by_role('button',name='Like clip 2',exact=True)).to_be_visible()
     expect(page.locator('#player-nas')).not_to_be_visible()
     if folder := os.environ.get('TENNIS_UI_SCREENSHOT_DIR'):
         Path(folder).mkdir(parents=True, exist_ok=True)
