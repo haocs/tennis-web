@@ -100,7 +100,7 @@ const NoteUI=(()=>{
   $('#note-scope').innerHTML=allowed.map(s=>`<option value="${s}">${({point:'Moment',interval:'Moment with end',clip:'Current clip',video:'Whole video'})[s]}</option>`).join('');
   $('#note-target-clip').innerHTML=source.clips.map(c=>`<option value="${c.id}">Clip ${c.index} · Original ${preciseTime(c.original_start_seconds)}–${preciseTime(c.original_end_seconds)}</option>`).join('');
   let at=currentClip()?.original_start_seconds||0;try{at=pointAtPlayer();}catch(_){}
-  const t=a?.target||{scope:kind==='highlight'||kind==='comment'?'point':model.mode==='full'?'video':'clip',start_seconds:at};$('#note-scope').value=t.scope;
+  const t=a?.target||{scope:kind==='highlight'||kind==='comment'?'point':kind==='note'&&model.mode==='full'?'video':'clip',start_seconds:at};$('#note-scope').value=t.scope;
   $('#note-start').value=t.start_seconds??0;$('#note-end').value=t.end_seconds??Math.min(source.source.duration_seconds,(t.start_seconds||0)+1);
   if(!a&&kind==='highlight')try{$('#note-start').value=pointAtPlayer();}catch(_){}
   $('#note-target-clip').value=t.clip_id||currentClip()?.id||source.clips[0]?.id||'';
