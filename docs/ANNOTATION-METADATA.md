@@ -1,5 +1,8 @@
 # Annotation metadata: design and first implementation
 
+> Historical v1 contract. See [ENTITY-MODEL.md](ENTITY-MODEL.md) for the current
+> definitions, serving/processing separation, version identity and migration.
+
 Status: implementation design, 2026-11-04. No deployment until all linked tasks pass.
 
 ## Goals and product language

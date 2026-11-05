@@ -6,6 +6,7 @@ import re
 from flask import abort, jsonify, request
 from annotations import finite, AnnotationStore, AnnotationConflict, KINDS, SOURCE_ID, canonical, project, validate_body, validate_target
 from players import decorate_players
+from entity_model import classify, moment_view, subject, output_version
 
 
 def register_annotations(app, library, session):
@@ -90,12 +91,69 @@ def register_annotations(app, library, session):
     @app.get('/api/annotations/types')
     def types():return jsonify(schema_version=1,kinds=KINDS,clock='original_seconds',training_label_status='not_released')
 
+    @app.get('/api/recordings/<source>/metadata')
     @app.get('/api/annotations/sources/<source>')
     def get_annotations(source):
         check_source(source);data=optional_source(source)
         items, after = page(listing(source,data))
         return jsonify(schema_version=1,annotations=items,next_after=after,source_available=data is not None,
                        publication=data['published_at'] if data else None)
+
+    @app.get('/api/recordings/<source>/moments')
+    def moments(source):
+        check_source(source)
+        items,after=page([a for a in listing(source,optional_source(source)) if a['record_class']=='moment'])
+        return jsonify(schema_version=2,moments=[moment_view(a) for a in items],next_after=after,clock='original_milliseconds')
+
+    @app.get('/api/processing-annotations/sources/<source>')
+    def processing_annotations(source):
+        check_source(source)
+        items,after=page([a for a in listing(source,optional_source(source)) if a['record_class']=='processing_annotation'])
+        return jsonify(schema_version=2,annotations=items,next_after=after,training_label_status='not_released')
+
+    @app.get('/api/entities/videos/<source>/metadata')
+    def entity_metadata(source):
+        check_source(source)
+        data=optional_source(source)
+        # Full version histories are available even after the published manifest
+        # disappears; no historical field is implicitly carried into a new cut.
+        values=[];cursor=''
+        while True:
+            batch=store.listing(source,after=cursor,limit=200)
+            values.extend(classify(a) for a in batch if classify(a)['record_class']=='entity_metadata')
+            if len(batch)<200:break
+            cursor=batch[-1]['id']
+        requested=request.args.get('video_version_id')
+        current=output_version(source,data['published_at']) if data else None
+        version=requested or current
+        documents={}
+        for value in values:
+            ref=value['subject']
+            if ref['type']!='video' and ref['video_version_id']!=version:continue
+            key=ref['id']
+            document=documents.setdefault(key,dict(subject=ref,notes=[],less_useful=False,usefulness_reason='',field_versions={}))
+            field='notes' if value['kind']=='note' else 'less_useful'
+            document['field_versions'][value['id']]=value['version']
+            if value['status']!='active':continue
+            if field=='notes':document['notes'].append(dict(key=value['id'],text=value['body']['text'],player_id=value.get('player_id')))
+            else:document.update(less_useful=True,usefulness_reason=value['body'].get('reason',''))
+        return jsonify(schema_version=2,video_id=source,video_version_id=version,metadata=list(documents.values()))
+
+    @app.post('/api/moments')
+    def create_moment():
+        body=request.get_json()
+        if not isinstance(body,dict) or set(body)-{'original_recording_id','publication','type','start_ms','end_ms','payload','player_id','request_id'}:
+            abort(400,'Invalid moment')
+        kind={'highlight':'highlight','comment':'note'}.get(body.get('type')) if isinstance(body.get('type'),str) else None
+        if not kind:abort(400,'Choose a supported moment type; coaching uses its review editor')
+        start,end=body.get('start_ms'),body.get('end_ms')
+        if type(start) is not int or start<0 or ('end_ms' in body and (type(end) is not int or end<=start)):
+            abort(400,'Use original recording milliseconds and an optional later end')
+        target=dict(scope='point' if end is None else 'interval',start_seconds=start/1000)
+        if end is not None:target['end_seconds']=end/1000
+        value=create_record(dict(source_id=body.get('original_recording_id'),publication=body.get('publication'),
+            kind=kind,target=target,body=body.get('payload'),player_id=body.get('player_id'),request_id=body.get('request_id')))
+        return jsonify(moment_view(value)),201
 
     @app.get('/api/learning')
     def learning():
@@ -178,9 +236,12 @@ def register_annotations(app, library, session):
             raise ValueError('Choose a saved player')
         return pid
 
+    @app.post('/api/metadata')
     @app.post('/api/annotations')
     def create():
-        body=request.get_json()
+        return jsonify(create_record(request.get_json())),201
+
+    def create_record(body):
         if not isinstance(body,dict) or set(body)-{'source_id','publication','kind','target','body','player_id','request_id'}:
             abort(400,'Invalid metadata request')
         source=body.get('source_id')
@@ -196,18 +257,21 @@ def register_annotations(app, library, session):
             value=dict(schema_version=1,source_id=source,kind=kind,target=validate_target(kind,body.get('target'),data),
                        body=validate_body(kind,body.get('body')),player_id=player_id(body),context=context(data),
                        origin=dict(type='human'),status='active',training_label_status='not_released')
-            return jsonify(project(store.write(value,request_id=rid),data)),201
+            return project(store.write(value,request_id=rid),data)
         except ValueError as error:
             if isinstance(error,AnnotationConflict):raise
             abort(400,str(error))
 
+    @app.put('/api/metadata/<identity>')
     @app.put('/api/annotations/<identity>')
     def edit(identity):
+        return edit_record(identity,request.get_json())
+
+    def edit_record(identity,body):
         if identity.startswith(('coach:','coach-response:')):
             abort(400,'Use the coaching review editor to edit this suggestion')
         try:current=store.get(identity)
         except KeyError:abort(404,'Note not found')
-        body=request.get_json()
         if not isinstance(body,dict) or set(body)-{'publication','version','body','target','status','player_id'}:
             abort(400,'Invalid metadata edit')
         data=session(current['source_id']);check_publication(body,data)
@@ -215,7 +279,7 @@ def register_annotations(app, library, session):
         value=copy.deepcopy(current)
         try:
             if 'body' in body:value['body']=validate_body(value['kind'],body['body'])
-            if current['kind']=='cut_feedback' and 'target' in body:
+            if current['kind'] in ('cut_feedback','processing_label') and 'target' in body:
                 raise ValueError('Create a new report to review another cut or processed version')
             if 'target' in body:
                 value['target']=validate_target(value['kind'],body['target'],data);value['context']=context(data)
@@ -231,3 +295,79 @@ def register_annotations(app, library, session):
         except ValueError as error:
             if isinstance(error,AnnotationConflict):raise
             abort(400,str(error))
+
+    @app.put('/api/moments/<identity>')
+    def edit_moment(identity):
+        try:current=store.get(identity)
+        except KeyError:abort(404,'Moment not found')
+        if classify(current)['record_class']!='moment':abort(404,'Moment not found')
+        body=request.get_json()
+        if not isinstance(body,dict) or set(body)-{'publication','version','payload','start_ms','end_ms','status','player_id'}:abort(400,'Invalid moment edit')
+        changes={k:body[k] for k in ('publication','version','status','player_id') if k in body}
+        if 'payload' in body:changes['body']=body['payload']
+        if 'start_ms' in body or 'end_ms' in body:
+            start=body.get('start_ms');end=body.get('end_ms')
+            if type(start) is not int or start<0 or ('end_ms' in body and (type(end) is not int or end<=start)):abort(400,'Invalid moment timing')
+            changes['target']=dict(scope='point' if end is None else 'interval',start_seconds=start/1000)
+            if end is not None:changes['target']['end_seconds']=end/1000
+        response=edit_record(identity,changes)
+        return jsonify(moment_view(response.get_json()))
+
+    @app.post('/api/processing-annotations')
+    def create_processing_annotation():
+        body=request.get_json()
+        if not isinstance(body,dict) or body.get('kind') not in ('cut_feedback','processing_label'):abort(400,'Choose a supported processing annotation')
+        return jsonify(create_record(body)),201
+
+    @app.put('/api/processing-annotations/<identity>')
+    def edit_processing_annotation(identity):
+        try:value=store.get(identity)
+        except KeyError:abort(404,'Processing annotation not found')
+        if classify(value)['record_class']!='processing_annotation':abort(404,'Processing annotation not found')
+        return edit_record(identity,request.get_json())
+
+    @app.put('/api/entities/videos/<source>/metadata')
+    def set_entity_field(source):
+        """Edit one field/notes entry; record IDs are internal revision keys."""
+        body=request.get_json()
+        if not isinstance(body,dict) or set(body)-{'publication','subject_type','clip_id','field','value','version','key'}:
+            abort(400,'Invalid entity metadata')
+        data=session(source);check_publication(body,data)
+        scope=body.get('subject_type');field=body.get('field')
+        if scope not in ('video','video_version','clip') or field not in ('note','less_useful'):abort(400,'Choose an editable metadata field')
+        if field=='less_useful' and scope=='video':abort(400,'Usefulness belongs to a specific processed version')
+        if field=='note' and scope=='video_version':abort(400,'General video notes belong to the logical video')
+        if type(body.get('version')) is not int or body['version']<0:abort(400,'A current field version is required')
+        value=body.get('value')
+        if field=='less_useful' and type(value) is not bool:abort(400,'Use a boolean usefulness value')
+        if field=='note' and (not isinstance(value,str) or len(value)>2000):abort(400,'Use a note up to 2000 characters')
+        target=dict(scope='video')
+        if scope=='clip':
+            clip=next((c for c in data['clips'] if c['id']==body.get('clip_id')),None)
+            if not clip:abort(404,'Clip not found')
+            target=dict(scope='clip',clip_id=clip['id'],start_seconds=clip['original_start_seconds'],end_seconds=clip['original_end_seconds'])
+        kind='note' if field=='note' else 'usefulness'
+        proposed=dict(schema_version=2,source_id=source,kind=kind,target=target,
+            body=dict(text=value.strip()) if field=='note' else dict(value='less_useful',text='',reason=''),
+            context=context(data),origin=dict(type='human'),status='active' if value else 'archived',player_id=None)
+        desired=subject(proposed);existing=None
+        if 'key' in body and (not isinstance(body['key'],str) or len(body['key'])>100):abort(400,'Invalid metadata field key')
+        if body.get('key'):
+            try:existing=store.get(body['key'])
+            except KeyError:abort(404,'Metadata field not found')
+            if existing['kind']!=kind or classify(existing).get('subject')!=desired:abort(409,'Metadata belongs to another entity or output version')
+        elif field=='less_useful':
+            cursor=''
+            while True:
+                batch=store.listing(source,after=cursor,limit=200)
+                existing=next((a for a in batch if a['kind']=='usefulness' and subject(a)==desired),None)
+                if existing or len(batch)<200:break
+                cursor=batch[-1]['id']
+        if existing:
+            proposed={**existing,**proposed,'id':existing['id']}
+            # Preserve optional reasons and context while toggling a field.
+            if field=='less_useful':proposed['body']=existing['body']
+        try:
+            saved=store.write(proposed,expected=body['version'] or None)
+            return jsonify(subject=desired,field=field,value=value,key=saved['id'],version=saved['version'])
+        except AnnotationConflict:raise

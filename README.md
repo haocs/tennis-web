@@ -243,3 +243,8 @@ source and millisecond; repeated clicks reuse the saved highlight, and conflicti
 retarget/restore edits return a conflict instead of creating duplicates. Existing
 duplicate point marks are archived with their captions and revision history
 retained; a captioned mark is preferred as the active highlight.
+
+## Entity model
+
+See [serving entities and processing annotations](docs/ENTITY-MODEL.md) for Session,
+Video/version, Clip, Moment, metadata ownership, reprocessing and compatibility APIs.

@@ -75,7 +75,7 @@ def test_existing_duplicate_highlights_archive_without_losing_history(setup):
     with store.db() as db:
         db.execute('DROP INDEX unique_active_point_highlight')
         db.execute('DELETE FROM metadata_migrations')
-        db.execute('INSERT INTO annotations VALUES(?,?,?,?,?)',(duplicate['id'],ID,'highlight',canonical(duplicate),1))
+        db.execute('INSERT INTO annotations(id,source_id,kind,data,version) VALUES(?,?,?,?,?)',(duplicate['id'],ID,'highlight',canonical(duplicate),1))
         db.execute('INSERT INTO revisions VALUES(?,?,?)',(duplicate['id'],1,canonical(duplicate)))
     migrated=AnnotationStore(store.path);rows=migrated.listing(ID)
     assert len(rows)==2 and len([a for a in rows if a['status']=='active'])==1

@@ -58,13 +58,13 @@ def test_reprocess_mapping_and_retention(setup):
     changed=copy.deepcopy(data);changed['published_at']+=1;changed['clips'][0]['id']='c'*24
     path=root/'metadata/sessions'/f'{ID}.json';path.write_text(json.dumps(changed))
     rows={a['id']:a for a in listing(c)}
-    assert rows[flag['id']]['relation']=='exact' and rows[flag['id']]['playback_eligible']
+    assert rows[flag['id']]['relation']=='historical_run' and not rows[flag['id']]['playback_eligible']
     assert rows[report['id']]['relation']=='historical_run' and not rows[report['id']]['playback_eligible']
     assert rows[interval['id']]['relation']=='partly_retained'
     changed['published_at']+=1;changed['clips'][0].update(original_start_seconds=9,duration_seconds=6,playback_end_seconds=6);path.write_text(json.dumps(changed))
     rows={a['id']:a for a in listing(c)}
     assert rows[point['id']]['relation']=='unavailable'
-    assert rows[flag['id']]['relation']=='needs_review' and not rows[flag['id']]['playback_eligible']
+    assert rows[flag['id']]['relation']=='historical_run' and not rows[flag['id']]['playback_eligible']
     assert rows[interval['id']]['target']==interval['target'] and rows[interval['id']]['visible_intervals'][0]['original_start']==9
     edit=put(c,'/api/annotations/'+flag['id'],dict(publication=changed['published_at'],version=1,body=dict(value='less_useful',text='Saved')))
     assert edit.status_code==200 and edit.json['target']==target

@@ -147,7 +147,7 @@ def register_players(app, library, session, gap_minutes):
             abort(503, 'The recording library is unavailable')
         for data in recordings:
             data['recorded_at_iso'], data['recorded_at_epoch'] = recording_time(data['source'].get('recorded_at'))
-        group = next((g for g in group_recordings(recordings, gap_minutes) if g['id'] == identity), None)
+        group = next((g for g in app.extensions['serving_groups'](recordings) if g['id'] == identity), None)
         if group is None:
             abort(409, 'This practice changed. Reload and try again.')
         body = request.get_json()

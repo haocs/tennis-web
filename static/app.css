@@ -129,3 +129,5 @@ button.clip-row:hover{background:#eef3e0}button.clip-row:focus-visible{outline:3
 @media(max-width:650px){.clip-row{padding:3px 5px;gap:0}.clip-play{grid-template-columns:64px minmax(0,1fr) 35px;gap:8px;min-height:54px}.clip-thumbnail{width:64px;height:40px}.clip-row .clip-name{font-size:12px}.clip-times{font-size:10px;gap:1px 8px}.clip-title-line{gap:6px}.clip-select{width:44px;min-height:48px}.clip-toolbar .toolbar{gap:6px}.clip-toolbar .toolbar .button,.clip-toolbar select{font-size:11px;padding:8px;min-height:40px}.clip-selection{gap:8px}.clip-selection .button{font-size:11px;padding:8px}.player-navigation>.clip-player-row{gap:3px}.player-inherited{font-size:10px}.timeline-table th,.timeline-table td{padding:6px 8px;font-size:10px}}
 
 @media(max-width:650px){#clip-main-player{width:44px;height:44px;min-width:44px}}
+
+.session-note{white-space:pre-wrap;overflow-wrap:anywhere;color:var(--muted);font-size:13px}#practice-editor{width:480px;max-width:calc(100vw - 28px)}#practice-editor input,#practice-editor textarea{width:100%;box-sizing:border-box;font:inherit}
