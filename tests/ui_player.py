@@ -566,7 +566,6 @@ def test_player_profiles_assignments_and_filters(browser, ui_server):
     expect(page.locator('.practice-card .player-chip').first).to_be_visible()
     page.get_by_role('button',name='Saved players',exact=True).click()
     row=page.locator('.saved-player-row').filter(has_text=name)
-    row.get_by_label('Moment actions',exact=True).click()
     row.get_by_role('button',name='Edit',exact=True).click()
     page.get_by_label('Name',exact=True).fill(name+' updated')
     page.get_by_role('button',name='Save player',exact=True).click()

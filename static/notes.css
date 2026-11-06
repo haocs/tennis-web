@@ -40,3 +40,5 @@
 
 .moment-toolbar{display:grid;grid-template-columns:auto auto minmax(0,150px) 32px;gap:6px}.moment-toolbar>select{min-width:0;width:100%}.moment-toolbar>.moment-more{margin:0}.moment-toolbar>.button:disabled{opacity:1;color:var(--muted);background:var(--paper);border-color:var(--line)}
 @media(max-width:650px){.moment-toolbar{grid-template-columns:auto auto minmax(0,1fr) 30px}.moment-toolbar>select{min-width:0}.moment-toolbar>.button{padding:8px 7px}}
+
+.note-item:has(.note-actions-menu[open]){position:relative;z-index:9}
