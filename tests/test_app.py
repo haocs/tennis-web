@@ -453,3 +453,63 @@ def test_versioned_media_cannot_silently_change_under_study(setup):
     assert client.get(url+'&download=1').status_code == 409
     assert client.get(f'/media/{ID}/Clips/clip-001.mp4?v={data["published_at"]}').status_code == 200
     assert client.get(f'/media/{ID}/Clips/clip-001.mp4').status_code == 200
+
+
+def test_autofocus_vendored_assets_mime_types_and_csp(setup):
+    import hashlib
+    app, _, _ = setup
+    client = app.test_client()
+    page = client.get(f'/review/{ID}')
+    assert page.status_code == 200
+    csp = page.headers['Content-Security-Policy']
+    assert "script-src 'self' 'wasm-unsafe-eval'" in csp
+    assert "worker-src 'self'" in csp
+    assert "'unsafe-eval'" not in csp
+
+    worker = client.get('/static/autofocus-worker.js')
+    assert worker.status_code == 200 and worker.mimetype in {'text/javascript', 'application/javascript'}
+
+    manifest_res = client.get('/static/vendor/mediapipe/MANIFEST.json')
+    assert manifest_res.status_code == 200
+    manifest = json.loads(manifest_res.data)
+    assert manifest['license'] == 'Apache-2.0'
+    assert client.get('/static/vendor/mediapipe/LICENSE').status_code == 200
+
+    expected_mimes = {
+        'vision_bundle.js': {'text/javascript', 'application/javascript'},
+        'vision_wasm_internal.js': {'text/javascript', 'application/javascript'},
+        'vision_wasm_internal.wasm': {'application/wasm'},
+        'efficientdet_lite0.tflite': {'application/octet-stream'},
+    }
+    for filename, entry in manifest['files'].items():
+        res = client.get(f'/static/vendor/mediapipe/{filename}')
+        assert res.status_code == 200
+        assert res.mimetype in expected_mimes[filename]
+        assert len(res.data) == entry['bytes']
+        assert hashlib.sha256(res.data).hexdigest() == entry['sha256']
+
+    from fnmatch import fnmatch
+    dockerignore_lines = [
+        line.strip()
+        for line in (Path(__file__).resolve().parents[1] / '.dockerignore').read_text().splitlines()
+        if line.strip() and not line.strip().startswith('#')
+    ]
+    def is_ignored(rel_path: str) -> bool:
+        ignored = False
+        for pat in dockerignore_lines:
+            neg = pat.startswith('!')
+            rule = pat[1:].rstrip('/') if neg else pat.rstrip('/')
+            if rule == '**' or fnmatch(rel_path, rule) or fnmatch(rel_path, f'{rule}/*'):
+                ignored = not neg
+        return ignored
+
+    for required in [
+        'static/autofocus-core.js',
+        'static/autofocus-worker.js',
+        'static/vendor/mediapipe/LICENSE',
+        'static/vendor/mediapipe/MANIFEST.json',
+        *tuple(f'static/vendor/mediapipe/{name}' for name in manifest['files']),
+    ]:
+        assert not is_ignored(required), f'{required} must not be excluded by .dockerignore'
+    assert is_ignored('tests/ui_player.py')
+    assert is_ignored('docs/AUTO-FOCUS.md')

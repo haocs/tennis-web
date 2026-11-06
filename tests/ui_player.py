@@ -58,6 +58,69 @@ def browser(request):
         browser.close()
 
 
+def test_autofocus_real_worker_processes_local_pixels(browser, ui_server):
+    # Exercise the shipped model/runtime under real CSP without assuming a
+    # learned model must recognize a particular hand-drawn illustration.
+    page = browser.new_page(viewport={'width': 1280, 'height': 900})
+    requests = []
+    errors = []
+    page.on('request', lambda request: requests.append((request.method, request.url)))
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    page.add_init_script("""(() => {
+      const NativeWorker=window.Worker;
+      window.__realWorkerEvents=[];
+      window.Worker=function(...args) {
+        const worker=new NativeWorker(...args);
+        const record=(type,detail={})=>window.__realWorkerEvents.push({type,at:Math.round(performance.now()),...detail});
+        worker.addEventListener('message',({data})=>record(data.type,{message:data.message,code:data.code}));
+        worker.addEventListener('error',event=>record('worker_error',{message:event.message}));
+        const post=worker.postMessage.bind(worker),terminate=worker.terminate.bind(worker);
+        worker.postMessage=(data,...rest)=>{record('send:'+data.type);return post(data,...rest);};
+        worker.terminate=()=>{record('terminate');return terminate();};
+        return worker;
+      };
+    })()""")
+    page.goto(ui_server + f'/review/{ID}?clip={CLIP}')
+    page.wait_for_function("() => document.querySelector('#player')?.readyState >= 2")
+    button = page.get_by_role('button', name='Auto focus main player', exact=True)
+    button.click()
+    try:
+        page.wait_for_function("() => Number(document.querySelector('#player')?.dataset.autofocusDetections || 0) >= 1 || document.querySelector('#player')?.dataset.autofocusState === 'unavailable'", timeout=45000)
+        events = page.evaluate('window.__realWorkerEvents')
+        unsupported = any(event['type'] == 'unsupported' and event.get('code') == 'worker_graphics_unavailable' for event in events)
+        if unsupported:
+            # Some WebKit ports expose canvas APIs without worker WebGL. This is
+            # a capability fallback, not permission to accept arbitrary failures.
+            assert browser.browser_type.name != 'chromium', 'Reference Chromium must run real inference'
+            expect(button).to_be_disabled()
+            expect(button).to_have_attribute('aria-pressed', 'false')
+            expect(button).to_have_attribute('data-autofocus-state', 'unavailable')
+            page.locator('#video-stage').hover()
+            page.get_by_role('button', name='Play video', exact=True).click()
+            page.wait_for_function("() => !document.querySelector('#player').paused")
+            assert page.locator('#player').evaluate('v => v.style.transform') == ''
+            assert not errors
+            assert all(url.startswith(ui_server + '/') and method == 'GET' for method, url in requests)
+            page.close()
+            return
+        assert int(page.locator('#player').get_attribute('data-autofocus-detections') or '0') >= 1
+    except Exception as error:
+        state = page.locator('#player').evaluate('v => ({state:v.dataset.autofocusState,captures:v.dataset.autofocusCaptures,inflight:v.dataset.autofocusInflight})')
+        events = page.evaluate('window.__realWorkerEvents')
+        raise AssertionError(f'Real detector did not process a frame: {state}; worker_events={events}; errors={errors}') from error
+    expect(button).to_have_attribute('aria-pressed', 'true')
+    assert button.get_attribute('data-autofocus-state') in ('searching', 'tracking', 'holding')
+    assert any('/static/vendor/mediapipe/vision_wasm_internal.wasm' in url for _, url in requests)
+    assert any('/static/vendor/mediapipe/efficientdet_lite0.tflite' in url for _, url in requests)
+    assert all(url.startswith(ui_server + '/') and method == 'GET' for method, url in requests)
+    assert not errors
+    page.locator('#video-stage').hover()
+    button.click()
+    expect(button).to_have_attribute('aria-pressed', 'false')
+    assert page.locator('#player').evaluate('v => v.style.transform') == ''
+    page.close()
+
+
 def test_review_rows_actions_and_courts(browser, ui_server, tmp_path):
     page = browser.new_page()
     errors = []
@@ -441,7 +504,8 @@ def test_single_fullscreen_action_across_mobile_and_desktop(browser, ui_server):
     expect(page.locator('#video-seek')).to_be_enabled()
     for width,height in [(390,844),(844,390),(320,568),(1280,800)]:
         page.set_viewport_size({'width':width,'height':height})
-        expect(page.locator('.video-view-actions button')).to_have_count(1)
+        expect(page.locator('#video-fullscreen')).to_have_count(1)
+        expect(page.locator('.video-view-actions button:visible')).to_have_count(1 if width<=650 else 2)
         expect(page.get_by_role('button',name='Enter fullscreen',exact=True)).to_be_visible()
         assert page.locator('#video-expand,#video-close-expanded,.player-expanded').count()==0
         assert page.locator('#video-stage').get_attribute('role')=='region'
@@ -675,13 +739,19 @@ def test_watch_metadata_and_cut_reports(browser,ui_server,width):
     page.locator('#moment-toggle').click()
     page.get_by_role('button',name='Highlight this moment',exact=True).click()
     expect(page.locator('.note-marker')).to_have_count(1)
+    first_clip=page.locator('#clip-list .clip-row').first
+    expect(first_clip.locator('.note-moment')).to_have_count(0)
     page.get_by_role('button',name='Dislike clip 1',exact=True).click()
     expect(page.locator('#note-demote')).to_have_attribute('aria-pressed','true')
+    assert page.locator('#note-clip-filter option').evaluate_all('(els)=>els.map(e=>e.textContent)')==['All clips','Recommended','Liked only','Highlights']
     page.get_by_role('combobox',name='Clip focus',exact=True).select_option('highlights')
     expect(page.locator('#clip-list .clip-row')).to_have_count(1)
-    page.get_by_role('combobox',name='Clip focus',exact=True).select_option('useful')
-    expect(page.locator('#clip-list .clip-row')).to_have_count(2)
+    page.get_by_role('combobox',name='Clip focus',exact=True).select_option('recommended')
+    expect(page.locator('#clip-list .clip-row')).to_have_count(0)
     expect(page.locator('#player')).to_have_attribute('src',re.compile('clip-001.mp4'))
+    page.get_by_role('button',name='Remove dislike from clip 1',exact=True).click()
+    expect(page.locator('#clip-list .clip-row')).to_have_count(1)
+    page.get_by_role('button',name='Dislike clip 1',exact=True).click()
     page.get_by_role('combobox',name='Clip focus',exact=True).select_option('all')
     page.get_by_role('button',name='Add moment',exact=True).click()
     page.get_by_role('checkbox',name='End time',exact=True).check()
@@ -692,6 +762,8 @@ def test_watch_metadata_and_cut_reports(browser,ui_server,width):
     page.get_by_role('button',name='Save moment',exact=True).click()
     row=page.locator('.note-item').filter(has_text=text)
     expect(row).to_be_visible()
+    expect(first_clip.locator('.note-moment')).to_have_text('⚡')
+    expect(first_clip.locator('.note-moment')).to_have_attribute('title','Moment')
     row.get_by_role('button',name='Jump to moment',exact=True).click()
     expect(page.locator('#player')).to_have_js_property('currentTime',0.25)
     row.get_by_label('Moment actions',exact=True).click()
@@ -707,11 +779,13 @@ def test_watch_metadata_and_cut_reports(browser,ui_server,width):
     row.get_by_label('Moment actions',exact=True).click()
     row.get_by_role('button',name='Archive',exact=True).click()
     expect(page.locator('.note-item').filter(has_text=text+' revised')).to_have_count(0)
+    expect(first_clip.locator('.note-moment')).to_have_count(0)
     page.get_by_role('checkbox',name='Show archived',exact=True).check()
     row=page.locator('.note-item').filter(has_text=text+' revised')
     row.get_by_label('Moment actions',exact=True).click()
     row.get_by_role('button',name='Restore',exact=True).click()
     expect(row).not_to_have_class(re.compile('archived'))
+    expect(first_clip.locator('.note-moment')).to_have_text('⚡')
     assert not page.evaluate('document.documentElement.scrollWidth>innerWidth')
     # Processing feedback stays on its own page, with explicit original bounds.
     page.get_by_label('More video actions',exact=True).click()
@@ -924,9 +998,17 @@ def test_moment_panel_scope_filters_jump_and_full_video(browser,ui_server,width)
     _mock_playback_moments(page,ui_server,rows)
     page.goto(ui_server+f'/review/{ID}?clip={CLIP}')
     expect(page.locator('#video-seek')).to_be_enabled();expect(page.locator('.note-marker')).to_have_count(2)
+    clips=page.locator('#clip-list .clip-row')
+    expect(clips.nth(0).locator('.note-moment')).to_have_text('⚡')
+    expect(clips.nth(0).locator('.note-moment')).to_have_attribute('title','Moment')
+    expect(clips.nth(1).locator('.note-moment')).to_have_count(0)
+    expect(clips.nth(2).locator('.note-moment')).to_have_count(0)
     expect(page.get_by_role('button',name='Highlight this moment',exact=True)).to_be_visible()
     expect(page.get_by_role('button',name='Add moment',exact=True)).to_be_visible()
     expect(page.get_by_role('button',name='Jump to next moment',exact=True)).to_be_visible()
+    assert page.locator('.moment-bar > button').evaluate_all('(els)=>els.map(e=>e.id)')==['moment-toggle','moment-jump','note-highlight','add-moment']
+    jump_box=page.locator('#moment-jump').bounding_box();highlight_box=page.locator('#note-highlight').bounding_box()
+    assert jump_box['x']+jump_box['width']<=highlight_box['x']+1
     expect(page.locator('#moment-panel-content')).not_to_be_visible()
     page.locator('#moment-toggle').click()
     expect(page.locator('#notes-view')).to_have_count(0)
@@ -968,6 +1050,7 @@ def test_structured_coaching_moment_renders_readable_cue(browser,ui_server):
     _mock_playback_moments(page,ui_server,[a])
     page.goto(ui_server+f'/review/{ID}?clip={CLIP}')
     expect(page.locator('#video-seek')).to_be_enabled()
+    expect(page.locator('#clip-list .clip-row').first.locator('.note-moment')).to_have_text('⚡')
     page.locator('#player').evaluate('v=>{v.pause();v.currentTime=.3;}')
     expect(page.locator('#moment-cues')).to_contain_text('Recover after each shot.')
     expect(page.locator('#moment-cues')).not_to_contain_text('schema_version')
@@ -985,12 +1068,44 @@ def test_add_moment_optional_note_end_and_captured_scope(browser,ui_server,width
     page.goto(ui_server+f'/review/{ID}?clip={CLIP}')
     expect(page.locator('#video-seek')).to_be_enabled()
     expect(page.locator('#moment-toggle')).to_have_attribute('aria-expanded','false')
+    page.evaluate('()=>{model.session.clips[0].original_start_seconds=.0004;}')
+    page.locator('#player').evaluate('v=>{v.pause();v.currentTime=0;}')
+    page.get_by_role('button',name='Add moment',exact=True).click()
+    expect(page.get_by_role('dialog',name='Add moment',exact=True)).to_be_visible()
+    expect(page.get_by_label('Original start (seconds)',exact=True)).to_have_value('0.001')
+    page.get_by_label('Original start (seconds)',exact=True).fill('0')
+    page.get_by_role('button',name='Save moment',exact=True).click()
+    expect(page.locator('#note-editor-error')).to_contain_text('overlap the clip')
+    page.get_by_label('Original start (seconds)',exact=True).fill('0.001')
+    page.get_by_role('button',name='Close note editor',exact=True).click()
+    page.evaluate('()=>{model.session.clips[0].original_start_seconds=0;}')
+    page.locator('#player').evaluate('v=>{v.pause();v.currentTime=.516842;}')
+    page.get_by_role('button',name='Add moment',exact=True).click()
+    expect(page.get_by_role('dialog',name='Add moment',exact=True)).to_be_visible()
+    expect(page.get_by_label('Original start (seconds)',exact=True)).to_have_value('0.517')
+    expect(page.get_by_label('Original end (seconds)',exact=True)).not_to_be_visible()
+    point_note=f'Point moment note {width} {browser.browser_type.name}'
+    page.get_by_role('textbox',name='Note',exact=True).fill(point_note)
+    page.get_by_role('button',name='Save moment',exact=True).click()
+    expect(page.locator('#note-editor')).not_to_be_visible()
+    expect(page.locator('#moment-toggle')).to_have_attribute('aria-expanded','true')
+    point_row=page.locator('#notes-list .note-item').filter(has_text=point_note)
+    expect(point_row).to_be_visible()
+    point_row.get_by_label('Moment actions',exact=True).click()
+    point_row.get_by_role('button',name='Archive',exact=True).click()
+    expect(point_row).to_have_count(0)
+    page.locator('#moment-toggle').click()
     page.locator('#player').evaluate('v=>{v.pause();v.currentTime=.5;}')
     page.get_by_role('button',name='Add moment',exact=True).click()
     expect(page.get_by_role('dialog',name='Add moment',exact=True)).to_be_visible()
     expect(page.get_by_label('Original start (seconds)',exact=True)).to_have_value('0.5')
     expect(page.get_by_label('Original end (seconds)',exact=True)).not_to_be_visible()
+    page.get_by_label('Original start (seconds)',exact=True).fill('')
+    page.get_by_role('button',name='Save moment',exact=True).click()
+    expect(page.locator('#note-editor-error')).to_contain_text('Choose a start within the recording')
+    page.get_by_label('Original start (seconds)',exact=True).fill('0.5')
     page.get_by_role('checkbox',name='End time',exact=True).check()
+    expect(page.get_by_label('Original end (seconds)',exact=True)).to_have_value('1.5')
     page.get_by_label('Original end (seconds)',exact=True).fill('0.4')
     page.get_by_role('button',name='Save moment',exact=True).click()
     expect(page.locator('#note-editor-error')).to_contain_text('optional later end')
@@ -1000,6 +1115,9 @@ def test_add_moment_optional_note_end_and_captured_scope(browser,ui_server,width
     page.get_by_role('button',name='Save moment',exact=True).click()
     row=page.locator('#notes-list .note-item').filter(has_text=text)
     expect(row).to_be_visible()
+    clips=page.locator('#clip-list .clip-row')
+    expect(clips.nth(0).locator('.note-moment')).to_have_text('⚡')
+    expect(clips.nth(1).locator('.note-moment')).to_have_text('⚡')
     row.get_by_label('Moment actions',exact=True).click()
     row.get_by_role('button',name='Edit',exact=True).click()
     page.get_by_role('textbox',name='Note',exact=True).fill('')
@@ -1007,6 +1125,8 @@ def test_add_moment_optional_note_end_and_captured_scope(browser,ui_server,width
     page.get_by_role('checkbox',name='End time',exact=True).uncheck()
     page.get_by_role('button',name='Save moment',exact=True).click()
     expect(page.locator('#note-editor')).not_to_be_visible()
+    expect(clips.nth(0).locator('.note-moment')).to_have_text('⚡')
+    expect(clips.nth(1).locator('.note-moment')).to_have_count(0)
     rows=page.request.get(ui_server+f'/api/recordings/{ID}/moments').json()['moments']
     point=next(m for m in rows if m['status']=='active' and m['start_ms']==500 and m['payload']['text']=='')
     assert 'end_ms' not in point
@@ -1019,6 +1139,9 @@ def test_add_moment_optional_note_end_and_captured_scope(browser,ui_server,width
     page.evaluate("()=>{model.current='cccccccccccccccccccccccc';updatePlayerState();}")
     page.get_by_role('button',name='Save moment',exact=True).click()
     expect(page.locator('#note-editor')).not_to_be_visible()
+    expect(clips.nth(0).locator('.note-moment')).to_have_text('⚡')
+    expect(clips.nth(0).locator('.note-moment')).to_have_attribute('title','Moment')
+    expect(clips.nth(1).locator('.note-moment')).to_have_count(0)
     rows=page.request.get(ui_server+f'/api/recordings/{ID}/moments').json()['moments']
     assert next(m for m in rows if m['payload']['text']=='Captured clip moment')['start_ms']==500
     expect(page.locator('#notes-list')).not_to_contain_text('Captured clip moment')
@@ -1029,6 +1152,7 @@ def test_add_moment_optional_note_end_and_captured_scope(browser,ui_server,width
     page.get_by_role('textbox',name='Note',exact=True).fill('Second clip metadata')
     page.get_by_role('button',name='Save note',exact=True).click()
     expect(page.locator('#entity-notes-list')).to_contain_text('Second clip metadata')
+    expect(clips.nth(1).locator('.note-moment')).to_have_count(0)
     expect(page.locator('#entity-notes-list').get_by_role('button',name='Jump to moment',exact=True)).to_have_count(0)
     note=page.locator('#entity-notes-list .note-item').filter(has_text='Second clip metadata')
     note.get_by_label('Note actions',exact=True).click()
@@ -1113,3 +1237,314 @@ def test_adjacent_thumb_reactions_are_exclusive_and_scoped(browser,ui_server,wid
     for item,old,new in [('video',initial['like'],fresh['like']),(CLIP,initial['clips'][0]['like'],fresh['clips'][0]['like'])]:
         assert page.request.put(ui_server+f'/api/videos/{ID}/likes/{item}',headers={'X-Tennis-Request':'1'},data=dict(liked=old['value'],version=new['version'],publication=fresh['published_at'])).ok
     page.close()
+
+
+@pytest.mark.parametrize('width',[390,1280])
+def test_recommended_filter_and_smart_clip_sort(browser,ui_server,width):
+    page=browser.new_page(viewport={'width':width,'height':900},has_touch=width<650)
+    base=page.request.get(ui_server+f'/api/sessions/{ID}').json()
+    custom=copy.deepcopy(base)
+    # 6 synthetic clips covering liked, active in-scope moments, archived/out-of-range
+    # moments, disliked clips, <10s vs >=10s durations, and equal-duration tie-breaking.
+    specs=[
+        ('c1',1,6,0,6,False),     # <10s, no moment -> excluded from Recommended
+        ('c2',2,8,6,14,False),    # <10s, active moment -> included in Recommended; tier 2 in Smart
+        ('c3',3,12,14,26,False),  # >=10s, no moment -> included in Recommended; tier 3 in Smart (12s, index 3)
+        ('c4',4,12,26,38,False),  # >=10s, archived/out-of-range only -> tier 3 tie-break after c3 (12s, index 4)
+        ('c5',5,5,38,43,True),    # <10s, liked -> tier 1 in Smart, excluded from Recommended (no moment, <10s)
+        ('c6',6,15,43,58,False),  # >=10s, disliked + active moment -> excluded from Recommended; tier 2 (15s) in Smart
+    ]
+    custom['clips']=[
+        dict(base['clips'][0],id=cid.ljust(24,'0'),index=idx,title=f'Clip {idx:02d}',
+             duration_seconds=dur,original_start_seconds=ostart,original_end_seconds=oend,
+             playback_start_seconds=ostart,playback_end_seconds=oend,
+             like=dict(value=liked,version=1))
+        for cid,idx,dur,ostart,oend,liked in specs
+    ]
+    c1,c2,c3,c4,c5,c6=[c['id'] for c in custom['clips']]
+    active_c2=_playback_moment('m-c2','note',7,clip=c2,clip_start=6)
+    active_c6=_playback_moment('m-c6','highlight',45,clip=c6,clip_start=43)
+    archived_c4=_playback_moment('m-c4-arch','note',27,clip=c4,clip_start=26)
+    archived_c4.update(status='archived',playback_eligible=False)
+    out_of_range_c4=_playback_moment('m-c4-out','note',99,clip=c4,clip_start=26)
+    disliked_c6=dict(id='down-c6',kind='usefulness',record_class='entity_metadata',status='active',version=1,
+                     playback_eligible=True,matched_clip_ids=[c6],related_clip_ids=[c6],
+                     target=dict(scope='clip',clip_id=c6,start_seconds=43,end_seconds=58),
+                     body=dict(value='less_useful',text='',reason=''),context=dict(publication=custom['published_at']))
+    page.route(f'**/api/sessions/{ID}',lambda route:route.fulfill(json=custom))
+    _mock_playback_moments(page,ui_server,[active_c2,active_c6,archived_c4,out_of_range_c4,disliked_c6])
+    page.goto(ui_server+f'/review/{ID}')
+    expect(page.locator('#clip-list .clip-row')).to_have_count(6)
+    assert page.locator('#clip-sort option').evaluate_all('(els)=>els.map(e=>e.textContent)')==['Court order','Smart','Shortest first','Longest first']
+    # Recommended excludes disliked (c6) OR (<10s and no active in-scope moment: c1, c5).
+    # Keeps c2 (<10s with active moment), c3 (>=10s), and c4 (>=10s).
+    page.get_by_role('combobox',name='Clip focus',exact=True).select_option('recommended')
+    expect(page.locator('#clip-list .clip-row')).to_have_count(3)
+    assert page.locator('#clip-list .clip-row').evaluate_all('(els)=>els.map(e=>e.dataset.clip)')==[c2,c3,c4]
+    # Smart sort on Recommended: c2 (has active moment, 8s) > c3 (no active moment, 12s, index 3) > c4 (archived/out-of-range only, 12s, index 4).
+    page.get_by_role('combobox',name='Sort clips',exact=True).select_option('smart')
+    assert page.locator('#clip-list .clip-row').evaluate_all('(els)=>els.map(e=>e.dataset.clip)')==[c2,c3,c4]
+    # Smart sort on All clips:
+    # 1. Liked first: c5 (liked, 5s)
+    # 2. Active in-scope Moments by duration desc: c6 (active moment, 15s), c2 (active moment, 8s)
+    # 3. Remaining by duration desc, then index asc: c3 (12s, idx 3), c4 (12s, idx 4), c1 (6s, idx 1)
+    page.get_by_role('combobox',name='Clip focus',exact=True).select_option('all')
+    assert page.locator('#clip-list .clip-row').evaluate_all('(els)=>els.map(e=>e.dataset.clip)')==[c5,c6,c2,c3,c4,c1]
+    assert not page.evaluate('document.documentElement.scrollWidth>innerWidth')
+    page.close()
+
+
+def test_desktop_autofocus_tracking_loss_and_cleanup(browser, ui_server):
+    page = browser.new_page(viewport={'width': 1280, 'height': 900})
+    errors = []
+    requests = []
+    page.on('pageerror', lambda err: errors.append(str(err)))
+    page.on('request', lambda req: requests.append((req.method, req.url)))
+    # Deterministic detections exercise framing/lifecycle independently of model
+    # confidence or platform-specific rasterization of illustrated people.
+    page.add_init_script("""(() => {
+      window.__testCourtScene = 'two_players';
+      window.Worker = class {
+        constructor() { this.closed = false; }
+        postMessage(data) {
+          if (data.type === 'init') {
+            setTimeout(() => {if (!this.closed) this.onmessage?.({data:{type:'ready'}});}, 0);
+          } else if (data.type === 'detect') {
+            const w=data.width,h=data.height;
+            const person=(x,y,width,height)=>({boundingBox:{originX:x*w,originY:y*h,width:width*w,height:height*h},categories:[{categoryName:'person',score:.95}]});
+            const detections=window.__testCourtScene==='two_players'?[person(.25,.3,.08,.2),person(.6,.3,.16,.4)]:[];
+            setTimeout(() => {if (!this.closed) this.onmessage?.({data:{type:'result',epoch:data.epoch,seq:data.seq,detections}});}, 0);
+          }
+        }
+        terminate() { this.closed = true; }
+      };
+    })()""")
+    page.goto(ui_server + f'/review/{ID}?clip={CLIP}')
+    page.wait_for_function("() => document.querySelector('#player')?.readyState >= 2")
+    af_btn = page.get_by_role('button', name='Auto focus main player', exact=True)
+    expect(af_btn).to_be_visible()
+    expect(af_btn).to_have_attribute('aria-pressed', 'false')
+    expect(af_btn).to_have_attribute('data-autofocus-state', 'off')
+    assert page.locator('#player').evaluate('v => v.style.transform') == ''
+
+    # Enable Auto focus while paused: exactly one forced capture runs on ready, and paused interval ticks do not re-capture.
+    af_btn.click()
+    expect(af_btn).to_have_attribute('aria-pressed', 'true')
+    page.wait_for_function(
+        "() => document.querySelector('#video-autofocus')?.dataset.autofocusState === 'tracking' && Number(document.querySelector('#player')?.dataset.autofocusZoom || 1) > 1.15",
+        timeout=15000,
+    )
+    captures_while_paused = int(page.locator('#player').get_attribute('data-autofocus-captures') or '0')
+    assert captures_while_paused == 1
+    page.wait_for_timeout(420)
+    assert int(page.locator('#player').get_attribute('data-autofocus-captures') or '0') == captures_while_paused
+
+    transform = page.locator('#player').evaluate('v => v.style.transform')
+    m = re.match(r'translate\(([-\d.]+)px,\s*([-\d.]+)px\)\s*scale\(([\d.]+)\)', transform)
+    assert m is not None, f'Unexpected transform: {transform}'
+    tx, ty, scale = float(m.group(1)), float(m.group(2)), float(m.group(3))
+    assert scale > 1.15
+    assert tx < -10, f'Expected negative X pan toward right-side near player, got tx={tx}'
+
+    # Seeking immediately invalidates/resets tracking and transform, and seeked captures the new scene.
+    page.evaluate("""() => {
+      window.__testCourtScene = 'empty_court';
+      const v = document.querySelector('#player');
+      v.dispatchEvent(new Event('seeking'));
+    }""")
+    assert page.locator('#player').evaluate('v => v.style.transform') == ''
+    expect(af_btn).to_have_attribute('data-autofocus-state', 'searching')
+    page.evaluate("() => { document.querySelector('#player').dispatchEvent(new Event('seeked')); }")
+    page.wait_for_function(
+        "() => document.querySelector('#video-autofocus')?.dataset.autofocusState === 'searching' && Number(document.querySelector('#player')?.dataset.autofocusZoom || 1) === 1",
+        timeout=10000,
+    )
+    assert page.locator('#player').evaluate('v => v.style.transform') == ''
+
+    # Restore target on seeked, verify re-lock, then verify clip change resets and re-tracks cleanly.
+    page.evaluate("""() => {
+      window.__testCourtScene = 'two_players';
+      document.querySelector('#player').dispatchEvent(new Event('seeked'));
+    }""")
+    page.wait_for_function(
+        "() => document.querySelector('#video-autofocus')?.dataset.autofocusState === 'tracking' && Number(document.querySelector('#player')?.dataset.autofocusZoom || 1) > 1.15",
+        timeout=10000,
+    )
+    page.get_by_role('button', name='Next clip', exact=True).click()
+    expect(page.locator('#player')).to_have_attribute('src', re.compile('clip-002.mp4'))
+    page.wait_for_function(
+        "() => document.querySelector('#video-autofocus')?.dataset.autofocusState === 'tracking' && Number(document.querySelector('#player')?.dataset.autofocusZoom || 1) > 1.15",
+        timeout=10000,
+    )
+
+    # Opening Clip Study suspends/disables Auto focus and restores neutral framing.
+    page.get_by_role('button', name='Study clip', exact=True).click()
+    expect(page.locator('#clip-study')).to_be_visible()
+    expect(af_btn).to_have_attribute('aria-pressed', 'false')
+    expect(af_btn).to_have_attribute('data-autofocus-state', 'off')
+    assert page.locator('#player').evaluate('v => v.style.transform') == ''
+    page.get_by_role('button', name='← Back to review', exact=True).click()
+    expect(page.locator('#clip-study')).not_to_be_visible()
+
+    # Re-enable and manually disable Auto focus; verify immediate transform cleanup.
+    af_btn.click()
+    page.wait_for_function(
+        "() => Number(document.querySelector('#player')?.dataset.autofocusZoom || 1) > 1.15",
+        timeout=10000,
+    )
+    af_btn.click()
+    expect(af_btn).to_have_attribute('aria-pressed', 'false')
+    expect(af_btn).to_have_attribute('data-autofocus-state', 'off')
+    assert page.locator('#player').evaluate('v => v.style.transform') == ''
+
+    # Re-enable on desktop, then resize to mobile layout: Auto focus must automatically disable and clean up.
+    af_btn.click()
+    page.wait_for_function(
+        "() => Number(document.querySelector('#player')?.dataset.autofocusZoom || 1) > 1.15",
+        timeout=10000,
+    )
+    page.set_viewport_size({'width': 390, 'height': 844})
+    expect(page.locator('#video-autofocus')).not_to_be_visible()
+    expect(page.locator('#video-autofocus')).to_have_attribute('aria-pressed', 'false')
+    expect(page.locator('#video-autofocus')).to_have_attribute('data-autofocus-state', 'off')
+    assert page.locator('#player').evaluate('v => v.style.transform') == ''
+
+    # Verify zero third-party network requests and zero media/frame uploads occurred.
+    assert all(url.startswith((ui_server, 'data:', 'blob:')) for _, url in requests), requests
+    assert all(method == 'GET' for method, _ in requests)
+    assert not errors
+    page.close()
+
+
+
+
+def test_autofocus_failure_state_and_mobile_hidden(browser, ui_server):
+    mobile = browser.new_page(viewport={'width': 390, 'height': 844}, has_touch=True)
+    mobile.goto(ui_server + f'/review/{ID}?clip={CLIP}')
+    expect(mobile.locator('#video-seek')).to_be_enabled()
+    expect(mobile.locator('#video-autofocus')).not_to_be_visible()
+    mobile.close()
+
+    # Unsupported browser capabilities permanently disable the control.
+    unsupported = browser.new_page(viewport={'width': 1280, 'height': 900})
+    unsupported.add_init_script("window.__TENNIS_AUTOFOCUS_FORCE_UNSUPPORTED = true;")
+    unsupported.goto(ui_server + f'/review/{ID}?clip={CLIP}')
+    expect(unsupported.locator('#video-seek')).to_be_enabled()
+    af_unsupported = unsupported.get_by_role('button', name='Auto focus main player', exact=True)
+    expect(af_unsupported).to_have_attribute('data-autofocus-state', 'unavailable')
+    expect(af_unsupported).to_be_disabled()
+    unsupported.close()
+
+    graphics = browser.new_page(viewport={'width': 1280, 'height': 900})
+    graphics.add_init_script("""window.Worker=class {
+      postMessage(data) { if(data.type==='init') setTimeout(()=>this.onmessage?.({data:{type:'unsupported',code:'worker_graphics_unavailable'}}),0); }
+      terminate() {}
+    };""")
+    graphics.goto(ui_server + f'/review/{ID}?clip={CLIP}')
+    expect(graphics.locator('#video-seek')).to_be_enabled()
+    graphics.locator('#video-autofocus').click()
+    expect(graphics.locator('#video-autofocus')).to_be_disabled()
+    expect(graphics.locator('#video-autofocus')).to_have_attribute('aria-pressed', 'false')
+    graphics.locator('#video-stage').hover()
+    graphics.get_by_role('button', name='Play video', exact=True).click()
+    graphics.wait_for_function("() => !document.querySelector('#player').paused")
+    assert graphics.locator('#player').evaluate('v => v.style.transform') == ''
+    graphics.close()
+
+    # Deterministic lifecycle test for delayed/stale worker responses, single-flight queue safety across seeking, and watchdog recovery.
+    desktop = browser.new_page(viewport={'width': 1280, 'height': 900})
+    desktop.add_init_script("""(() => {
+      window.__afWorkers = [];
+      window.__afMode = 'delayed';
+      window.__TENNIS_AUTOFOCUS_CONFIG = {initTimeoutMs: 400, detectTimeoutMs: 350};
+      class ControlledWorker {
+        constructor(url) {
+          this.url = url;
+          this.terminated = false;
+          this.sent = [];
+          window.__afWorkers.push(this);
+        }
+        postMessage(msg) {
+          if (this.terminated) return;
+          this.sent.push({type: msg.type, epoch: msg.epoch, seq: msg.seq});
+          if (msg.type === 'init') {
+            if (window.__afMode === 'hang_init') return;
+            setTimeout(() => {
+              if (!this.terminated) this.onmessage?.({data: {type: 'ready'}});
+            }, 10);
+          } else if (msg.type === 'detect') {
+            if (window.__afMode === 'hang_detect' || window.__afMode === 'delayed') return;
+            setTimeout(() => {
+              if (!this.terminated) {
+                this.onmessage?.({
+                  data: {
+                    type: 'result',
+                    epoch: msg.epoch,
+                    seq: msg.seq,
+                    detections: [{
+                      boundingBox: {originX: 190, originY: 75, width: 42, height: 68},
+                      categories: [{score: 0.85, categoryName: 'person'}],
+                    }],
+                  },
+                });
+              }
+            }, 15);
+          }
+        }
+        terminate() {
+          this.terminated = true;
+        }
+      }
+      window.Worker = ControlledWorker;
+    })()""")
+    desktop.goto(ui_server + f'/review/{ID}?clip={CLIP}')
+    desktop.wait_for_function("() => document.querySelector('#player')?.readyState >= 2")
+    af_btn = desktop.get_by_role('button', name='Auto focus main player', exact=True)
+    af_btn.click()
+    desktop.wait_for_function("() => window.__afWorkers.length === 1 && window.__afWorkers[0].sent.some(m => m.type === 'detect')")
+
+    # While seq=1 is in flight, firing seeking + seeked must NOT queue a second overlapping detect message.
+    desktop.evaluate("""() => {
+      const v = document.querySelector('#player');
+      v.dispatchEvent(new Event('seeking'));
+      v.dispatchEvent(new Event('seeked'));
+    }""")
+    assert desktop.evaluate("() => window.__afWorkers[0].sent.filter(m => m.type === 'detect').length") == 1
+
+    # Replying with the stale epoch=1 result releases the in-flight lock without applying stale detections, and immediately dispatches the pending forced capture for epoch=2.
+    desktop.evaluate("""() => {
+      const w = window.__afWorkers[0];
+      const first = w.sent.find(m => m.type === 'detect');
+      w.onmessage({
+        data: {
+          type: 'result',
+          epoch: first.epoch,
+          seq: first.seq,
+          detections: [{
+            boundingBox: {originX: 190, originY: 75, width: 42, height: 68},
+            categories: [{score: 0.9, categoryName: 'person'}],
+          }],
+        },
+      });
+    }""")
+    assert desktop.locator('#player').evaluate('v => v.style.transform') == ''
+    assert desktop.evaluate("() => window.__afWorkers[0].sent.filter(m => m.type === 'detect').length") == 2
+
+    # Leaving the second detect request unanswered triggers the inference watchdog, terminating the hung worker and surfacing a visible recoverable failure.
+    expect(af_btn).to_have_attribute('data-autofocus-state', 'unavailable', timeout=3000)
+    expect(af_btn).to_have_attribute('aria-pressed', 'false')
+    expect(af_btn).to_be_enabled()
+    expect(desktop.locator('#toast')).to_contain_text('Auto focus is unavailable in this browser.')
+    assert desktop.evaluate("() => window.__afWorkers[0].terminated") is True
+
+    # Recoverable failure: switching worker to normal mode and clicking Auto focus again succeeds cleanly.
+    desktop.evaluate("() => { window.__afMode = 'ok'; }")
+    af_btn.click()
+    desktop.wait_for_function(
+        "() => document.querySelector('#video-autofocus')?.dataset.autofocusState === 'tracking' && Number(document.querySelector('#player')?.dataset.autofocusZoom || 1) > 1.15",
+        timeout=5000,
+    )
+    desktop.evaluate("() => ReviewPlayer.controller.destroy()")
+    assert desktop.evaluate("() => window.__afWorkers.at(-1).terminated") is True
+    assert desktop.locator('#player').evaluate('v => v.style.transform') == ''
+    desktop.close()

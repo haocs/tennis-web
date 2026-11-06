@@ -6,22 +6,28 @@ const NoteUI=(()=>{
  const names={comment:'Moment',note:'Moment',highlight:'Highlight',usefulness:'Less useful',cut_feedback:'Cut report',coach:'Coach suggestion'};
  const reasons={poor_cut:'Poor cut',no_play:'No tennis play',downtime:'Too much downtime',too_short:'Too short',wrong_player:'Wrong player',start_early:'Start too early',start_late:'Start too late',end_early:'End too early',end_late:'End too late'};
  const active=a=>a.status==='active';
+ const msRound=MomentPlayback.msRound;
+ const msMin=MomentPlayback.msMin;
+ const msMaxEnd=MomentPlayback.msMaxEnd;
  const related=(a,c)=>c&&(a.matched_clip_ids||a.related_clip_ids||[]).includes(c.id);
  const currentClip=()=>source?.clips.find(c=>c.id===model.current);
  const requestId=()=>globalThis.crypto?.randomUUID?.()||'note-'+Date.now()+'-'+Math.random().toString(36).slice(2);
  function lessUseful(c){return items.find(a=>a.kind==='usefulness'&&active(a)&&a.playback_eligible&&related(a,c));}
- function highlights(c){return items.filter(a=>a.kind==='highlight'&&active(a)&&a.playback_eligible&&related(a,c));}
- function clipBadge(c){const n=highlights(c).length;return `${n?`<span class="note-clip-badge" title="${n} highlighted moment${n===1?'':'s'}">★${n>1?n:''}</span>`:''}${lessUseful(c)?'<span class="note-clip-badge note-less" title="Disliked clip">↓</span>':''}`;}
- function filterClip(c){return model.noteFilter==='liked'?!!c.like.value:model.noteFilter==='highlights'?highlights(c).length>0:model.noteFilter==='useful'?!lessUseful(c):true;}
+ function clipMoments(c){return c?MomentPlayback.inScope(items,{mode:'clip',clipId:c.id,clips:source?.clips||[],sourceId:source?.id}).map(e=>e.annotation).filter(a=>active(a)&&MomentPlayback.canPlay(a,items)):[];}
+ function hasMoments(c){return clipMoments(c).length>0;}
+ function highlights(c){return clipMoments(c).filter(a=>a.kind==='highlight');}
+ function moments(c){return clipMoments(c).filter(a=>a.kind!=='highlight');}
+ function clipBadge(c){return `${highlights(c).length?'<span class="note-clip-badge" title="Highlighted moment">★</span>':''}${moments(c).length?'<span class="note-clip-badge note-moment" title="Moment">⚡</span>':''}${lessUseful(c)?'<span class="note-clip-badge note-less" title="Disliked clip">↓</span>':''}`;}
+ function filterClip(c){return model.noteFilter==='liked'?!!c.like.value:model.noteFilter==='highlights'?highlights(c).length>0:(model.noteFilter==='recommended'||model.noteFilter==='useful')?!lessUseful(c)&&(Number(c?.duration_seconds)>=10||hasMoments(c)):true;}
  function pointAtPlayer(){
   const v=$('#player'),c=currentClip();if(!v||!c||v.readyState<1)throw new Error('Wait for the clip to load');
-  if(model.mode==='clip')return Math.min(Math.max(c.original_start_seconds,c.original_end_seconds-.001),c.original_start_seconds+v.currentTime);
-  const match=source.clips.find(c=>v.currentTime>=c.playback_start_seconds&&v.currentTime<c.playback_end_seconds)||source.clips.at(-1);
-  return Math.min(Math.max(match.original_start_seconds,match.original_end_seconds-.001),match.original_start_seconds+v.currentTime-match.playback_start_seconds);
+  const match=model.mode==='clip'?c:source.clips.find(c=>v.currentTime>=c.playback_start_seconds&&v.currentTime<c.playback_end_seconds)||source.clips.at(-1);
+  const raw=match.original_start_seconds+v.currentTime-(model.mode==='clip'?0:match.playback_start_seconds);
+  return MomentPlayback.clampPointToClip(raw,match);
  }
  function clipTarget(c=currentClip()){if(!c)throw new Error('Choose a clip first');return {scope:'clip',clip_id:c.id,start_seconds:c.original_start_seconds,end_seconds:c.original_end_seconds};}
- async function refresh(){
-  if(!source||document.hidden)return;const owner=source,rev=generation;let after='',all=[];
+ async function refresh(force=false){
+  if(!source||(!force&&document.hidden))return;const owner=source,rev=generation;let after='',all=[];
   try{
    do{const data=await api(`/api/recordings/${owner.id}/metadata${after?'?after='+encodeURIComponent(after):''}`);all.push(...data.annotations);after=data.next_after;}while(after&&rev===generation);
    if(owner!==source||rev!==generation)return;
@@ -43,7 +49,7 @@ const NoteUI=(()=>{
   return api((a.kind==='cut_feedback'?'/api/processing-annotations/':'/api/metadata/')+a.id,{method:'PUT',body:JSON.stringify({publication:context.publication,version:a.version,...changes})});
  }
  async function highlight(){
-  if(saving)return;try{if(!pendingHighlight)pendingHighlight={target:{scope:'point',start_seconds:pointAtPlayer()},id:requestId()};saving=true;const result=await create('highlight',pendingHighlight.target,{text:''},pendingHighlight.id);pendingHighlight=null;await refresh();toast(result.already_highlighted?'Moment already highlighted.':'Moment highlighted.');}catch(e){if(e.status)pendingHighlight=null;toast(e.status?e.message:'Could not confirm the save. Tap Highlight again to retry the same moment.');}finally{saving=false;}
+  if(saving)return;try{if(!pendingHighlight)pendingHighlight={target:{scope:'point',start_seconds:pointAtPlayer()},id:requestId()};saving=true;const result=await create('highlight',pendingHighlight.target,{text:''},pendingHighlight.id);pendingHighlight=null;await refresh(true);toast(result.already_highlighted?'Moment already highlighted.':'Moment highlighted.');}catch(e){if(e.status)pendingHighlight=null;toast(e.status?e.message:'Could not confirm the save. Tap Highlight again to retry the same moment.');}finally{saving=false;}
  }
  async function demote(){
   const c=model.mode==='clip'?currentClip():null,identity=c?.id||'video',key=source.id+':'+identity;
@@ -52,8 +58,8 @@ const NoteUI=(()=>{
    const existing=items.find(a=>a.kind==='usefulness'&&a.context?.publication===source.published_at&&(c?a.target.scope==='clip'&&a.target.clip_id===c.id:a.target.scope==='video'));
    const value=!downvoted(c);
    await api(`/api/entities/videos/${source.id}/metadata`,{method:'PUT',body:JSON.stringify({publication:source.published_at,subject_type:c?'clip':'video_version',...(c?{clip_id:c.id}:{}),field:'less_useful',value,version:existing?.version||0,...(existing?{key:existing.id}:{})})});
-   await refreshShared();await refresh();
-  }catch(e){toast(e.message);if(e.status===409){await refreshShared();await refresh();}}
+   await refreshShared();await refresh(true);
+  }catch(e){toast(e.message);if(e.status===409){await refreshShared();await refresh(true);}}
   finally{saving=false;model.busy.delete(key);refreshLikeButtons();current();}
  }
  function downvoted(c){return items.some(a=>a.kind==='usefulness'&&active(a)&&a.context?.publication===source.published_at&&(c?a.target.scope==='clip'&&a.target.clip_id===c.id:a.target.scope==='video'));}
@@ -123,19 +129,19 @@ const NoteUI=(()=>{
  function momentType(a){return a.kind==='coach'?'coaching':a.kind==='highlight'?'highlight':'comment';}
  function renderRows(box,rows,cuts=false){
   rows.sort((a,b)=>(a.target.start_seconds??-1)-(b.target.start_seconds??-1)||a.id.localeCompare(b.id));
-  box.innerHTML=rows.length?rows.map(a=>`<article class="note-item${a.status==='archived'?' archived':''}" data-note="${esc(a.id)}"><div class="note-item-heading"><strong>${esc(a.body.response?'Coach review':a.record_class==='entity_metadata'?'Note':names[a.kind]||a.kind)}${a.status==='archived'?' · Archived':''}</strong><span>${esc(targetLabel(a))}</span></div>${a.body.text?(a.body.response?`<details class="note-response"><summary>Read saved response</summary><p>${esc(MomentPlayback.displayText(a,true))}</p></details>`:`<p>${esc(a.body.text)}</p>`):''}${a.kind==='cut_feedback'?`<p>${a.body.reasons.map(r=>esc(reasons[r]||r)).join(' · ')}</p>`:''}${relationLabel(a)?`<p class="note-relation">${esc(relationLabel(a))}</p>`:''}<div class="note-item-actions">${itemActions(a,cuts)}</div><div class="note-history" hidden></div></article>`).join(''):'<p class="note-empty">'+(cuts?'No cut reports yet.':box.id==='entity-notes-list'?'No notes.':'No moments.')+'</p>';
+  box.innerHTML=rows.length?rows.map(a=>{const text=MomentPlayback.displayText(a,true).trim();return `<article class="note-item${a.status==='archived'?' archived':''}" data-note="${esc(a.id)}"><div class="note-item-heading"><strong>${esc(a.body?.response?'Coach review':a.record_class==='entity_metadata'?'Note':names[a.kind]||a.kind)}${a.status==='archived'?' · Archived':''}</strong><span>${esc(targetLabel(a))}</span></div>${text?(a.body?.response?`<details class="note-response"><summary>Read saved response</summary><p>${esc(text)}</p></details>`:`<p class="note-text">${esc(text)}</p>`):''}${a.kind==='cut_feedback'?`<p>${(a.body?.reasons||[]).map(r=>esc(reasons[r]||r)).join(' · ')}</p>`:''}${relationLabel(a)?`<p class="note-relation">${esc(relationLabel(a))}</p>`:''}<div class="note-item-actions">${itemActions(a,cuts)}</div><div class="note-history" hidden></div></article>`;}).join(''):'<p class="note-empty">'+(cuts?'No cut reports yet.':box.id==='entity-notes-list'?'No notes.':'No moments.')+'</p>';
   $$('[data-note-action]',box).forEach(b=>b.onclick=async()=>{
    const card=b.closest('[data-note]'),a=items.find(a=>a.id===card.dataset.note);if(b.closest('.note-actions-menu'))b.closest('.note-actions-menu').open=false;b.disabled=true;
    try{
     if(b.dataset.noteAction==='jump')jump(a);
     if(b.dataset.noteAction==='edit')openEditor(a.kind,a);
-    if(b.dataset.noteAction==='archive'){await update(a,{status:a.status==='active'?'archived':'active'});await refresh();toast(a.status==='active'?'Archived.':'Restored.');}
+    if(b.dataset.noteAction==='archive'){await update(a,{status:a.status==='active'?'archived':'active'});await refresh(true);toast(a.status==='active'?'Archived.':'Restored.');}
     if(b.dataset.noteAction==='history'){const h=$('.note-history',card);let after=0,versions=[];do{const r=await api('/api/annotations/'+a.id+'/revisions'+(after?'?after='+after:''));versions.push(...r.revisions);after=r.next_after;}while(after);h.textContent=versions.map(r=>'v'+r.version+' · '+(r.status||'')+' · '+(r.body?.text||r.content?.cue||'')).join('\n');h.hidden=!h.hidden;}
     if(b.dataset.noteAction==='coach'){
      const fragment=MomentPlayback.inScope([a],scopeOptions())[0]?.fragments[0];const clip=source.clips.find(c=>c.id===(model.mode==='clip'?model.current:fragment?.clip_id));if(!clip)throw new Error('No current clip contains this suggestion. Its history is retained in the export.');
      playClip(clip.id,false);$('#study-clip').click();$('#study-mode-coach').click();$('#coach-step-4').click();
     }
-   }catch(e){toast(e.message);if(e.status===409)await refresh();}finally{b.disabled=false;}
+   }catch(e){toast(e.message);if(e.status===409)await refresh(true);}finally{b.disabled=false;}
   });
  }
  function renderEntityNotes(){
@@ -151,10 +157,12 @@ const NoteUI=(()=>{
   $('#entity-notes-archived').checked=false;renderEntityNotes();$('#entity-notes').showModal();
  }
  function editorScope(){
-  const scope=$('#note-scope').value;$('#note-start-row').hidden=scope==='video'||scope==='clip';$('#note-end-row').hidden=scope!=='interval';
+  const scope=$('#note-scope').value,timed=scope==='point'||scope==='interval';
+  $('#note-start-row').hidden=!timed;$('#note-end-row').hidden=scope!=='interval';
   $('#note-clip-row').hidden=scope!=='clip'||editingKind==='note';
   const enabled=!editing||$('#note-retarget').checked;$('#note-target-fields').disabled=!enabled;
-  $('#note-end').required=scope==='interval';
+  $('#note-start').disabled=!enabled||!timed;$('#note-start').required=timed;
+  $('#note-end').disabled=!enabled||scope!=='interval';$('#note-end').required=scope==='interval';
  }
  function openEditor(kind='note',a=null){
   editing=a;editingKind=kind;editorContext={source_id:source.id,publication:source.published_at,mode:kind==='cut_feedback'?'clip':model.mode,clip_id:model.mode==='clip'||kind==='cut_feedback'?model.current:null};
@@ -163,9 +171,10 @@ const NoteUI=(()=>{
   const allowed=timed?['point','interval']:kind==='note'?[editorContext.clip_id?'clip':'video']:['clip'];
   $('#note-scope').innerHTML=allowed.map(s=>`<option value="${s}">${({point:'Moment',interval:'Moment with end',clip:'Current clip',video:'Whole video'})[s]}</option>`).join('');
   $('#note-target-clip').innerHTML=source.clips.map(c=>`<option value="${c.id}">Clip ${c.index} · Original ${preciseTime(c.original_start_seconds)}–${preciseTime(c.original_end_seconds)}</option>`).join('');
-  let at=currentClip()?.original_start_seconds||0;try{at=pointAtPlayer();}catch(_){}
+  let at=msMin(currentClip()?.original_start_seconds||0);try{at=pointAtPlayer();}catch(_){}
   const t=a?.target||{scope:timed?'point':allowed[0],start_seconds:at};$('#note-scope').value=t.scope;
-  $('#note-start').value=t.start_seconds??0;$('#note-end').value=t.end_seconds??Math.min(source.source.duration_seconds,(t.start_seconds||0)+1);
+  const start=msRound(t.start_seconds??0),end=msRound(t.end_seconds??Math.min(msMaxEnd(source.source.duration_seconds),start+1));
+  $('#note-start').value=start;$('#note-end').value=end;
   $('#note-scope-row').hidden=true;$('#note-optional-end-row').hidden=!timed;$('#note-optional-end').checked=t.scope==='interval';$('#note-optional-end').disabled=!!a;$('#note-start').required=timed;
   if(!a&&kind==='highlight')try{$('#note-start').value=pointAtPlayer();}catch(_){}
   $('#note-target-clip').value=t.clip_id||editorContext.clip_id||source.clips[0]?.id||'';
@@ -178,11 +187,11 @@ const NoteUI=(()=>{
   $('#note-editor-error').textContent='';$('#note-load-latest').hidden=true;editorScope();$('#note-editor').showModal();
  }
  function init(){
-  const node=document.createElement('div');node.innerHTML=`<dialog id="note-editor" aria-labelledby="note-editor-title"><form id="note-form"><div class="dialog-heading"><h2 id="note-editor-title">Add note</h2><button type="button" class="icon-button" id="note-close" aria-label="Close note editor">×</button></div><p id="note-editor-context"></p><label id="note-retarget-row" class="check-label"><input type="checkbox" id="note-retarget">Change timing or target</label><fieldset id="note-target-fields"><label id="note-scope-row">Applies to<select id="note-scope" aria-label="Note target"></select></label><label id="note-clip-row">Clip<select id="note-target-clip" aria-label="Note clip"></select></label><label id="note-start-row">Original start (seconds)<input type="number" id="note-start" min="0" step="0.001"></label><label class="check-label" id="note-optional-end-row"><input type="checkbox" id="note-optional-end">End time</label><label id="note-end-row">Original end (seconds)<input type="number" id="note-end" min="0" step="0.001"></label></fieldset><label><span id="note-text-label">Note</span><textarea id="note-text" rows="3" maxlength="2000"></textarea></label><label id="note-reason-row">Reason<select id="note-usefulness-reason" aria-label="Usefulness reason"><option value="">Not specified</option><option value="low_information">Low information</option><option value="repetitive">Repetitive</option><option value="poor_view">Poor view</option><option value="other">Other</option></select></label><fieldset id="note-cut-reasons"><legend>Cut issues</legend>${Object.entries(reasons).map(([k,v])=>`<label class="check-label"><input type="checkbox" value="${k}">${v}</label>`).join('')}</fieldset><label>Player (optional)<select id="note-player" aria-label="Note player"></select></label><p id="note-editor-error" class="error-message" role="alert"></p><button type="button" class="button" id="note-load-latest" hidden>Load latest saved version</button><button type="submit" class="button primary" id="note-save">Save note</button></form></dialog>`;document.body.append(node);
+  const node=document.createElement('div');node.innerHTML=`<dialog id="note-editor" aria-labelledby="note-editor-title"><form id="note-form" novalidate><div class="dialog-heading"><h2 id="note-editor-title">Add note</h2><button type="button" class="icon-button" id="note-close" aria-label="Close note editor">×</button></div><p id="note-editor-context"></p><label id="note-retarget-row" class="check-label"><input type="checkbox" id="note-retarget">Change timing or target</label><fieldset id="note-target-fields"><label id="note-scope-row">Applies to<select id="note-scope" aria-label="Note target"></select></label><label id="note-clip-row">Clip<select id="note-target-clip" aria-label="Note clip"></select></label><label id="note-start-row">Original start (seconds)<input type="number" id="note-start" min="0" step="0.001"></label><label class="check-label" id="note-optional-end-row"><input type="checkbox" id="note-optional-end">End time</label><label id="note-end-row">Original end (seconds)<input type="number" id="note-end" min="0" step="0.001"></label></fieldset><label><span id="note-text-label">Note</span><textarea id="note-text" rows="3" maxlength="2000"></textarea></label><label id="note-reason-row">Reason<select id="note-usefulness-reason" aria-label="Usefulness reason"><option value="">Not specified</option><option value="low_information">Low information</option><option value="repetitive">Repetitive</option><option value="poor_view">Poor view</option><option value="other">Other</option></select></label><fieldset id="note-cut-reasons"><legend>Cut issues</legend>${Object.entries(reasons).map(([k,v])=>`<label class="check-label"><input type="checkbox" value="${k}">${v}</label>`).join('')}</fieldset><label>Player (optional)<select id="note-player" aria-label="Note player"></select></label><p id="note-editor-error" class="error-message" role="alert"></p><button type="button" class="button" id="note-load-latest" hidden>Load latest saved version</button><button type="submit" class="button primary" id="note-save">Save note</button></form></dialog>`;document.body.append(node);
   document.body.insertAdjacentHTML('beforeend',`<dialog id="entity-notes" aria-labelledby="entity-notes-title"><div class="dialog-heading"><h2 id="entity-notes-title">Notes</h2><button type="button" class="icon-button" id="entity-notes-close" aria-label="Close entity notes">×</button></div><div class="notes-toolbar"><button type="button" class="button small" id="entity-note-add">Add note</button><label class="check-label"><input type="checkbox" id="entity-notes-archived">Show archived notes</label></div><div id="entity-notes-list"></div></dialog>`);
   $('#entity-notes-close').onclick=()=>$('#entity-notes').close();$('#entity-note-add').onclick=()=>openEditor();$('#entity-notes-archived').onchange=renderEntityNotes;
   $('#note-load-latest').onclick=()=>{const latest=items.find(a=>a.id===editing?.id);if(latest)openEditor(latest.kind,latest);else location.reload();};
-  $('#note-close').onclick=()=>$('#note-editor').close();$('#note-scope').onchange=editorScope;$('#note-retarget').onchange=()=>{editorScope();$('#note-optional-end').disabled=!$('#note-retarget').checked;};$('#note-optional-end').onchange=()=>{$('#note-scope').value=$('#note-optional-end').checked?'interval':'point';editorScope();};
+  $('#note-close').onclick=()=>$('#note-editor').close();$('#note-scope').onchange=editorScope;$('#note-retarget').onchange=()=>{editorScope();$('#note-optional-end').disabled=!$('#note-retarget').checked;};$('#note-optional-end').onchange=()=>{if($('#note-optional-end').checked){const s=msRound($('#note-start').value),e=Number($('#note-end').value);if(!Number.isFinite(e)||e<=s)$('#note-end').value=msRound(Math.min(msMaxEnd(source.source.duration_seconds),(Number.isFinite(s)?s:0)+1));else $('#note-end').value=msRound(e);}$('#note-scope').value=$('#note-optional-end').checked?'interval':'point';editorScope();};
   $('#note-form').onsubmit=async e=>{
    e.preventDefault();if(saving)return;saving=true;$('#note-save').disabled=true;
    try{
@@ -190,20 +199,29 @@ const NoteUI=(()=>{
     if(source.id!==context.source_id||source.published_at!==context.publication)throw new Error('This video changed. Close the editor and refresh before saving.');
     const body={text:$('#note-text').value.trim()};if(editingKind==='usefulness')Object.assign(body,{value:'less_useful',reason:$('#note-usefulness-reason').value});
     if(editingKind==='cut_feedback')body.reasons=$$('#note-cut-reasons input:checked').map(e=>e.value);
-    let target;if(!editing||$('#note-retarget').checked){const scope=$('#note-scope').value;target={scope};if(scope==='clip'){const selected=source.clips.find(c=>c.id===(editingKind==='note'?context.clip_id:$('#note-target-clip').value));if(!selected)throw new Error('Choose a current clip for this target');target=clipTarget(selected);}else if(scope!=='video'){target.start_seconds=Number($('#note-start').value);if(scope==='interval')target.end_seconds=Number($('#note-end').value);}}
+    const parseSec=el=>{const raw=el.value.trim();return raw===''?NaN:msRound(Number(raw));};
+    let target;if(!editing||$('#note-retarget').checked){const scope=$('#note-scope').value;target={scope};if(scope==='clip'){const selected=source.clips.find(c=>c.id===(editingKind==='note'?context.clip_id:$('#note-target-clip').value));if(!selected)throw new Error('Choose a current clip for this target');target=clipTarget(selected);}else if(scope!=='video'){target.start_seconds=parseSec($('#note-start'));if(scope==='interval')target.end_seconds=parseSec($('#note-end'));}}
     const timing=target||editing?.target;
-    if(timing&&['point','interval'].includes(timing.scope)){
+    const timed=timing&&['point','interval'].includes(timing.scope);
+    if(editingKind==='note'&&!timed&&!body.text)throw new Error('Enter a note.');
+    if(timed){
      const lo=timing.start_seconds,hi=timing.end_seconds;
      if(!Number.isFinite(lo)||lo<0||lo>=source.source.duration_seconds||hi!==undefined&&(!Number.isFinite(hi)||hi<=lo||hi>source.source.duration_seconds))throw new Error('Choose a start within the recording and an optional later end.');
      const clips=context.mode==='clip'?source.clips.filter(c=>c.id===context.clip_id):source.clips;
-     if(!clips.some(c=>hi===undefined?lo>=c.original_start_seconds&&lo<c.original_end_seconds:lo<c.original_end_seconds&&hi>c.original_start_seconds))throw new Error('The moment must overlap the clip or video you were editing.');
+     if(!clips.some(c=>{const a=c.original_start_seconds,b=c.original_end_seconds;return hi===undefined?lo>=a&&lo<b:lo<b&&hi>a;}))throw new Error('The moment must overlap the clip or video you were editing.');
     }
     const player_id=$('#note-player').value||null;
     const fingerprint=JSON.stringify([body,target,player_id]);if(fingerprint!==saveFingerprint){saveFingerprint=fingerprint;saveRequest=requestId();}
     if(editing)await update(editing,{body,player_id,...(target?{target}:{})},context);
     else await create(editingKind,target,body,saveRequest,player_id,context);
-    await refresh();$('#note-editor').close();if(editingKind==='comment'||editing?.record_class==='moment')setExpanded(true);toast('Saved.');
-   }catch(e){$('#note-editor-error').textContent=e.message;if(e.status===409){await refresh();$('#note-load-latest').hidden=false;}}finally{saving=false;$('#note-save').disabled=false;}
+    await refresh(true);$('#note-editor').close();
+    if(editingKind==='comment'||editing?.record_class==='moment'){
+     const savedType=editing?momentType(editing):editingKind==='highlight'?'highlight':'comment';
+     if($('#moment-type')&&$('#moment-type').value!=='all'&&$('#moment-type').value!==savedType)$('#moment-type').value='all';
+     setExpanded(true);
+    }
+    toast('Saved.');
+   }catch(e){$('#note-editor-error').textContent=e.message;if(e.status===409){await refresh(true);$('#note-load-latest').hidden=false;}}finally{saving=false;$('#note-save').disabled=false;}
   };
  }
  function setExpanded(open){
@@ -216,11 +234,11 @@ const NoteUI=(()=>{
   player.addEventListener('seeked',()=>cueTick(true));player.addEventListener('play',()=>cueTick());player.addEventListener('pause',()=>cueTick());player.addEventListener('ended',()=>cueTick());
   player.addEventListener('emptied',()=>{clearTimeout(cueTimer);cueClock.reset();cueKey='';$('#moment-cues')?.replaceChildren();});
   window.addEventListener('coach-notes-changed',refresh);document.addEventListener('visibilitychange',()=>cueTick(true));
-  $('.player-shell').insertAdjacentHTML('afterend',`<section id="moments-area" aria-label="Moment panel"><div id="moment-cues" class="moment-cues" role="status" aria-live="polite" aria-atomic="true"></div><div id="notes-panel" class="notes-panel"><div class="moment-bar"><button type="button" id="moment-toggle" aria-expanded="false" aria-controls="moment-panel-content">Moments <span aria-hidden="true">⌄</span></button><button type="button" class="button small" id="note-highlight" aria-label="Highlight this moment">Highlight</button><button type="button" class="button small" id="moment-jump" aria-label="Jump to next moment" hidden>Jump</button><button type="button" class="button small" id="add-moment" aria-label="Add moment">+ Moment</button></div><div id="moment-panel-content" hidden><div class="notes-toolbar moment-filters"><select id="moment-type" aria-label="Moment type"><option value="all">All types</option><option value="highlight">Highlight</option><option value="coaching">Coaching</option><option value="comment">Moment</option></select><label class="check-label"><input id="notes-archived" type="checkbox">Show archived</label></div><p id="notes-status" role="status"></p><div id="notes-list"></div></div></div></section>`);
+  $('.player-shell').insertAdjacentHTML('afterend',`<section id="moments-area" aria-label="Moment panel"><div id="moment-cues" class="moment-cues" role="status" aria-live="polite" aria-atomic="true"></div><div id="notes-panel" class="notes-panel"><div class="moment-bar"><button type="button" id="moment-toggle" aria-expanded="false" aria-controls="moment-panel-content">Moments <span aria-hidden="true">⌄</span></button><button type="button" class="button small" id="moment-jump" aria-label="Jump to next moment" hidden>Jump</button><button type="button" class="button small" id="note-highlight" aria-label="Highlight this moment">Highlight</button><button type="button" class="button small" id="add-moment" aria-label="Add moment">+ Moment</button></div><div id="moment-panel-content" hidden><div class="notes-toolbar moment-filters"><select id="moment-type" aria-label="Moment type"><option value="all">All types</option><option value="highlight">Highlight</option><option value="coaching">Coaching</option><option value="comment">Moment</option></select><label class="check-label"><input id="notes-archived" type="checkbox">Show archived</label></div><p id="notes-status" role="status"></p><div id="notes-list"></div></div></div></section>`);
   $('#note-highlight').onclick=highlight;$('#note-demote').onclick=demote;$('#moment-jump').onclick=nextMoment;$('#add-moment').onclick=()=>openEditor('comment');
   $('#moment-toggle').onclick=()=>setExpanded($('#moment-toggle').getAttribute('aria-expanded')!=='true');$('#moment-type').onchange=render;$('#notes-archived').onchange=render;
   const more=$('.player-more');more.classList.remove('hidden');$('.player-more-list').insertAdjacentHTML('beforeend',`<button type="button" id="entity-notes-open">Notes</button><a class="note-cut-link" href="/review/${s.id}/cuts">Review cuts</a>`);$('#entity-notes-open').onclick=()=>{more.open=false;openEntityNotes();};
-  const toolbar=$('.clip-toolbar .toolbar');toolbar.insertAdjacentHTML('beforeend','<select id="note-clip-filter" aria-label="Clip focus"><option value="all">All clips</option><option value="liked">Liked only</option><option value="highlights">Highlights</option><option value="useful">Hide disliked</option></select>');$('#note-clip-filter').value=model.noteFilter||'all';$('#note-clip-filter').onchange=e=>{model.noteFilter=e.target.value;renderClipList();};
+  const toolbar=$('.clip-toolbar .toolbar');toolbar.insertAdjacentHTML('beforeend','<select id="note-clip-filter" aria-label="Clip focus"><option value="all">All clips</option><option value="recommended">Recommended</option><option value="liked">Liked only</option><option value="highlights">Highlights</option></select>');$('#note-clip-filter').value=model.noteFilter||'all';$('#note-clip-filter').onchange=e=>{model.noteFilter=e.target.value;renderClipList();};
   refresh();timer=setInterval(refresh,10000);
  }
  function cuts(s){
@@ -229,5 +247,5 @@ const NoteUI=(()=>{
   const choose=()=>{const c=s.clips.find(c=>c.id===$('#cut-clip').value);model.current=c.id;$('#cut-video').src=mediaURL(s,c.file);$('#cut-original').textContent='Original '+preciseTime(c.original_start_seconds)+'–'+preciseTime(c.original_end_seconds);};
   $('#cut-clip').onchange=choose;$('#cut-report').onclick=()=>{$('#cut-video').pause();openEditor('cut_feedback');};$('#notes-archived').onchange=render;choose();refresh();timer=setInterval(refresh,10000);
  }
- return {init,mount,cuts,current,clipBadge,filterClip,refresh};
+ return {init,mount,cuts,current,clipBadge,filterClip,hasMoments,refresh};
 })();

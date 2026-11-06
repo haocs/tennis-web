@@ -13,6 +13,7 @@ const ReviewPlayer = {
    person:'<circle cx="12" cy="8" r="3"/><path d="M5 21v-2a7 7 0 0 1 14 0v2"/>',
    study:'<circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5 5"/>',
    download:'<path d="M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5"/>',
+   focus:'<path d="M4 8V5a1 1 0 0 1 1-1h3m8 0h3a1 1 0 0 1 1 1v3M4 16v3a1 1 0 0 0 1 1h3m8 0h3a1 1 0 0 0 1-1v-3"/><circle cx="12" cy="12" r="3"/>',
    more:'<circle cx="5" cy="12" r="1.6" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/><circle cx="19" cy="12" r="1.6" fill="currentColor" stroke="none"/>'
   };
   return `<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${shapes[name]||''}</svg>`;
@@ -26,15 +27,287 @@ const ReviewPlayer = {
  <button type="button" class="video-button video-play" id="video-play" aria-label="Play video" title="Play video">${this.icon('play')}</button>
  <button type="button" class="video-button" id="next" aria-label="Next clip" title="Next clip">${this.icon('next')}</button>
  </div>
- <div class="video-bottom"><span id="video-time" class="video-time">0:00 / 0:00</span><div class="video-view-actions"><select id="video-rate" class="video-rate" aria-label="Playback speed" title="Playback speed"><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="0.75">0.75×</option><option value="1" selected>1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="2">2×</option></select><button type="button" class="video-button" id="video-fullscreen" aria-label="Enter fullscreen" title="Enter fullscreen">${this.icon('fullscreen')}</button></div></div>
+ <div class="video-bottom"><span id="video-time" class="video-time">0:00 / 0:00</span><div class="video-view-actions"><button type="button" class="video-button video-autofocus" id="video-autofocus" aria-label="Auto focus main player" aria-pressed="false" title="Auto focus main player" data-autofocus-state="off">${this.icon('focus')}<span class="video-autofocus-label">Auto</span></button><select id="video-rate" class="video-rate" aria-label="Playback speed" title="Playback speed"><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="0.75">0.75×</option><option value="1" selected>1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="2">2×</option></select><button type="button" class="video-button" id="video-fullscreen" aria-label="Enter fullscreen" title="Enter fullscreen">${this.icon('fullscreen')}</button></div></div>
  <div class="video-seek-label"><span class="sr-only">Seek current video</span><input id="video-seek" aria-label="Seek current video" type="range" min="0" max="0" value="0" step="0.1" disabled></div>
  </div></div>`;},
  mount({time,onError}){
   this.controller?.destroy();
   const stage=document.querySelector('#video-stage'),video=document.querySelector('#player');
-  const find=id=>stage.querySelector('#'+id),seek=find('video-seek'),full=find('video-fullscreen'),overlay=stage.querySelector('.video-overlay'),rate=find('video-rate');
+  const find=id=>stage.querySelector('#'+id),seek=find('video-seek'),full=find('video-fullscreen'),overlay=stage.querySelector('.video-overlay'),rate=find('video-rate'),autofocus=find('video-autofocus');
   let hideTimer,keyboardMode=false,mediaContext=null,suspended=false;
   const media=navigator.mediaSession,study=document.querySelector('#clip-study');
+  const tracker=window.AutoFocusCore?new window.AutoFocusCore.AutoFocusTracker():null;
+  const mobileQuery=window.matchMedia?window.matchMedia('(max-width: 650px), (pointer: coarse)'):null;
+  const desktopEligible=()=>!(mobileQuery?.matches);
+  let afEnabled=false,afUnavailable=false,afWorker=null,afReady=false,afInFlightSeq=0,afPendingForcedCapture=false,afEpoch=0,afSeq=0,afTimer=null,afRaf=0,afInitWatchdog=null,afDetectWatchdog=null,afLastStepMs=0,afCanvas=null,afCtx=null,afDetections=0,afCaptures=0;
+  function clearInitWatchdog(){if(afInitWatchdog){clearTimeout(afInitWatchdog);afInitWatchdog=null;}}
+  function clearDetectWatchdog(){if(afDetectWatchdog){clearTimeout(afDetectWatchdog);afDetectWatchdog=null;}}
+  function canUseAutoFocus(){
+   if(window.__TENNIS_AUTOFOCUS_FORCE_UNSUPPORTED)return false;
+   if(!tracker||typeof Worker!=='function'||typeof WebAssembly!=='object')return false;
+   const c=document.createElement('canvas');
+   return !!c.getContext?.('2d');
+  }
+  function applyAutoFocusTransform(framing){
+   if(!afEnabled||!framing||framing.zoom<=1.01){
+    video.style.transform='';
+    video.dataset.autofocusZoom='1';
+    return;
+   }
+   video.style.transform=`translate(${framing.x.toFixed(1)}px, ${framing.y.toFixed(1)}px) scale(${framing.zoom.toFixed(3)})`;
+   video.dataset.autofocusZoom=framing.zoom.toFixed(2);
+  }
+  function syncAutoFocusButton(state,detail=''){
+   if(!autofocus)return;
+   autofocus.dataset.autofocusState=state;
+   autofocus.setAttribute('aria-pressed',String(afEnabled));
+   autofocus.disabled=afUnavailable;
+   autofocus.title=state==='unavailable'?(detail||'Auto focus is unavailable in this browser.'):(afEnabled?`Auto focus on (${state})`:'Auto focus main player');
+   video.dataset.autofocusState=state;
+   video.dataset.autofocusInflight=afInFlightSeq?'1':'0';
+  }
+  function stopAutoFocus(terminateWorker=false){
+   afEpoch+=1;
+   afPendingForcedCapture=false;
+   if(afTimer){clearInterval(afTimer);afTimer=null;}
+   if(afRaf){cancelAnimationFrame(afRaf);afRaf=0;}
+   clearDetectWatchdog();
+   afLastStepMs=0;
+   tracker?.reset();
+   applyAutoFocusTransform(null);
+   if(terminateWorker){
+    clearInitWatchdog();
+    afInFlightSeq=0;
+    if(afWorker){
+     const oldWorker=afWorker;
+     afWorker=null;
+     afReady=false;
+     try{oldWorker.postMessage({type:'close'});}catch(error){}
+     try{oldWorker.terminate();}catch(error){}
+    }
+   }
+   video.dataset.autofocusInflight=afInFlightSeq?'1':'0';
+  }
+  function disableAutoFocus(terminateWorker=true){
+   afEnabled=false;
+   stopAutoFocus(terminateWorker);
+   if(!afUnavailable)syncAutoFocusButton('off');
+  }
+  function failAutoFocus(message='Auto focus is unavailable in this browser.',recoverable=true){
+   afEnabled=false;
+   if(!recoverable)afUnavailable=true;
+   stopAutoFocus(true);
+   syncAutoFocusButton('unavailable',message);
+   onError(message);
+  }
+  function syncAutoFocusViewport(){
+   if(!desktopEligible()&&(afEnabled||afWorker)){
+    disableAutoFocus(true);
+   }
+  }
+  function stepAutoFocus(nowMs=performance.now()){
+   if(!afEnabled||!tracker)return;
+   if(tracker.state==='holding'&&tracker.lastDetectedAt!==null&&nowMs-tracker.lastDetectedAt>tracker.holdMs){
+    tracker.trackedBox=null;
+    tracker.target={zoom:1,x:0,y:0};
+    tracker.state='searching';
+    syncAutoFocusButton('searching');
+   }
+   const dt=afLastStepMs>0?Math.min(0.25,Math.max(0.004,(nowMs-afLastStepMs)/1000)):(1/30);
+   afLastStepMs=nowMs;
+   const rect=stage.getBoundingClientRect();
+   const vw=video.videoWidth||rect.width||320;
+   const vh=video.videoHeight||rect.height||180;
+   const next=tracker.step(dt,rect.width||vw,rect.height||vh,vw,vh);
+   applyAutoFocusTransform(next);
+  }
+  function tickAutoFocusRaf(nowMs){
+   if(!afEnabled)return;
+   stepAutoFocus(nowMs);
+   afRaf=requestAnimationFrame(tickAutoFocusRaf);
+  }
+  function captureAutoFocusFrame(force=false){
+   if(!afEnabled||!afWorker||!afReady||!tracker)return;
+   if(!desktopEligible()||suspended||document.hidden||study?.open||!stage.isConnected)return;
+   if(!force&&(video.paused||video.ended))return;
+   if(video.readyState<2||!video.videoWidth||!video.videoHeight)return;
+   if(afInFlightSeq!==0){
+    if(force)afPendingForcedCapture=true;
+    return;
+   }
+   const dims=window.AutoFocusCore.sampleDimensions(video.videoWidth,video.videoHeight);
+   if(!afCanvas){
+    afCanvas=document.createElement('canvas');
+    afCtx=afCanvas.getContext('2d',{willReadFrequently:true});
+   }
+   if(!afCtx){failAutoFocus('Auto focus is unavailable in this browser.',false);return;}
+   if(afCanvas.width!==dims.width||afCanvas.height!==dims.height){
+    afCanvas.width=dims.width;
+    afCanvas.height=dims.height;
+   }
+   const worker=afWorker;
+   const config=window.__TENNIS_AUTOFOCUS_CONFIG||{};
+   const detectTimeoutMs=Math.max(100,Number(config.detectTimeoutMs)||5000);
+   try{
+    afCtx.drawImage(video,0,0,dims.width,dims.height);
+    const image=afCtx.getImageData(0,0,dims.width,dims.height);
+    afSeq+=1;
+    const seq=afSeq;
+    afInFlightSeq=seq;
+    afPendingForcedCapture=false;
+    afCaptures+=1;
+    video.dataset.autofocusCaptures=String(afCaptures);
+    video.dataset.autofocusInflight='1';
+    clearDetectWatchdog();
+    afDetectWatchdog=setTimeout(()=>{
+     if(worker===afWorker&&afInFlightSeq===seq){
+      failAutoFocus('Auto focus is unavailable in this browser.',true);
+     }
+    },detectTimeoutMs);
+    const buffer=image.data.buffer;
+    worker.postMessage(
+     {type:'detect',epoch:afEpoch,seq,width:dims.width,height:dims.height,buffer,config},
+     [buffer]
+    );
+   }catch(error){
+    clearDetectWatchdog();
+    afInFlightSeq=0;
+    failAutoFocus('Auto focus could not read video frames.',true);
+   }
+  }
+  function ensureAutoFocusWorker(){
+   if(afWorker)return afWorker;
+   const workerUrl=window.__TENNIS_AUTOFOCUS_WORKER_URL||'/static/autofocus-worker.js';
+   const config=window.__TENNIS_AUTOFOCUS_CONFIG||{};
+   const initTimeoutMs=Math.max(100,Number(config.initTimeoutMs)||30000);
+   let worker;
+   try{
+    worker=new Worker(workerUrl);
+    afWorker=worker;
+   }catch(error){
+    failAutoFocus('Auto focus is unavailable in this browser.',true);
+    return null;
+   }
+   clearInitWatchdog();
+   afInitWatchdog=setTimeout(()=>{
+    if(worker===afWorker&&!afReady){
+     failAutoFocus('Auto focus is unavailable in this browser.',true);
+    }
+   },initTimeoutMs);
+   worker.onmessage=event=>{
+    if(worker!==afWorker)return;
+    const msg=event.data||{};
+    if(msg.type==='ready'){
+     clearInitWatchdog();
+     afReady=true;
+     if(afEnabled){
+      if(autofocus?.dataset.autofocusState==='loading')syncAutoFocusButton('searching');
+      captureAutoFocusFrame(true);
+     }
+     return;
+    }
+    if(msg.type==='result'){
+     if(msg.seq===afInFlightSeq||!msg.seq){
+      clearDetectWatchdog();
+      afInFlightSeq=0;
+      video.dataset.autofocusInflight='0';
+     }
+     if(!afEnabled||msg.epoch!==afEpoch||!tracker){
+      if(afEnabled&&afPendingForcedCapture&&video.readyState>=2){
+       afPendingForcedCapture=false;
+       captureAutoFocusFrame(true);
+      }
+      return;
+     }
+     afDetections+=1;
+     video.dataset.autofocusDetections=String(afDetections);
+     const rect=stage.getBoundingClientRect();
+     const vw=video.videoWidth||rect.width||320;
+     const vh=video.videoHeight||rect.height||180;
+     const dims=window.AutoFocusCore.sampleDimensions(vw,vh);
+     const status=tracker.updateDetection(
+      msg.detections||[],
+      dims.width,
+      dims.height,
+      rect.width||vw,
+      rect.height||vh,
+      vw,
+      vh,
+      performance.now()
+     );
+     syncAutoFocusButton(status.state);
+     stepAutoFocus(performance.now());
+     if(afPendingForcedCapture&&video.readyState>=2){
+      afPendingForcedCapture=false;
+      captureAutoFocusFrame(true);
+     }
+     return;
+    }
+    if(msg.type==='unsupported'&&msg.code==='worker_graphics_unavailable'){
+     failAutoFocus('Auto focus is not supported by this browser.',false);
+     return;
+    }
+    if(msg.type==='error'){
+     clearInitWatchdog();
+     clearDetectWatchdog();
+     afInFlightSeq=0;
+     failAutoFocus('Auto focus is unavailable in this browser.',true);
+    }
+   };
+   worker.onerror=()=>{
+    if(worker!==afWorker)return;
+    clearInitWatchdog();
+    clearDetectWatchdog();
+    afInFlightSeq=0;
+    failAutoFocus('Auto focus is unavailable in this browser.',true);
+   };
+   worker.postMessage({type:'init',config});
+   return worker;
+  }
+  function resetAutoFocusSource(event){
+   if(!afEnabled||!tracker)return;
+   afEpoch+=1;
+   afLastStepMs=0;
+   tracker.reset();
+   applyAutoFocusTransform(null);
+   syncAutoFocusButton(afReady?'searching':'loading');
+   if(event?.type!=='seeking'&&video.readyState>=2)captureAutoFocusFrame(true);
+  }
+  function toggleAutoFocus(){
+   if(!desktopEligible()){
+    disableAutoFocus(true);
+    return;
+   }
+   if(afUnavailable||!canUseAutoFocus()){
+    failAutoFocus('Auto focus is unavailable in this browser.',false);
+    return;
+   }
+   if(afEnabled){
+    disableAutoFocus(true);
+    reveal();
+    return;
+   }
+   afEnabled=true;
+   afEpoch+=1;
+   afLastStepMs=0;
+   tracker.reset();
+   syncAutoFocusButton(afReady?'searching':'loading');
+   if(!ensureAutoFocusWorker())return;
+   afTimer=setInterval(()=>{
+    if(!afEnabled)return;
+    if(!video.paused&&!video.ended)captureAutoFocusFrame(false);
+    stepAutoFocus(performance.now());
+   },180);
+   afRaf=requestAnimationFrame(tickAutoFocusRaf);
+   if(afReady&&video.readyState>=2)captureAutoFocusFrame(true);
+   reveal();
+  }
+  if(!canUseAutoFocus()){
+   afUnavailable=true;
+   syncAutoFocusButton('unavailable','Auto focus is unavailable in this browser.');
+  }else{
+   syncAutoFocusButton('off');
+  }
   const mediaActions=['play','pause','seekto','previoustrack','nexttrack'];
   const ownsMedia=()=>!suspended&&stage.isConnected&&!study?.open;
   function action(name,handler){
@@ -75,11 +348,13 @@ const ReviewPlayer = {
    }catch(error){/* Metadata must never prevent navigation. */}
    mediaPosition();
   }
-  const suspendMedia=()=>{suspended=true;clearMedia();};
+  const suspendMedia=()=>{suspended=true;clearMedia();disableAutoFocus(true);};
   const resumeMedia=()=>{suspended=false;mediaActionsSync();};
   window.addEventListener('pagehide',suspendMedia);
   window.addEventListener('pageshow',resumeMedia);
-  const studyObserver=study?new MutationObserver(()=>mediaActionsSync()):null;
+  window.addEventListener('resize',syncAutoFocusViewport);
+  mobileQuery?.addEventListener?.('change',syncAutoFocusViewport);
+  const studyObserver=study?new MutationObserver(()=>{if(study?.open&&afEnabled)disableAutoFocus(true);mediaActionsSync();}):null;
   studyObserver?.observe(study,{attributes:true,attributeFilter:['open']});
   const elementFullscreen=()=>document.fullscreenElement===stage||document.webkitFullscreenElement===stage||document.fullscreenElement===video;
   const nativeFullscreen=()=>video.webkitDisplayingFullscreen||video.webkitPresentationMode==='fullscreen';
@@ -129,6 +404,7 @@ const ReviewPlayer = {
    reveal();
   }
   find('video-play').addEventListener('click',togglePlay);
+  autofocus?.addEventListener('click',toggleAutoFocus);
   video.addEventListener('click',()=>{
    if(matchMedia('(pointer: coarse)').matches){if(stage.classList.contains('controls-hidden')||video.paused)reveal();else hide();}
    else togglePlay();
@@ -152,13 +428,17 @@ const ReviewPlayer = {
    }
   });
   ['play','pause','ended','loadedmetadata','emptied','ratechange'].forEach(event=>video.addEventListener(event,()=>{sync();mediaActionsSync();reveal();}));
+  ['loadedmetadata','emptied','seeking'].forEach(event=>video.addEventListener(event,resetAutoFocusSource));
+  ['loadeddata','canplay','seeked'].forEach(event=>video.addEventListener(event,()=>{if(afEnabled)captureAutoFocusFrame(true);}));
   ['timeupdate','durationchange'].forEach(event=>video.addEventListener(event,()=>{sync();mediaPosition();}));
   ['fullscreenchange','webkitfullscreenchange'].forEach(event=>document.addEventListener(event,syncFullscreen));
   ['webkitbeginfullscreen','webkitendfullscreen'].forEach(event=>video.addEventListener(event,syncFullscreen));
   sync();syncFullscreen();
   this.controller={sync,reveal,updateMediaSession:mediaActionsSync,destroy(){
-   clearTimeout(hideTimer);suspended=true;clearMedia();studyObserver?.disconnect();
+   clearTimeout(hideTimer);suspended=true;clearMedia();disableAutoFocus(true);studyObserver?.disconnect();
    window.removeEventListener('pagehide',suspendMedia);window.removeEventListener('pageshow',resumeMedia);
+   window.removeEventListener('resize',syncAutoFocusViewport);
+   mobileQuery?.removeEventListener?.('change',syncAutoFocusViewport);
    ['fullscreenchange','webkitfullscreenchange'].forEach(event=>document.removeEventListener(event,syncFullscreen));
   }};
   return this.controller;

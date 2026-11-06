@@ -4,8 +4,16 @@
  'use strict';
  const defaults={highlight:3,coach:3,note:3};
  const finite=x=>typeof x==='number'&&Number.isFinite(x);
+ const msRound=x=>Math.round(Number(x)*1000)/1000;
+ const msMin=x=>Math.ceil(Number(x)*1000-1e-6)/1000;
+ const msMaxPoint=x=>(Math.ceil(Number(x)*1000-1e-6)-1)/1000;
+ const msMaxEnd=x=>Math.floor(Number(x)*1000+1e-6)/1000;
+ function clampPointToClip(rawSeconds,clip){
+  const lo=msMin(clip.original_start_seconds),hi=Math.max(lo,msMaxPoint(clip.original_end_seconds));
+  return Math.max(lo,Math.min(hi,msRound(rawSeconds)));
+ }
  function displayText(a,full=false){
-  const text=typeof a.body?.text==='string'?a.body.text:'';
+  const text=typeof a.body?.text==='string'?a.body.text:typeof a.payload?.text==='string'?a.payload.text:'';
   if(a.kind!=='coach'||!a.body?.response)return text;
   const raw=text.trim().replace(/^```(?:json)?\s*/i,'').replace(/\s*```$/,'');
   if(!raw.startsWith('{')&&!raw.startsWith('['))return text;
@@ -24,7 +32,7 @@
   return a.kind==='coach'&&a.body?.response&&a.visible_intervals?.length>0&&!items.some(b=>b.kind==='coach'&&!b.body?.response&&b.playback_eligible&&b.origin?.job_id&&b.origin.job_id===a.origin?.job_id);
  }
  function isMoment(a){
-  return a.record_class?a.record_class==='moment':['highlight','coach'].includes(a.kind)||a.kind==='note'&&['point','interval'].includes(a.target?.scope);
+  return a.record_class?a.record_class==='moment':['highlight','coach','comment'].includes(a.kind)||a.kind==='note'&&['point','interval'].includes(a.target?.scope);
  }
  function inScope(items,{mode='full',clipId=null,clips=[],sourceId=null}={}){
   return items.filter(a=>isMoment(a)&&(!sourceId||!a.source_id||a.source_id===sourceId)).flatMap(a=>{
@@ -37,7 +45,7 @@
     if(a.kind==='coach'&&a.player_id&&clip?.main_player?.id!==a.player_id)return [];
     const lo=clip?.original_start_seconds??f.original_start,hi=clip?.original_end_seconds??f.original_end;
     if(!finite(lo)||!finite(hi))return [];
-    if(point&&(start<lo||(clip&&start>=hi)||start!==f.original_start))return [];
+    if(point&&(start<lo||(clip&&start>=hi)||Math.abs(start-f.original_start)>1e-6))return [];
     const x=point?start:Math.max(start,lo,f.original_start),y=point?start:Math.min(end,hi,f.original_end);
     if(!finite(x)||!finite(y)||!point&&y<=x)return [];
     const local=x-(clip?.original_start_seconds??(f.original_start-f.local_start));
@@ -88,5 +96,5 @@
    this.previous=position;return result;
   }
  }
- return {defaults,displayText,teaserText,canPlay,inScope,timeline,nextMoment,nextHighlight,CueClock};
+ return {defaults,msRound,msMin,msMaxPoint,msMaxEnd,clampPointToClip,displayText,teaserText,canPlay,inScope,timeline,nextMoment,nextHighlight,CueClock};
 });

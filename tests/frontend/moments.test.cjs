@@ -123,6 +123,34 @@ test('only meaningful text produces teaser content; empty highlights and structu
  assert.equal(teaserText({kind:'highlight',body:{text:'  '}}),'');
  assert.equal(teaserText({kind:'highlight',body:{text:' Good recovery '}}),'Good recovery');
  assert.equal(teaserText({kind:'note',body:{text:'A note'}}),'A note');
+ assert.equal(teaserText({kind:'comment',payload:{text:'Payload note'}}),'Payload note');
  assert.equal(teaserText({kind:'coach',body:{response:true,text:'{"schema_version":2}'}}),'');
  assert.equal(teaserText({kind:'coach',body:{response:true,text:'{"suggestions":['}}),'');
+});
+test('fractional clip boundaries preserve exact in-scope projection and quantize captured points inside [start, end)',()=>{
+ const {clampPointToClip,msMin,msMaxPoint}=require('../../static/moments-core.js');
+ const subClips=[{id:'c1',original_start_seconds:1547.516842,original_end_seconds:1563.516842,playback_start_seconds:0}];
+ assert.equal(msMin(1547.516842),1547.517);
+ assert.equal(msMaxPoint(1563.516842),1563.516);
+ assert.equal(clampPointToClip(1547.516842,subClips[0]),1547.517);
+ assert.equal(clampPointToClip(1547.5161,subClips[0]),1547.517);
+ assert.equal(clampPointToClip(1563.516842,subClips[0]),1563.516);
+ const beforeStart=moment('before-start',1547.516,{kind:'note',clip:'c1',local:0,playback:0});
+ const atMin=moment('at-min',1547.517,{kind:'note',clip:'c1',local:0.000158,playback:0.000158});
+ const atMax=moment('at-max',1563.516,{kind:'note',clip:'c1',local:15.999158,playback:15.999158});
+ const afterEnd=moment('after-end',1563.517,{kind:'note',clip:'c1',local:16,playback:16});
+ assert.deepEqual(inScope([beforeStart,atMin,atMax,afterEnd],{clips:subClips,mode:'clip',clipId:'c1'}).map(e=>e.annotation.id),['at-min','at-max']);
+
+ const adjClips=[
+  {id:'a',original_start_seconds:0,original_end_seconds:1.0004,playback_start_seconds:0},
+  {id:'b',original_start_seconds:1.0004,original_end_seconds:2,playback_start_seconds:1.0004},
+ ];
+ assert.equal(clampPointToClip(1.0004,adjClips[0]),1.000);
+ assert.equal(clampPointToClip(1.0004,adjClips[1]),1.001);
+ const p1000A=moment('p1000-a',1.000,{kind:'note',clip:'a',local:1.000,playback:1.000});
+ const p1000B=moment('p1000-b',1.000,{kind:'note',clip:'b',local:0,playback:1.000});
+ const p1001A=moment('p1001-a',1.001,{kind:'note',clip:'a',local:1.001,playback:1.001});
+ const p1001B=moment('p1001-b',1.001,{kind:'note',clip:'b',local:0.0006,playback:1.001});
+ assert.deepEqual(inScope([p1000A,p1001A],{clips:adjClips,mode:'clip',clipId:'a'}).map(e=>e.annotation.id),['p1000-a']);
+ assert.deepEqual(inScope([p1000B,p1001B],{clips:adjClips,mode:'clip',clipId:'b'}).map(e=>e.annotation.id),['p1001-b']);
 });

@@ -7,7 +7,7 @@
 .note-item-heading>span,.note-relation,.note-empty{font-size:12px;color:var(--muted)}
 .note-item p{font-size:13px;line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere}
 .note-item-actions{display:flex;gap:8px;flex-wrap:wrap}.note-history{white-space:pre-wrap;font-size:12px;margin:10px 0;max-height:240px;overflow:auto}
-.note-clip-badge{font-size:11px;white-space:nowrap;color:#596d26}.note-less{color:#91673e}
+.note-clip-badge{font-size:11px;white-space:nowrap;color:#596d26}.note-moment{font-variant-emoji:text;font-size:12px;font-weight:700;-webkit-text-stroke:.75px currentColor}.note-less{color:#91673e}
 .note-markers{position:absolute;left:5px;right:5px;bottom:0;height:22px;z-index:2;pointer-events:none}
 .note-marker{position:absolute;left:var(--note-position);transform:translateX(-50%);top:0;width:22px;height:22px;border:0;padding:0;background:transparent;pointer-events:auto;cursor:pointer}
 .note-marker:after{content:"";position:absolute;left:8px;top:8px;width:6px;height:6px;border-radius:50%;background:var(--lime);box-shadow:0 0 0 1px #183f34}
@@ -17,7 +17,7 @@
 #note-target-fields{border:0;padding:0;margin:0}#note-cut-reasons{border:1px solid var(--line);border-radius:8px;padding:10px 14px}
 #note-cut-reasons[hidden],#note-start-row[hidden],#note-end-row[hidden],#note-clip-row[hidden],#note-reason-row[hidden],#note-retarget-row[hidden]{display:none}
 #note-cut-reasons .check-label input,#note-retarget-row input{width:18px;min-height:18px;margin:0}
-#note-editor select{width:100%}.cut-review-player{display:block;width:100%;max-height:55vh;aspect-ratio:16/9;background:#000;margin:16px 0;border-radius:12px}
+#note-editor select{width:100%}#note-editor textarea{display:block;border:1px solid var(--line);border-radius:8px;background:var(--paper);padding:12px;margin-top:8px;width:100%;color:var(--ink);font:inherit;resize:vertical}.cut-review-player{display:block;width:100%;max-height:55vh;aspect-ratio:16/9;background:#000;margin:16px 0;border-radius:12px}
 @media(max-width:650px){.notes-panel{padding:12px}.note-item-actions .button{min-height:40px}}
 
 #note-load-latest[hidden]{display:none}

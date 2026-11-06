@@ -67,6 +67,20 @@ assert Path('/data/annotations.sqlite3').is_file()
 image=urllib.request.urlopen('http://127.0.0.1:8000/api/sessions/'+('a'*64)+'/clips/'+('b'*24)+'/poster').read()
 assert image.startswith(b'\xff\xd8')
 assert len(list(Path('/data/clip-posters').glob('*.jpg')))==1
+import hashlib
+review=urllib.request.urlopen(base+'/review/'+('a'*64))
+csp=review.headers.get('Content-Security-Policy','')
+assert "script-src 'self' 'wasm-unsafe-eval'" in csp and "worker-src 'self'" in csp and "'unsafe-eval'" not in csp
+worker_res=urllib.request.urlopen(base+'/static/autofocus-worker.js')
+assert worker_res.status==200 and 'javascript' in worker_res.headers.get('Content-Type','')
+manifest=json.load(urllib.request.urlopen(base+'/static/vendor/mediapipe/MANIFEST.json'))
+assert urllib.request.urlopen(base+'/static/vendor/mediapipe/LICENSE').status==200
+expected_types={'vision_bundle.js':'javascript','vision_wasm_internal.js':'javascript','vision_wasm_internal.wasm':'application/wasm','efficientdet_lite0.tflite':'application/octet-stream'}
+for name,meta in manifest['files'].items():
+    res=urllib.request.urlopen(base+'/static/vendor/mediapipe/'+name)
+    payload=res.read()
+    assert res.status==200 and expected_types[name] in res.headers.get('Content-Type','')
+    assert len(payload)==meta['bytes'] and hashlib.sha256(payload).hexdigest()==meta['sha256']
 PYTHON
 docker restart "$name" >/dev/null
 wait_healthy

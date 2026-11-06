@@ -2,6 +2,7 @@
 import copy
 from datetime import datetime
 import json
+import mimetypes
 import os
 from pathlib import Path
 import re
@@ -26,6 +27,9 @@ from courts import COURT_ID, court_list, validate_court, enrich_groups
 
 
 def create_app(config=None):
+    mimetypes.add_type('application/wasm', '.wasm')
+    mimetypes.add_type('text/javascript', '.js')
+    mimetypes.add_type('application/octet-stream', '.tflite')
     app = Flask(__name__)
     app.config.update(LIBRARY_ROOT=os.environ.get("TENNIS_LIBRARY_ROOT", "/library"),
                       MEDIA_ROOT=os.environ.get("TENNIS_MEDIA_ROOT"),
@@ -123,7 +127,7 @@ def create_app(config=None):
     def headers(response):
         response.headers['X-Content-Type-Options'] = 'nosniff'
         response.headers['Referrer-Policy'] = 'same-origin'
-        response.headers.setdefault('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self'; connect-src 'self'; frame-ancestors 'self'; base-uri 'none'; form-action 'self'")
+        response.headers.setdefault('Content-Security-Policy', "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self'; connect-src 'self'; frame-ancestors 'self'; base-uri 'none'; form-action 'self'")
         if request.path.startswith('/api/'):
             response.headers['Cache-Control'] = 'no-store'
         return response
