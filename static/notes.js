@@ -10,8 +10,10 @@ const NoteUI=(()=>{
  const currentClip=()=>source?.clips.find(c=>c.id===model.current);
  const requestId=()=>globalThis.crypto?.randomUUID?.()||'note-'+Date.now()+'-'+Math.random().toString(36).slice(2);
  function lessUseful(c){return items.find(a=>a.kind==='usefulness'&&active(a)&&a.playback_eligible&&related(a,c));}
- function highlights(c){return items.filter(a=>a.kind==='highlight'&&active(a)&&a.playback_eligible&&related(a,c));}
- function clipBadge(c){const n=highlights(c).length;return `${n?`<span class="note-clip-badge" title="${n} highlighted moment${n===1?'':'s'}">★${n>1?n:''}</span>`:''}${lessUseful(c)?'<span class="note-clip-badge note-less" title="Disliked clip">↓</span>':''}`;}
+ function clipMoments(c){return c?MomentPlayback.inScope(items,{mode:'clip',clipId:c.id,clips:source?.clips||[],sourceId:source?.id}).map(e=>e.annotation).filter(a=>active(a)&&MomentPlayback.canPlay(a,items)):[];}
+ function highlights(c){return clipMoments(c).filter(a=>a.kind==='highlight');}
+ function moments(c){return clipMoments(c).filter(a=>a.kind!=='highlight');}
+ function clipBadge(c){return `${highlights(c).length?'<span class="note-clip-badge" title="Highlighted moment">★</span>':''}${moments(c).length?'<span class="note-clip-badge note-moment" title="Moment">⚡</span>':''}${lessUseful(c)?'<span class="note-clip-badge note-less" title="Disliked clip">↓</span>':''}`;}
  function filterClip(c){return model.noteFilter==='liked'?!!c.like.value:model.noteFilter==='highlights'?highlights(c).length>0:model.noteFilter==='useful'?!lessUseful(c):true;}
  function pointAtPlayer(){
   const v=$('#player'),c=currentClip();if(!v||!c||v.readyState<1)throw new Error('Wait for the clip to load');
