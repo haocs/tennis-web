@@ -24,7 +24,7 @@ Current implementation problems:
 
 Compact mobile and desktop bar:
 
-`Moments ⌄       Highlight       Jump       + Moment`
+`Moments ⌄       Jump       Highlight       + Moment`
 
 - **Moments** is the disclosure control. Initially collapsed; expanding reveals
   the list and its filters below the bar. The panel surface/heading can expand it;

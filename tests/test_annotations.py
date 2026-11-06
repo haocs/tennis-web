@@ -100,6 +100,33 @@ def test_half_open_point_and_pagination(setup):
     assert one['annotations'][0]['id']!=two['annotations'][0]['id'] and two['next_after'] is None
 
 
+def test_submillisecond_clip_bounds_retain_millisecond_moments(setup):
+    app,root,data=setup;c=app.test_client()
+    sub=copy.deepcopy(data)
+    sub['source']['duration_seconds']=1600
+    sub['video']['duration_seconds']=16
+    sub['clips'][0].update(original_start_seconds=1547.516842,original_end_seconds=1563.516842,duration_seconds=16,playback_start_seconds=0,playback_end_seconds=16)
+    (root/'metadata/sessions'/f'{ID}.json').write_text(json.dumps(sub))
+    for i,(ms,inside) in enumerate(((1547516,False),(1547517,True),(1563516,True),(1563517,False))):
+        res=c.post('/api/moments',json=dict(original_recording_id=ID,publication=sub['published_at'],type='comment',start_ms=ms,payload=dict(text='Start note'),request_id=f'subms-boundary-{i}'),headers=H)
+        assert res.status_code==201
+        body=res.json
+        if inside:
+            assert body['relation']=='retained' and body['playback_eligible'] and body['clip_ids']==[CLIP]
+        else:
+            assert body['relation']=='unavailable' and not body['playback_eligible'] and body['clip_ids']==[]
+    adj=copy.deepcopy(data)
+    adj['video']['duration_seconds']=2
+    adj['clips']=[
+        dict(data['clips'][0],id='b'*24,index=1,original_start_seconds=0,original_end_seconds=1.0004,duration_seconds=1.0004,playback_start_seconds=0,playback_end_seconds=1.0004),
+        dict(data['clips'][0],id='c'*24,index=2,original_start_seconds=1.0004,original_end_seconds=2,duration_seconds=0.9996,playback_start_seconds=1.0004,playback_end_seconds=2,file='Clips/clip-002.mp4'),
+    ]
+    (root/'metadata/sessions'/f'{ID}.json').write_text(json.dumps(adj))
+    m1000=c.post('/api/moments',json=dict(original_recording_id=ID,publication=adj['published_at'],type='comment',start_ms=1000,payload=dict(text='Edge A'),request_id='adj-1000'),headers=H).json
+    m1001=c.post('/api/moments',json=dict(original_recording_id=ID,publication=adj['published_at'],type='comment',start_ms=1001,payload=dict(text='Edge B'),request_id='adj-1001'),headers=H).json
+    assert m1000['clip_ids']==['b'*24] and m1001['clip_ids']==['c'*24]
+
+
 def test_unstructured_response_is_selection_context_not_invented_precise_timing(setup):
     app,c,data,ai,folder=prepared(setup);job=claimed(c);pin(app,c,job,folder)
     complete(c,job,'A useful response without precise event timing.')

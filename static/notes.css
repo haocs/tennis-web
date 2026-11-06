@@ -17,7 +17,7 @@
 #note-target-fields{border:0;padding:0;margin:0}#note-cut-reasons{border:1px solid var(--line);border-radius:8px;padding:10px 14px}
 #note-cut-reasons[hidden],#note-start-row[hidden],#note-end-row[hidden],#note-clip-row[hidden],#note-reason-row[hidden],#note-retarget-row[hidden]{display:none}
 #note-cut-reasons .check-label input,#note-retarget-row input{width:18px;min-height:18px;margin:0}
-#note-editor select{width:100%}.cut-review-player{display:block;width:100%;max-height:55vh;aspect-ratio:16/9;background:#000;margin:16px 0;border-radius:12px}
+#note-editor select{width:100%}#note-editor textarea{display:block;border:1px solid var(--line);border-radius:8px;background:var(--paper);padding:12px;margin-top:8px;width:100%;color:var(--ink);font:inherit;resize:vertical}.cut-review-player{display:block;width:100%;max-height:55vh;aspect-ratio:16/9;background:#000;margin:16px 0;border-radius:12px}
 @media(max-width:650px){.notes-panel{padding:12px}.note-item-actions .button{min-height:40px}}
 
 #note-load-latest[hidden]{display:none}
