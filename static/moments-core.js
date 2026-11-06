@@ -4,6 +4,19 @@
  'use strict';
  const defaults={highlight:1,coach:3,note:3};
  const finite=x=>typeof x==='number'&&Number.isFinite(x);
+ function displayText(a,full=false){
+  const text=typeof a.body?.text==='string'?a.body.text:'';
+  if(a.kind!=='coach'||!a.body?.response)return text;
+  const raw=text.trim().replace(/^```(?:json)?\s*/i,'').replace(/\s*```$/,'');
+  if(!raw.startsWith('{')&&!raw.startsWith('['))return text;
+  try{
+   const parsed=JSON.parse(raw),suggestions=Array.isArray(parsed.suggestions)?parsed.suggestions:[];
+   const summary=typeof parsed.summary==='string'?parsed.summary.trim():'';
+   if(!full)return summary||suggestions.map(s=>typeof s.cue==='string'?s.cue:'').filter(Boolean).join(' · ')||'Saved coaching review';
+   const sections=suggestions.map(s=>[s.title,s.observation,s.cue&&'Cue: '+s.cue,s.drill&&'Drill: '+s.drill,s.uncertainty&&'Uncertainty: '+s.uncertainty].filter(v=>typeof v==='string'&&v.trim()).join('\n'));
+   return [summary,...sections].filter(Boolean).join('\n\n')||'Saved coaching review';
+  }catch(_){return 'Saved coaching review';}
+ }
  function canPlay(a,items=[]){
   if(a.playback_eligible)return true;
   // A response is anchored to the selected excerpt, not a verified technique
@@ -48,5 +61,5 @@
    this.previous=position;return result;
   }
  }
- return {defaults,canPlay,timeline,nextHighlight,CueClock};
+ return {defaults,displayText,canPlay,timeline,nextHighlight,CueClock};
 });

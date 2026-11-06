@@ -937,3 +937,22 @@ def test_moments_next_highlight_across_clips_all_list_and_full_video_markers(bro
     expect(page.locator('.coach-playback-cue')).to_have_count(0)
     assert not page.evaluate('document.documentElement.scrollWidth>innerWidth')
     page.close()
+
+
+def test_structured_coaching_moment_renders_readable_cue(browser,ui_server):
+    page=browser.new_page(viewport={'width':390,'height':844})
+    a=_playback_moment('structured-review','coach',.2,1.5)
+    a['body']=dict(response=True,text=json.dumps(dict(schema_version=2,summary='Recover after each shot.',suggestions=[dict(title='Ready position',cue='Bend knees.',drill='Reset ten times.')])) )
+    a['playback_eligible']=False
+    _mock_playback_moments(page,ui_server,[a])
+    page.goto(ui_server+f'/review/{ID}?clip={CLIP}')
+    expect(page.locator('#video-seek')).to_be_enabled()
+    page.locator('#player').evaluate('v=>{v.pause();v.currentTime=.3;}')
+    expect(page.locator('#moment-cues')).to_contain_text('Recover after each shot.')
+    expect(page.locator('#moment-cues')).not_to_contain_text('schema_version')
+    page.locator('#notes-panel > summary').click()
+    page.get_by_role('combobox',name='Moments view',exact=True).select_option('moments')
+    page.get_by_text('Read saved response',exact=True).click()
+    expect(page.locator('#notes-list')).to_contain_text('Cue: Bend knees.')
+    expect(page.locator('#notes-list')).not_to_contain_text('schema_version')
+    page.close()
