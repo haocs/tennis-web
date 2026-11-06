@@ -58,6 +58,52 @@ def browser(request):
         browser.close()
 
 
+def test_autofocus_real_worker_processes_local_pixels(browser, ui_server):
+    # Exercise the shipped model/runtime under real CSP without assuming a
+    # learned model must recognize a particular hand-drawn illustration.
+    page = browser.new_page(viewport={'width': 1280, 'height': 900})
+    requests = []
+    errors = []
+    page.on('request', lambda request: requests.append((request.method, request.url)))
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    page.add_init_script("""(() => {
+      const NativeWorker=window.Worker;
+      window.__realWorkerEvents=[];
+      window.Worker=function(...args) {
+        const worker=new NativeWorker(...args);
+        const record=(type,detail={})=>window.__realWorkerEvents.push({type,at:Math.round(performance.now()),...detail});
+        worker.addEventListener('message',({data})=>record(data.type,{message:data.message}));
+        worker.addEventListener('error',event=>record('worker_error',{message:event.message}));
+        const post=worker.postMessage.bind(worker),terminate=worker.terminate.bind(worker);
+        worker.postMessage=(data,...rest)=>{record('send:'+data.type);return post(data,...rest);};
+        worker.terminate=()=>{record('terminate');return terminate();};
+        return worker;
+      };
+    })()""")
+    page.goto(ui_server + f'/review/{ID}?clip={CLIP}')
+    page.wait_for_function("() => document.querySelector('#player')?.readyState >= 2")
+    button = page.get_by_role('button', name='Auto focus main player', exact=True)
+    button.click()
+    try:
+        page.wait_for_function("() => Number(document.querySelector('#player')?.dataset.autofocusDetections || 0) >= 1 || document.querySelector('#player')?.dataset.autofocusState === 'unavailable'", timeout=45000)
+        assert int(page.locator('#player').get_attribute('data-autofocus-detections') or '0') >= 1
+    except Exception as error:
+        state = page.locator('#player').evaluate('v => ({state:v.dataset.autofocusState,captures:v.dataset.autofocusCaptures,inflight:v.dataset.autofocusInflight})')
+        events = page.evaluate('window.__realWorkerEvents')
+        raise AssertionError(f'Real detector did not process a frame: {state}; worker_events={events}; errors={errors}') from error
+    expect(button).to_have_attribute('aria-pressed', 'true')
+    assert button.get_attribute('data-autofocus-state') in ('searching', 'tracking', 'holding')
+    assert any('/static/vendor/mediapipe/vision_wasm_internal.wasm' in url for _, url in requests)
+    assert any('/static/vendor/mediapipe/efficientdet_lite0.tflite' in url for _, url in requests)
+    assert all(url.startswith(ui_server + '/') and method == 'GET' for method, url in requests)
+    assert not errors
+    page.locator('#video-stage').hover()
+    button.click()
+    expect(button).to_have_attribute('aria-pressed', 'false')
+    assert page.locator('#player').evaluate('v => v.style.transform') == ''
+    page.close()
+
+
 def test_review_rows_actions_and_courts(browser, ui_server, tmp_path):
     page = browser.new_page()
     errors = []
@@ -1353,34 +1399,6 @@ def test_desktop_autofocus_tracking_loss_and_cleanup(browser, ui_server):
     page.close()
 
 
-def test_autofocus_real_worker_processes_local_pixels(browser, ui_server):
-    # Exercise the shipped model/runtime under real CSP without assuming a
-    # learned model must recognize a particular hand-drawn illustration.
-    page = browser.new_page(viewport={'width': 1280, 'height': 900})
-    requests = []
-    errors = []
-    page.on('request', lambda request: requests.append((request.method, request.url)))
-    page.on('pageerror', lambda error: errors.append(str(error)))
-    page.goto(ui_server + f'/review/{ID}?clip={CLIP}')
-    page.wait_for_function("() => document.querySelector('#player')?.readyState >= 2")
-    button = page.get_by_role('button', name='Auto focus main player', exact=True)
-    button.click()
-    try:
-        page.wait_for_function("() => Number(document.querySelector('#player')?.dataset.autofocusDetections || 0) >= 1", timeout=45000)
-    except Exception as error:
-        state = page.locator('#player').evaluate('v => ({state:v.dataset.autofocusState,captures:v.dataset.autofocusCaptures,inflight:v.dataset.autofocusInflight})')
-        raise AssertionError(f'Real detector did not process a frame: {state}; errors={errors}') from error
-    expect(button).to_have_attribute('aria-pressed', 'true')
-    assert button.get_attribute('data-autofocus-state') in ('searching', 'tracking', 'holding')
-    assert any('/static/vendor/mediapipe/vision_wasm_internal.wasm' in url for _, url in requests)
-    assert any('/static/vendor/mediapipe/efficientdet_lite0.tflite' in url for _, url in requests)
-    assert all(url.startswith(ui_server + '/') and method == 'GET' for method, url in requests)
-    assert not errors
-    page.locator('#video-stage').hover()
-    button.click()
-    expect(button).to_have_attribute('aria-pressed', 'false')
-    assert page.locator('#player').evaluate('v => v.style.transform') == ''
-    page.close()
 
 
 def test_autofocus_failure_state_and_mobile_hidden(browser, ui_server):

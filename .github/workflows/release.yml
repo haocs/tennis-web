@@ -36,7 +36,7 @@ jobs:
           python -m pip install -r requirements-ui.txt
           python -m playwright install --with-deps chromium webkit
       - name: Verify desktop and mobile player behavior
-        run: python -m pytest tests/ui_player.py -q
+        run: python -m pytest tests/ui_player.py -q --maxfail=1
       - name: Validate image-only deployment
         env:
           TENNIS_IMAGE: courtside-ci:test
