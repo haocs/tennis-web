@@ -131,3 +131,5 @@ button.clip-row:hover{background:#eef3e0}button.clip-row:focus-visible{outline:3
 @media(max-width:650px){#clip-main-player{width:44px;height:44px;min-width:44px}}
 
 .session-note{white-space:pre-wrap;overflow-wrap:anywhere;color:var(--muted);font-size:13px}#practice-editor{width:480px;max-width:calc(100vw - 28px)}#practice-editor input,#practice-editor textarea{width:100%;box-sizing:border-box;font:inherit}
+.review-heading>div:first-child{min-width:0}#review-title,#review-video-context{overflow-wrap:anywhere}#review-video-context{font-size:13px;color:var(--muted);margin:0 0 12px}.clip-name{overflow-wrap:anywhere}
+#edit-location-row[hidden],.edit-players[hidden],#review-video-context[hidden]{display:none}

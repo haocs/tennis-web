@@ -25,7 +25,7 @@ const ReviewPlayer = {
  <button type="button" class="video-button" id="next" aria-label="Next clip" title="Next clip">${this.icon('next')}</button>
  </div>
  <div class="video-bottom"><span id="video-time" class="video-time">0:00 / 0:00</span><div class="video-view-actions"><select id="video-rate" class="video-rate" aria-label="Playback speed" title="Playback speed"><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="0.75">0.75×</option><option value="1" selected>1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="2">2×</option></select><button type="button" class="video-button" id="video-fullscreen" aria-label="Enter fullscreen" title="Enter fullscreen">${this.icon('fullscreen')}</button></div></div>
- <label class="video-seek-label"><span class="sr-only">Seek current video</span><input id="video-seek" type="range" min="0" max="0" value="0" step="0.1" disabled></label>
+ <div class="video-seek-label"><span class="sr-only">Seek current video</span><input id="video-seek" aria-label="Seek current video" type="range" min="0" max="0" value="0" step="0.1" disabled></div>
  </div></div><p id="native-fullscreen-hint" class="native-fullscreen-hint" hidden>Exit fullscreen to change clips.</p>`;},
  mount({time,onError}){
   this.controller?.destroy();

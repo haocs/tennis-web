@@ -137,3 +137,49 @@ No production migration or deployment is performed by editing this repository.
 All browser writes retain same-origin checks, explicit desired values, optimistic
 concurrency and safe text rendering. No new authentication, NAS permission changes,
 worker queue changes, model training or automatic media retention policy is added.
+
+## Review action scope
+
+`/review/{video-id}` reviews a Video, not a practice Session. With an active clip
+(including a `?clip=` deep link), the heading, details editor and both hearts target
+that Clip. Full-practice playback uses the Video's details and favorite; advancing
+through chapters does not change that target. Video capture date/location and
+recording-player context remain inherited information, not clip-editable fields.
+Clip title edits are stored against the versioned clip entity in shared website
+state (`clip-meta:{entity-id}`), with optimistic concurrency and a publication
+guard. Notes remain in entity metadata. Session details stay on the home page.
+
+An opened details editor captures its video/clip identity and publication until
+closed. Changing playback while it is open never redirects its save. A reprocessed
+clip must be reloaded before editing or liking through the new API. Old favorites
+are retained as recorded; no inference moves historical clip likes onto videos.
+`/api/videos/{id}/details`, `/api/videos/{id}/clips/{clip-id}/details`, and
+`/api/videos/{id}/likes/{video|clip-id}` give these actions explicit names while
+retaining the old compatibility endpoints.
+
+## Moments during playback
+
+The watch page projects saved original-time moments onto the selected Clip or
+full processed Video. Small keyboard-accessible marks sit on the actual seek bar;
+overlapping starts share a mark. Playback cues appear in a dedicated area directly
+below the player, without pausing playback, moving focus, scrolling the page or
+opening the collapsed Moments controls. Those controls offer Highlight, Next
+highlight (strictly after the playhead, across clips), and a compact view selector
+with All moments. Notes, archived items and export live in a three-dot menu; each
+list row keeps Jump/Review primary and puts editing/history in its own menu.
+Existing notes, edit/archive/history/export and cut-report flows remain available.
+
+A point highlight displays for one wall-clock second; point coaching/comments use
+three seconds. Expiration still works while paused or at a different playback
+speed. Explicit-end moments follow playback time until their projected end,
+including while paused. Seeking reconciles the landing position; it does not fire
+all moments skipped by a seek. Replaying a position can trigger its cue again.
+Changing media clears stale cues. Multiple simultaneous cues remain accessible in
+a compact scrollable area. A moment outside retained cuts remains in the all-moments
+list, with its original timestamp and availability label.
+
+Saved unstructured AI responses can appear as **Coach review · excerpt**, anchored
+to the selected excerpt, without claiming verified technique-event timing. Reviewed
+timed suggestions supersede that job's response-level automatic cue. The complete
+response, evidence and provenance remain authoritative in coaching storage. No AI
+request is sent by playback or by opening the Moments area.

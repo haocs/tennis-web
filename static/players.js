@@ -55,6 +55,7 @@ const PlayerUI = (() => {
   const s=model.session;
   $('#recording-player-badges').innerHTML=avatars(s.players);
   $('#edit-player-badges').innerHTML=avatars(s.recording_players,true);
+  if($('#edit-clip-player-badges'))$('#edit-clip-player-badges').innerHTML=avatars(s.clips.find(c=>c.id===model.editTarget?.clip_id)?.players||[],true);
   const filterEl=$('#clip-player-filter');if(filterEl){filterEl.innerHTML=options(model.clipPlayer);filterEl.value=model.clipPlayer||'';}
  }
  function current(clip){
@@ -105,5 +106,5 @@ const PlayerUI = (() => {
    }catch(error){$('#player-picker-error').textContent=error.message;}finally{b.disabled=false;}
   };
  }
- return {init,avatars,filter,syncHome,matches,openSaved,bindReview,syncReview,current};
+ return {openClip:id=>openPicker('clip',id),init,avatars,filter,syncHome,matches,openSaved,bindReview,syncReview,current};
 })();

@@ -17,7 +17,7 @@ from storage import Library, smb_root, nas_media_address
 from thumbnails import ClipPosters, PosterUnavailable
 from practices import recording_time, group_recordings
 from state import State, Conflict
-from entity_model import EntityCatalog
+from entity_model import EntityCatalog, clip_identity
 from clip_study import public_clip_study, number as finite_number
 from coaching_routes import register_coaching
 from annotation_routes import register_annotations
@@ -104,6 +104,8 @@ def create_app(config=None):
         data["title"] = edits.get("title", data["title"])
         data["location_label"] = edits.get("location", "")
         for clip in data["clips"]:
+            clip['details'] = shared.get('clip-meta:'+clip_identity(data,clip['id']), {'value':{},'version':0})
+            clip['title'] = (clip['details']['value'] or {}).get('title') or 'Clip '+str(clip['index']).zfill(2)
             clip['nas_url'] = nas_media_address(media_smb, directory, clip['file'])
             clip["like"] = shared.get(f"like:{identity}:{clip['id']}", {"value": False, "version": 0})
         return catalog.decorate(decorate_players(data, shared))
@@ -187,7 +189,9 @@ def create_app(config=None):
     def clip_entity(identity):
         with catalog.db() as db:row=db.execute('SELECT * FROM clips WHERE id=?',(identity,)).fetchone()
         if not row:abort(404,'Clip not found')
-        return jsonify(entity_type='clip',id=identity,video_version_id=row['video_version_id'],metadata=json.loads(row['data']))
+        details=state.all().get('clip-meta:'+identity,{'value':{},'version':0})
+        descriptor=json.loads(row['data'])
+        return jsonify(entity_type='clip',id=identity,video_version_id=row['video_version_id'],metadata=descriptor,details=details,title=(details['value'] or {}).get('title') or 'Clip '+str(descriptor['index']).zfill(2))
 
     @app.put('/api/practices/<identity>/metadata')
     def practice_metadata(identity):
@@ -302,22 +306,26 @@ def create_app(config=None):
             return jsonify(error='Someone else changed this practice court. Reload and try again.'),409
         return jsonify(saved=True)
 
+    @app.put('/api/videos/<identity>/likes/<item>')
     @app.put('/api/sessions/<identity>/likes/<item>')
     def like(identity, item):
         data = session(identity)
-        if item != 'session' and item not in {c['id'] for c in data['clips']}:
+        if item not in ('session','video') and item not in {c['id'] for c in data['clips']}:
             abort(404, 'Clip not found')
         body = request.get_json()
         if not isinstance(body, dict):
             abort(400, 'Expected a JSON object')
         if type(body.get('liked')) is not bool or type(body.get('version')) is not int or body['version'] < 0:
             abort(400, 'A liked value and current version are required')
-        key = f'like:{identity}' + (f':{item}' if item != 'session' else '')
+        if request.path.startswith('/api/videos/') and item not in ('video','session'):
+            if type(body.get('publication')) not in (int,float) or body['publication'] != data['published_at']:abort(409,'Video was reprocessed. Refresh before liking this clip.')
+        key = f'like:{identity}' + (f':{item}' if item not in ('session','video') else '')
         try:
             return jsonify(state.update(key, body['liked'], body['version']))
         except Conflict as conflict:
             return jsonify(error='Someone else updated this item. Its latest value has been loaded.', current=conflict.current), 409
 
+    @app.put('/api/videos/<identity>/details')
     @app.put('/api/sessions/<identity>/metadata')
     def metadata(identity):
         session(identity)
@@ -336,6 +344,20 @@ def create_app(config=None):
             return jsonify(state.update(f'meta:{identity}', values, body['version']))
         except Conflict as conflict:
             return jsonify(error='Metadata changed in another browser. Reload the latest values before saving.', current=conflict.current), 409
+
+    @app.put('/api/videos/<identity>/clips/<clip_id>/details')
+    def clip_details(identity,clip_id):
+        data=session(identity);body=request.get_json()
+        if not isinstance(body,dict) or set(body)-{'publication','version','title'}:abort(400,'Invalid clip details')
+        if type(body.get('publication')) not in (int,float) or body['publication']!=data['published_at']:
+            abort(409,'Video was reprocessed. Refresh before editing this clip.')
+        clip=next((c for c in data['clips'] if c['id']==clip_id),None)
+        if not clip:abort(404,'Clip not found')
+        if type(body.get('version')) is not int or body['version']<0:abort(400,'A current clip version is required')
+        title=body.get('title')
+        if not isinstance(title,str) or not title.strip() or len(title)>160:abort(400,'Enter a clip title up to 160 characters')
+        try:return jsonify(state.update('clip-meta:'+clip_identity(data,clip_id),{'title':title.strip()},body['version']))
+        except Conflict as error:return jsonify(error='Clip details changed in another browser. Reload before saving.',current=error.current),409
 
     @app.get('/media/<identity>/<path:filename>')
     def media(identity, filename):
