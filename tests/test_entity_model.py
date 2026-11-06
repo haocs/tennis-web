@@ -178,3 +178,34 @@ def test_typed_pagination_does_not_drop_moments_behind_other_metadata(setup):
         second=c.get(path+'?limit=1&after='+first['next_after']).json
         assert len(second[key])==1 and not second['next_after']
         assert first[key][0]['id']!=second[key][0]['id']
+
+
+def test_optional_moment_note_and_half_open_end_preserve_entity_metadata_boundary(setup):
+    app,root,data=setup;c=app.test_client()
+    body=dict(original_recording_id=ID,publication=data['published_at'],type='comment',start_ms=8000,payload=dict(text=''),request_id='optional-moment-text-001')
+    created=c.post('/api/moments',json=body,headers=H)
+    assert created.status_code==201
+    moment=created.json
+    assert moment['type']=='comment' and moment['payload']==dict(text='')
+    changed=put(c,'/api/moments/'+moment['id'],dict(publication=data['published_at'],version=1,start_ms=8000,end_ms=12000,payload=dict(text='Watch the recovery')))
+    assert changed.status_code==200 and changed.json['end_ms']==12000
+    cleared=put(c,'/api/moments/'+moment['id'],dict(publication=data['published_at'],version=2,payload=dict(text='')))
+    assert cleared.status_code==200
+    assert len(c.get('/api/annotations/'+moment['id']+'/revisions').json['revisions'])==3
+    # Empty entity notes are still invalid, including a retarget of an empty Moment.
+    assert create(c,data,target=dict(scope='video'),body=dict(text='')).status_code==400
+    assert put(c,'/api/metadata/'+moment['id'],dict(publication=data['published_at'],version=3,target=dict(scope='video'))).status_code==400
+    endpoint={**body,'start_ms':round(data['source']['duration_seconds']*1000),'request_id':'optional-moment-end-001'}
+    assert c.post('/api/moments',json=endpoint,headers=H).status_code==400
+
+
+def test_adjacent_clip_moments_are_half_open_and_spanning_moments_keep_original_bounds(setup):
+    app,root,data=setup;c=app.test_client()
+    next_clip=copy.deepcopy(data['clips'][0]);next_clip.update(id='c'*24,index=2,file='Clips/clip-002.mp4',original_start_seconds=15,original_end_seconds=20,duration_seconds=5,playback_start_seconds=10,playback_end_seconds=15)
+    data['clips'].append(next_clip);data['video']['duration_seconds']=15;publish(root,data)
+    base=dict(original_recording_id=ID,publication=data['published_at'],type='comment',payload=dict(text=''))
+    point=c.post('/api/moments',json={**base,'start_ms':15000,'request_id':'clip-boundary-point-001'},headers=H)
+    assert point.status_code==201 and point.json['clip_ids']==['c'*24]
+    spanning=c.post('/api/moments',json={**base,'start_ms':14000,'end_ms':16000,'request_id':'clip-boundary-range-001'},headers=H)
+    assert spanning.status_code==201 and spanning.json['clip_ids']==[CLIP,'c'*24]
+    assert spanning.json['start_ms']==14000 and spanning.json['end_ms']==16000

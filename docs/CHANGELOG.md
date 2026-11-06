@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.15.0 — 2026-11-05
+
+- #64: Match playback speed control size to fullscreen, use a transparent
+  background, and remove the persistent fullscreen instruction.
+- #65: Pair thumbs-up/down in the player for Clips and full practice. Selecting
+  one clears the other atomically, retaining downvote revisions and legacy likes.
+  Down remains version-bound entity metadata, outside the Moment panel.
+
+- Keep the moment panel, playback markers and Jump within the current Clip or
+  Video's retained timeline; remove the All moments and Notes & details views.
+- Keep Highlight, Jump and Add moment available while the panel is collapsed.
+  Add a current-time Moment with optional end and note; filter the list by type
+  and archived status. Jump includes all active Moment types and wraps in scope.
+- Show playback teasers only for Moments containing text. Textless highlights
+  remain timeline markers without displaying empty cards.
+- Keep entity notes in a separate Clip/Video notes dialog and usefulness outside
+  the moment panel. Preserve original-time anchors, evidence and revision history.
+
 ## v0.8.0 — 2026-11-02
 
 - Guide coaching through Choose moment, Preview, Ask coach and Review suggestions.

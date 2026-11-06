@@ -155,6 +155,7 @@ def test_consistent_backup_restores_shared_preferences(setup,tmp_path):
     assert put(c,f'/api/sessions/{ID}/likes/session',{'liked':True,'version':0}).status_code==200
     destination=tmp_path/'restored/website.sqlite3'
     backup(Path(app.config['DATA_ROOT'])/'website.sqlite3',destination)
+    backup(Path(app.config['DATA_ROOT'])/'annotations.sqlite3',destination.parent/'annotations.sqlite3')
     restored=create_app({'TESTING':True,'LIBRARY_ROOT':str(root),'DATA_ROOT':str(destination.parent)})
     assert restored.test_client().get(f'/api/sessions/{ID}').json['like']=={'value':True,'version':1}
     with pytest.raises(ValueError):backup(Path(app.config['DATA_ROOT'])/'website.sqlite3',destination)

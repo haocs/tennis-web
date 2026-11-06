@@ -183,3 +183,32 @@ to the selected excerpt, without claiming verified technique-event timing. Revie
 timed suggestions supersede that job's response-level automatic cue. The complete
 response, evidence and provenance remain authoritative in coaching storage. No AI
 request is sent by playback or by opening the Moments area.
+
+
+## Paired reactions (issues #64 / #65)
+
+The player groups thumbs-up and thumbs-down together. Up remains the existing
+favorite/Like signal; down is the existing `less_useful` entity field, now presented
+as Dislike. This is a broad usefulness/recommendation signal, not a detector error,
+skill rating, Moment, or automatically approved training label. Video downvotes
+belong to the current Video version; Clip downvotes belong to their exact output.
+They do not transfer when processing creates a replacement version.
+
+Selecting up archives the current downvote, retaining its metadata revisions.
+Selecting down clears up. Selecting the selected reaction returns it to neutral.
+Other Clips and the logical Video are independent targets. Existing Like/favorite
+identity and reprocessing policies remain unchanged.
+
+The metadata database adds `reaction_likes` for coordinated Like value/version
+heads. New positive state and any associated downvote revision commit in **one
+SQLite transaction**, avoiding cross-database writes. Existing favorite rows in
+`website.sqlite3` remain untouched and seed reads/first mutations when a head is
+absent. Current API session read models overlay the coordinated heads. A legacy
+pair with both values set displays the downvote; a read never rewrites history.
+CAS versions, same-origin protection and publication guards remain in effect.
+Legacy metadata/annotation downvote writes use the same transaction path.
+
+Back up/restore the full stopped application state, including `annotations.sqlite3`.
+The single-database `manage.py backup` utility still copies only `website.sqlite3`;
+it is not a complete reaction, Moment or coaching backup. No production migration
+has been run for this local implementation.

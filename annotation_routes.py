@@ -18,6 +18,9 @@ def register_annotations(app, library, session):
         try:return decorate_players(copy.deepcopy(library.get(source)), app.extensions['state'].all())
         except (KeyError, OSError, ValueError, TypeError):return None
 
+    store.like_seed=lambda source,item: app.extensions['state'].all().get(store.like_key(source,item),{'value':False,'version':0})
+    store.current_publication=lambda source: (optional_source(source) or {}).get('published_at')
+
     def check_source(source):
         if not SOURCE_ID.fullmatch(source):abort(404, 'Recording not found')
 
@@ -255,8 +258,9 @@ def register_annotations(app, library, session):
         if not isinstance(rid,str) or not re.fullmatch(r'[a-zA-Z0-9_-]{8,100}',rid):
             abort(400,'A unique request ID is required')
         try:
-            value=dict(schema_version=1,source_id=source,kind=kind,target=validate_target(kind,body.get('target'),data),
-                       body=validate_body(kind,body.get('body')),player_id=player_id(body),context=context(data),
+            target=validate_target(kind,body.get('target'),data)
+            value=dict(schema_version=1,source_id=source,kind=kind,target=target,
+                       body=validate_body(kind,body.get('body'),allow_empty=target['scope'] in ('point','interval')),player_id=player_id(body),context=context(data),
                        origin=dict(type='human'),status='active',training_label_status='not_released')
             return project(store.write(value,request_id=rid),data)
         except ValueError as error:
@@ -279,11 +283,11 @@ def register_annotations(app, library, session):
         if type(body.get('version')) is not int or body['version']<1:abort(400,'The current note version is required')
         value=copy.deepcopy(current)
         try:
-            if 'body' in body:value['body']=validate_body(value['kind'],body['body'])
             if current['kind'] in ('cut_feedback','processing_label') and 'target' in body:
                 raise ValueError('Create a new report to review another cut or processed version')
             if 'target' in body:
                 value['target']=validate_target(value['kind'],body['target'],data);value['context']=context(data)
+            value['body']=validate_body(value['kind'],body.get('body',value['body']),allow_empty=value['target']['scope'] in ('point','interval'))
             if 'status' in body:
                 if body['status'] not in ('active','archived'):raise ValueError('Invalid note status')
                 value['status']=body['status']

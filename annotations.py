@@ -39,7 +39,7 @@ class AnnotationConflict(ValueError):
         self.current = current
 
 
-def validate_body(kind, body):
+def validate_body(kind, body, *, allow_empty=False):
     if not isinstance(body, dict):
         raise ValueError('Expected note details')
     text = body.get('text', '')
@@ -47,7 +47,7 @@ def validate_body(kind, body):
         raise ValueError('Use up to 2000 characters')
     result = {'text': text.strip()}
     allowed = {'text'}
-    if kind == 'note' and not result['text']:
+    if kind == 'note' and not result['text'] and not allow_empty:
         raise ValueError('Enter a note')
     if kind == 'usefulness':
         allowed |= {'value', 'reason'}
@@ -99,6 +99,8 @@ def validate_target(kind, target, data):
         raise ValueError('Start must be within the original recording')
     result['start_seconds'] = start
     if scope == 'point':
+        if start == duration:
+            raise ValueError('Start must be before the end of the original recording')
         if 'end_seconds' in target:
             raise ValueError('A moment has one timestamp')
     else:
@@ -144,7 +146,7 @@ def project(annotation, data):
         for span in spans:
             start = span['start_seconds'];end = span.get('end_seconds', start)
             point = scope == 'point'
-            intersects = (a <= start < b or start == b == data['source']['duration_seconds']) if point else max(a, start) < min(b, end)
+            intersects = (a <= start < b) if point else max(a, start) < min(b, end)
             if not intersects:
                 continue
             x, y = (start, start) if point else (max(a, start), min(b, end))
@@ -180,6 +182,8 @@ def project(annotation, data):
 class AnnotationStore:
     def __init__(self, path):
         self.path = str(path)
+        self.like_seed = lambda source,item: {'value':False,'version':0}
+        self.current_publication = lambda source: None
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         with self.db() as db:
             for attempt in range(10):
@@ -193,6 +197,7 @@ class AnnotationStore:
             db.execute('CREATE INDEX IF NOT EXISTS annotation_source ON annotations(source_id,id)')
             db.execute('CREATE TABLE IF NOT EXISTS revisions(id TEXT NOT NULL, version INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY(id,version))')
             db.execute('CREATE TABLE IF NOT EXISTS requests(request_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, annotation_id TEXT NOT NULL)')
+            db.execute('CREATE TABLE IF NOT EXISTS reaction_likes(like_key TEXT PRIMARY KEY, liked INTEGER NOT NULL, version INTEGER NOT NULL)')
             db.execute('CREATE TABLE IF NOT EXISTS metadata_migrations(name TEXT PRIMARY KEY)')
             if 'record_class' not in {r['name'] for r in db.execute('PRAGMA table_info(annotations)')}:
                 db.execute("ALTER TABLE annotations ADD COLUMN record_class TEXT NOT NULL DEFAULT 'unclassified'")
@@ -242,52 +247,102 @@ class AnnotationStore:
         with self.db() as db:
             return [json.loads(r['data']) for r in db.execute('SELECT data FROM revisions WHERE id=? AND version>? ORDER BY version LIMIT ?', (identity,after,limit))]
 
-    def write(self, value, expected=None, request_id=None):
-        value = classify(value)
-        fingerprint = canonical(value)
+    @staticmethod
+    def like_key(source,item):
+        return 'like:'+source+(':'+item if item not in ('video','session') else '')
+
+    def _like(self,db,source,item):
+        row=db.execute('SELECT liked,version FROM reaction_likes WHERE like_key=?',(self.like_key(source,item),)).fetchone()
+        return {'value':bool(row['liked']),'version':row['version']} if row else self.like_seed(source,item)
+
+    def _save_like(self,db,source,item,liked,version):
+        db.execute('INSERT INTO reaction_likes VALUES(?,?,?) ON CONFLICT(like_key) DO UPDATE SET liked=excluded.liked,version=excluded.version',(self.like_key(source,item),int(liked),version))
+
+    def like_states(self,source,publication):
+        """Overlay existing favorites; old rows/history stay intact in website state."""
+        with self.db() as db:
+            prefix='like:'+source
+            result={r['like_key']:{'value':bool(r['liked']),'version':r['version']} for r in db.execute('SELECT * FROM reaction_likes WHERE like_key=? OR like_key LIKE ?',(prefix,prefix+':%'))}
+            # Older releases allowed both values. Prefer an existing current downvote
+            # without rewriting either historical field during a read.
+            for r in db.execute("SELECT data FROM annotations WHERE source_id=? AND kind='usefulness' AND json_extract(data,'$.status')='active'",(source,)):
+                a=json.loads(r['data'])
+                if a['context']['publication']!=publication:continue
+                item=a['target'].get('clip_id','video');key=self.like_key(source,item)
+                result[key]={**(result[key] if key in result else self.like_seed(source,item)),'value':False}
+            return result
+
+    def write_like(self,source,item,liked,expected,publication):
+        """One transaction enforces the up/down invariant, including downvote history."""
+        from state import Conflict
         with self.db() as db:
             db.execute('BEGIN IMMEDIATE')
-            if request_id:
-                row = db.execute('SELECT * FROM requests WHERE request_id=?', (request_id,)).fetchone()
-                if row:
-                    if row['fingerprint'] != fingerprint:raise AnnotationConflict('Request ID already used for different metadata')
-                    return json.loads(db.execute('SELECT data FROM annotations WHERE id=?', (row['annotation_id'],)).fetchone()['data'])
-            identity = value.get('id')
-            if identity is None and value['kind']=='usefulness':
-                # Legacy singleton IDs were derived from bounds; recover the same
-                # field by its output subject instead of creating a second value.
-                candidates=db.execute("SELECT data FROM annotations WHERE source_id=? AND kind='usefulness'",(value['source_id'],)).fetchall()
-                for candidate in candidates:
-                    old=classify(json.loads(candidate['data']))
-                    if old['subject']==value['subject']:
-                        identity=old['id'];value['id']=identity;break
-            if value['kind']=='highlight' and value['target']['scope']=='point' and value['status']=='active':
-                tick=int(math.floor(value['target']['start_seconds']*1000+.5))
-                duplicate=db.execute("SELECT data FROM annotations WHERE source_id=? AND kind='highlight' AND json_extract(data,'$.status')='active' AND json_extract(data,'$.target.scope')='point' AND CAST(round(json_extract(data,'$.target.start_seconds')*1000) AS INTEGER)=? AND id<>? ORDER BY id LIMIT 1",(value['source_id'],tick,identity or '')).fetchone()
-                if duplicate:
-                    existing=json.loads(duplicate['data'])
-                    if expected is not None or value['body'].get('text'):
-                        raise AnnotationConflict('This moment is already highlighted. Edit the existing highlight instead.',existing)
-                    if request_id:db.execute('INSERT INTO requests VALUES(?,?,?)',(request_id,fingerprint,existing['id']))
-                    db.commit()
-                    return dict(existing,already_highlighted=True)
-            if identity is None:
-                if value['kind'] == 'usefulness':
-                    selector = [value['source_id'], value['kind'], value['subject']]
-                    identity = 'n_'+hashlib.sha256(canonical(selector).encode()).hexdigest()[:32]
-                else:identity = 'n_'+uuid.uuid4().hex
-                value['id'] = identity
-            row = db.execute('SELECT data FROM annotations WHERE id=?', (identity,)).fetchone()
-            current = json.loads(row['data']) if row else None
-            if expected != (current['version'] if current else None):
-                raise AnnotationConflict('This item changed in another browser. Reload before saving.', current)
-            if current and expected is None:
-                raise AnnotationConflict('A shared assessment already exists for this clip.', current)
-            value['created_at'] = current['created_at'] if current else time.time()
-            value.update(updated_at=time.time(), version=(current['version'] if current else 0)+1)
-            encoded = canonical(value)
-            db.execute('INSERT INTO annotations(id,source_id,kind,data,version,record_class) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET source_id=excluded.source_id,kind=excluded.kind,data=excluded.data,version=excluded.version,record_class=excluded.record_class', (identity, value['source_id'], value['kind'], encoded, value['version'], value['record_class']))
-            db.execute('INSERT INTO revisions VALUES(?,?,?)', (identity, value['version'], encoded))
-            if request_id:db.execute('INSERT INTO requests VALUES(?,?,?)', (request_id, fingerprint, identity))
+            current=self._like(db,source,item)
+            if expected!=current['version']:raise Conflict(current)
+            if liked:
+                for r in db.execute("SELECT data FROM annotations WHERE source_id=? AND kind='usefulness' AND json_extract(data,'$.status')='active'",(source,)).fetchall():
+                    a=json.loads(r['data'])
+                    if a['context']['publication']!=publication or a['target'].get('clip_id','video')!=item:continue
+                    a.update(status='archived',change_origin='human')
+                    self._write(db,a,expected=a['version'])
+            self._save_like(db,source,item,liked,expected+1)
             db.commit()
-            return value
+            return {'value':liked,'version':expected+1}
+
+    def write(self, value, expected=None, request_id=None):
+        with self.db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            saved=self._write(db,value,expected,request_id)
+            db.commit()
+            return saved
+
+    def _write(self, db, value, expected=None, request_id=None):
+        value=classify(value)
+        fingerprint=canonical(value)
+        if request_id:
+            row = db.execute('SELECT * FROM requests WHERE request_id=?', (request_id,)).fetchone()
+            if row:
+                if row['fingerprint'] != fingerprint:raise AnnotationConflict('Request ID already used for different metadata')
+                return json.loads(db.execute('SELECT data FROM annotations WHERE id=?', (row['annotation_id'],)).fetchone()['data'])
+        identity = value.get('id')
+        if identity is None and value['kind']=='usefulness':
+            # Legacy singleton IDs were derived from bounds; recover the same
+            # field by its output subject instead of creating a second value.
+            candidates=db.execute("SELECT data FROM annotations WHERE source_id=? AND kind='usefulness'",(value['source_id'],)).fetchall()
+            for candidate in candidates:
+                old=classify(json.loads(candidate['data']))
+                if old['subject']==value['subject']:
+                    identity=old['id'];value['id']=identity;break
+        if value['kind']=='highlight' and value['target']['scope']=='point' and value['status']=='active':
+            tick=int(math.floor(value['target']['start_seconds']*1000+.5))
+            duplicate=db.execute("SELECT data FROM annotations WHERE source_id=? AND kind='highlight' AND json_extract(data,'$.status')='active' AND json_extract(data,'$.target.scope')='point' AND CAST(round(json_extract(data,'$.target.start_seconds')*1000) AS INTEGER)=? AND id<>? ORDER BY id LIMIT 1",(value['source_id'],tick,identity or '')).fetchone()
+            if duplicate:
+                existing=json.loads(duplicate['data'])
+                if expected is not None or value['body'].get('text'):
+                    raise AnnotationConflict('This moment is already highlighted. Edit the existing highlight instead.',existing)
+                if request_id:db.execute('INSERT INTO requests VALUES(?,?,?)',(request_id,fingerprint,existing['id']))
+                return dict(existing,already_highlighted=True)
+        if identity is None:
+            if value['kind'] == 'usefulness':
+                selector = [value['source_id'], value['kind'], value['subject']]
+                identity = 'n_'+hashlib.sha256(canonical(selector).encode()).hexdigest()[:32]
+            else:identity = 'n_'+uuid.uuid4().hex
+            value['id'] = identity
+        row = db.execute('SELECT data FROM annotations WHERE id=?', (identity,)).fetchone()
+        current = json.loads(row['data']) if row else None
+        if expected != (current['version'] if current else None):
+            raise AnnotationConflict('This item changed in another browser. Reload before saving.', current)
+        if current and expected is None:
+            raise AnnotationConflict('A shared assessment already exists for this clip.', current)
+        value['created_at'] = current['created_at'] if current else time.time()
+        value.update(updated_at=time.time(), version=(current['version'] if current else 0)+1)
+        encoded = canonical(value)
+        db.execute('INSERT INTO annotations(id,source_id,kind,data,version,record_class) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET source_id=excluded.source_id,kind=excluded.kind,data=excluded.data,version=excluded.version,record_class=excluded.record_class', (identity, value['source_id'], value['kind'], encoded, value['version'], value['record_class']))
+        db.execute('INSERT INTO revisions VALUES(?,?,?)', (identity, value['version'], encoded))
+        if request_id:db.execute('INSERT INTO requests VALUES(?,?,?)', (request_id, fingerprint, identity))
+        if value['kind']=='usefulness' and value['context']['publication']==self.current_publication(value['source_id']):
+            item=value['target'].get('clip_id','video')
+            reaction=self._like(db,value['source_id'],item)
+            liked=False if value['status']=='active' or current and current['status']=='active' else reaction['value']
+            self._save_like(db,value['source_id'],item,liked,reaction['version']+1)
+        return value

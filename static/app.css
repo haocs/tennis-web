@@ -80,16 +80,14 @@ button.clip-row:hover{background:#eef3e0}button.clip-row:focus-visible{outline:3
 
 /* One real fullscreen action; native media actions remain progressive enhancement. */
 .video-view-actions{display:flex;align-items:center;pointer-events:auto}
-.native-fullscreen-hint{font-size:12px;color:var(--muted);line-height:1.5;margin:10px 0 0}
-.native-fullscreen-hint[hidden]{display:none}
 @media(pointer:coarse){.video-view-actions .video-button{width:44px;height:44px}}
 
 #court-picker-hint:empty,#court-picker-gps:empty,#court-editor-note:empty,.status-subtitle:empty{display:none}
 
-.video-rate{appearance:none;-webkit-appearance:none;min-width:44px;min-height:36px;width:44px;padding:6px 2px;text-align:center;text-align-last:center;border:0;border-radius:4px;background:#0006;color:#fff;font-size:12px;cursor:pointer;color-scheme:dark}
+.video-rate{appearance:none;-webkit-appearance:none;min-width:36px;min-height:36px;width:36px;height:36px;padding:6px 0;text-align:center;text-align-last:center;border:0;border-radius:4px;background:transparent;color:#fff;font-size:11px;text-shadow:0 1px 3px #000;cursor:pointer;color-scheme:dark}
 .video-rate option{background:#18251f;color:#fff}
 .video-rate:focus-visible{outline:2px solid #fff;outline-offset:1px}
-@media(pointer:coarse){.video-rate{min-height:44px}}
+@media(pointer:coarse){.video-rate{min-width:44px;width:44px;min-height:44px;height:44px}}
 
 /* Player profiles stay separate from published video metadata. */
 .player-chips{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
@@ -133,3 +131,7 @@ button.clip-row:hover{background:#eef3e0}button.clip-row:focus-visible{outline:3
 .session-note{white-space:pre-wrap;overflow-wrap:anywhere;color:var(--muted);font-size:13px}#practice-editor{width:480px;max-width:calc(100vw - 28px)}#practice-editor input,#practice-editor textarea{width:100%;box-sizing:border-box;font:inherit}
 .review-heading>div:first-child{min-width:0}#review-title,#review-video-context{overflow-wrap:anywhere}#review-video-context{font-size:13px;color:var(--muted);margin:0 0 12px}.clip-name{overflow-wrap:anywhere}
 #edit-location-row[hidden],.edit-players[hidden],#review-video-context[hidden]{display:none}
+
+.like-button svg{display:block;width:20px;height:20px}.like-button[aria-pressed=true] svg{fill:currentColor}.player-reactions{display:inline-flex;align-items:center;gap:3px;flex-shrink:0}.player-options .player-reactions .like-button{border:0;border-radius:4px;width:40px;min-width:40px;height:40px;min-height:40px;background:transparent;color:#edf4e6;padding:10px}.player-reactions .like-button[aria-pressed=true]{color:var(--lime);background:transparent}.player-reactions .like-button:focus-visible{outline:2px solid var(--lime);outline-offset:-3px}.player-options .player-reactions .like-button:hover{background:#ffffff16}
+
+@media(max-width:650px){.player-options .player-reactions .like-button{width:44px;min-width:44px;height:44px;min-height:44px;padding:12px}}

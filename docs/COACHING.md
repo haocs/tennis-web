@@ -36,7 +36,8 @@ Regular ChatGPT answers are not imported automatically in this first version.
 
 ```text
 Courtside (NAS container)
-  ├── website.sqlite3       existing likes/courts, unchanged
+  ├── website.sqlite3       courts/profiles and legacy favorites
+  ├── annotations.sqlite3   Moments, entity metadata and coordinated reactions
   ├── coaching.sqlite3      dedicated render + AI queues, response history
   └── /coaching-media       separately configured shared artifact directory
           ↑ files (declared artifacts copied once after local render)
