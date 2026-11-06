@@ -2,7 +2,7 @@
    current playback coordinates and never changes a saved moment's target. */
 (function(root,factory){const api=factory();if(typeof module==='object'&&module.exports)module.exports=api;else root.MomentPlayback=api;})(typeof globalThis!=='undefined'?globalThis:this,()=>{
  'use strict';
- const defaults={highlight:1,coach:3,note:3};
+ const defaults={highlight:3,coach:3,note:3};
  const finite=x=>typeof x==='number'&&Number.isFinite(x);
  function displayText(a,full=false){
   const text=typeof a.body?.text==='string'?a.body.text:'';
@@ -23,18 +23,45 @@
   // timestamp. Prefer reviewed timed suggestions when the same job has them.
   return a.kind==='coach'&&a.body?.response&&a.visible_intervals?.length>0&&!items.some(b=>b.kind==='coach'&&!b.body?.response&&b.playback_eligible&&b.origin?.job_id&&b.origin.job_id===a.origin?.job_id);
  }
- function timeline(items,{mode='full',clipId=null,clips=[]}={}){
-  return items.filter(a=>a.status==='active'&&canPlay(a,items)&&(a.record_class==='moment'||['highlight','coach'].includes(a.kind)||a.kind==='note'&&['point','interval'].includes(a.target?.scope))).flatMap(a=>{
-   const point=!finite(a.target.end_seconds);const duration=defaults[a.kind]||3;
-   return (a.visible_intervals||[]).flatMap((f,index)=>{
+ function isMoment(a){
+  return a.record_class?a.record_class==='moment':['highlight','coach'].includes(a.kind)||a.kind==='note'&&['point','interval'].includes(a.target?.scope);
+ }
+ function inScope(items,{mode='full',clipId=null,clips=[],sourceId=null}={}){
+  return items.filter(a=>isMoment(a)&&(!sourceId||!a.source_id||a.source_id===sourceId)).flatMap(a=>{
+   const point=!finite(a.target?.end_seconds),start=a.target?.start_seconds,end=a.target?.end_seconds;
+   if(!finite(start))return [];
+   const fragments=(a.visible_intervals||[]).flatMap(f=>{
     if(mode==='clip'&&f.clip_id!==clipId)return [];
-    // Reviewed coaching remains tied to the player it describes.
-    if(a.kind==='coach'&&a.player_id&&clips.find(c=>c.id===f.clip_id)?.main_player?.id!==a.player_id)return [];
-    const start=mode==='clip'?f.local_start:f.playback_start,end=mode==='clip'?f.local_end:f.playback_end;
-    if(!finite(start)||!finite(end)||start<0||(!point&&end<=start))return [];
-    return [{key:a.id+':'+index,id:a.id,kind:a.kind,start,end,point,duration,fragment:f,annotation:a}];
+    const clip=clips.find(c=>c.id===f.clip_id);
+    if(clips.length&&!clip)return [];
+    if(a.kind==='coach'&&a.player_id&&clip?.main_player?.id!==a.player_id)return [];
+    const lo=clip?.original_start_seconds??f.original_start,hi=clip?.original_end_seconds??f.original_end;
+    if(!finite(lo)||!finite(hi))return [];
+    if(point&&(start<lo||(clip&&start>=hi)||start!==f.original_start))return [];
+    const x=point?start:Math.max(start,lo,f.original_start),y=point?start:Math.min(end,hi,f.original_end);
+    if(!finite(x)||!finite(y)||!point&&y<=x)return [];
+    const local=x-(clip?.original_start_seconds??(f.original_start-f.local_start));
+    const playback=clip?clip.playback_start_seconds+local:f.playback_start+x-f.original_start;
+    return [{...f,original_start:x,original_end:y,local_start:local,local_end:local+y-x,playback_start:playback,playback_end:playback+y-x}];
    });
+   return fragments.length?[{annotation:a,fragments}]:[];
+  });
+ }
+ function timeline(items,options={}){
+  const mode=options.mode||'full';
+  return inScope(items,options).filter(({annotation:a})=>a.status==='active'&&canPlay(a,items)).flatMap(({annotation:a,fragments})=>{
+   const point=!finite(a.target.end_seconds),duration=defaults[a.kind]||3;
+   return fragments.map((f,index)=>({key:a.id+':'+index,id:a.id,kind:a.kind,start:mode==='clip'?f.local_start:f.playback_start,end:mode==='clip'?f.local_end:f.playback_end,point,duration,fragment:f,annotation:a}));
   }).sort((a,b)=>a.start-b.start||a.key.localeCompare(b.key));
+ }
+ function nextMoment(items,position,options={}){
+  const seen=new Set(),events=timeline(items,options).filter(e=>{if(seen.has(e.id))return false;seen.add(e.id);return true;});
+  return events.find(e=>e.start>position+.001)||events[0]||null;
+ }
+ function teaserText(a){
+  const text=displayText(a).trim();
+  if(a.kind==='coach'&&a.body?.response&&text==='Saved coaching review'&&/^[{[\x60]/.test((a.body?.text||'').trim()))return '';
+  return text;
  }
  function nextHighlight(items,position,options={}){
   const seen=new Set();return timeline(items,{...options,mode:'full'}).filter(e=>{
@@ -61,5 +88,5 @@
    this.previous=position;return result;
   }
  }
- return {defaults,displayText,canPlay,timeline,nextHighlight,CueClock};
+ return {defaults,displayText,teaserText,canPlay,inScope,timeline,nextMoment,nextHighlight,CueClock};
 });

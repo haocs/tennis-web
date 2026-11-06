@@ -119,14 +119,16 @@ Recording date/time and GPS coordinates come from iPhone metadata extracted by t
 
 ## Backups and restore
 
-Create a consistent state backup, including committed WAL changes, without copying media:
+For a complete application backup, stop the website container and copy its entire private state directory/volume, including `website.sqlite3`, `annotations.sqlite3`, `coaching.sqlite3` and any WAL/SHM companions. Retain coaching evidence storage alongside it. Reaction changes and Moment history live in `annotations.sqlite3`; a `website.sqlite3` backup alone does not include them. Back up published media separately.
+
+The following utility backs up **only `website.sqlite3`**, including committed WAL changes, without copying media:
 
 ```sh
 docker compose exec courtside python manage.py backup /data/backups/website-backup.sqlite3
 docker compose cp courtside:/data/backups/website-backup.sqlite3 ./website-backup.sqlite3
 ```
 
-Keep the backup outside the application volume too. Back up the published library independently. For restore, stop the app first, verify the backup with SQLite's `PRAGMA integrity_check`, replace `website.sqlite3` in the state volume with the backup, remove stale `-wal`/`-shm` companions while stopped, and preserve UID 10001 ownership. Start the app and check likes/overrides. Do not place the live SQLite state on an SMB client mount; the named volume is local storage on the container host.
+Keep the backup outside the application volume too. Back up the published library independently. For restore, stop the app first, verify the backup with SQLite's `PRAGMA integrity_check`, replace `website.sqlite3` in the state volume with the backup, remove stale `-wal`/`-shm` companions while stopped, and preserve UID 10001 ownership. For a full restore, restore the matching stopped-state bundle of all databases and retained evidence, then start the app and check likes, dislikes, overrides and coaching. Single-database restoration is only suitable for the fields owned by that database. Do not place the live SQLite state on an SMB client mount; the named volume is local storage on the container host.
 
 ## Verification
 

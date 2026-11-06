@@ -8,6 +8,8 @@ const ReviewPlayer = {
    next:'<path d="M18 5v14M6 5l10 7-10 7z"/>',
    fullscreen:'<path d="M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5"/>',
    exit:'<path d="M3 8h5V3m13 5h-5V3M8 21v-5H3m13 5v-5h5"/>',
+   thumbup:'<path d="M7 10v11H3V10h4zm0 10h11a2 2 0 0 0 2-1.6l1-6A2 2 0 0 0 19 10h-5l1-5c.4-2-2-3-3-1l-5 6"/>',
+   thumbdown:'<path d="M7 14V3H3v11h4zm0-10h11a2 2 0 0 1 2 1.6l1 6A2 2 0 0 1 19 14h-5l1 5c.4 2-2 3-3 1l-5-6"/>',
    person:'<circle cx="12" cy="8" r="3"/><path d="M5 21v-2a7 7 0 0 1 14 0v2"/>',
    study:'<circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5 5"/>',
    download:'<path d="M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5"/>',
@@ -26,7 +28,7 @@ const ReviewPlayer = {
  </div>
  <div class="video-bottom"><span id="video-time" class="video-time">0:00 / 0:00</span><div class="video-view-actions"><select id="video-rate" class="video-rate" aria-label="Playback speed" title="Playback speed"><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="0.75">0.75×</option><option value="1" selected>1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="2">2×</option></select><button type="button" class="video-button" id="video-fullscreen" aria-label="Enter fullscreen" title="Enter fullscreen">${this.icon('fullscreen')}</button></div></div>
  <div class="video-seek-label"><span class="sr-only">Seek current video</span><input id="video-seek" aria-label="Seek current video" type="range" min="0" max="0" value="0" step="0.1" disabled></div>
- </div></div><p id="native-fullscreen-hint" class="native-fullscreen-hint" hidden>Exit fullscreen to change clips.</p>`;},
+ </div></div>`;},
  mount({time,onError}){
   this.controller?.destroy();
   const stage=document.querySelector('#video-stage'),video=document.querySelector('#player');
@@ -99,7 +101,6 @@ const ReviewPlayer = {
   }
   function syncFullscreen(){
    const active=elementFullscreen()||nativeFullscreen(),label=active?'Exit fullscreen':'Enter fullscreen';
-   if(nativeFullscreen())document.querySelector('#native-fullscreen-hint').hidden=false;
    full.innerHTML=ReviewPlayer.icon(active?'exit':'fullscreen');full.setAttribute('aria-label',label);full.title=label;
    full.setAttribute('aria-pressed',String(!!active));mediaActionsSync();reveal();
   }

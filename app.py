@@ -93,7 +93,7 @@ def create_app(config=None):
 
     def decorate(data, shared=None):
         data = copy.deepcopy(data)
-        shared = shared if shared is not None else state.all()
+        shared = {**(shared if shared is not None else state.all()), **app.extensions['annotations'].like_states(data['id'],data['published_at'])}
         identity = data["id"]
         data['recorded_at_iso'], data['recorded_at_epoch'] = recording_time(data['source'].get('recorded_at'))
         directory = data.get('media_directory', identity)
@@ -319,9 +319,8 @@ def create_app(config=None):
             abort(400, 'A liked value and current version are required')
         if request.path.startswith('/api/videos/') and item not in ('video','session'):
             if type(body.get('publication')) not in (int,float) or body['publication'] != data['published_at']:abort(409,'Video was reprocessed. Refresh before liking this clip.')
-        key = f'like:{identity}' + (f':{item}' if item not in ('session','video') else '')
         try:
-            return jsonify(state.update(key, body['liked'], body['version']))
+            return jsonify(app.extensions['annotations'].write_like(identity,'video' if item in ('session','video') else item,body['liked'],body['version'],data['published_at']))
         except Conflict as conflict:
             return jsonify(error='Someone else updated this item. Its latest value has been loaded.', current=conflict.current), 409
 
