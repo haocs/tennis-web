@@ -679,11 +679,15 @@ def test_watch_metadata_and_cut_reports(browser,ui_server,width):
     expect(first_clip.locator('.note-moment')).to_have_count(0)
     page.get_by_role('button',name='Dislike clip 1',exact=True).click()
     expect(page.locator('#note-demote')).to_have_attribute('aria-pressed','true')
+    assert page.locator('#note-clip-filter option').evaluate_all('(els)=>els.map(e=>e.textContent)')==['All clips','Recommended','Liked only','Highlights']
     page.get_by_role('combobox',name='Clip focus',exact=True).select_option('highlights')
     expect(page.locator('#clip-list .clip-row')).to_have_count(1)
-    page.get_by_role('combobox',name='Clip focus',exact=True).select_option('useful')
-    expect(page.locator('#clip-list .clip-row')).to_have_count(2)
+    page.get_by_role('combobox',name='Clip focus',exact=True).select_option('recommended')
+    expect(page.locator('#clip-list .clip-row')).to_have_count(0)
     expect(page.locator('#player')).to_have_attribute('src',re.compile('clip-001.mp4'))
+    page.get_by_role('button',name='Remove dislike from clip 1',exact=True).click()
+    expect(page.locator('#clip-list .clip-row')).to_have_count(1)
+    page.get_by_role('button',name='Dislike clip 1',exact=True).click()
     page.get_by_role('combobox',name='Clip focus',exact=True).select_option('all')
     page.get_by_role('button',name='Add moment',exact=True).click()
     page.get_by_role('checkbox',name='End time',exact=True).check()
@@ -1168,4 +1172,59 @@ def test_adjacent_thumb_reactions_are_exclusive_and_scoped(browser,ui_server,wid
     fresh=page.request.get(ui_server+f'/api/sessions/{ID}').json()
     for item,old,new in [('video',initial['like'],fresh['like']),(CLIP,initial['clips'][0]['like'],fresh['clips'][0]['like'])]:
         assert page.request.put(ui_server+f'/api/videos/{ID}/likes/{item}',headers={'X-Tennis-Request':'1'},data=dict(liked=old['value'],version=new['version'],publication=fresh['published_at'])).ok
+    page.close()
+
+
+@pytest.mark.parametrize('width',[390,1280])
+def test_recommended_filter_and_smart_clip_sort(browser,ui_server,width):
+    page=browser.new_page(viewport={'width':width,'height':900},has_touch=width<650)
+    base=page.request.get(ui_server+f'/api/sessions/{ID}').json()
+    custom=copy.deepcopy(base)
+    # 6 synthetic clips covering liked, active in-scope moments, archived/out-of-range
+    # moments, disliked clips, <10s vs >=10s durations, and equal-duration tie-breaking.
+    specs=[
+        ('c1',1,6,0,6,False),     # <10s, no moment -> excluded from Recommended
+        ('c2',2,8,6,14,False),    # <10s, active moment -> included in Recommended; tier 2 in Smart
+        ('c3',3,12,14,26,False),  # >=10s, no moment -> included in Recommended; tier 3 in Smart (12s, index 3)
+        ('c4',4,12,26,38,False),  # >=10s, archived/out-of-range only -> tier 3 tie-break after c3 (12s, index 4)
+        ('c5',5,5,38,43,True),    # <10s, liked -> tier 1 in Smart, excluded from Recommended (no moment, <10s)
+        ('c6',6,15,43,58,False),  # >=10s, disliked + active moment -> excluded from Recommended; tier 2 (15s) in Smart
+    ]
+    custom['clips']=[
+        dict(base['clips'][0],id=cid.ljust(24,'0'),index=idx,title=f'Clip {idx:02d}',
+             duration_seconds=dur,original_start_seconds=ostart,original_end_seconds=oend,
+             playback_start_seconds=ostart,playback_end_seconds=oend,
+             like=dict(value=liked,version=1))
+        for cid,idx,dur,ostart,oend,liked in specs
+    ]
+    c1,c2,c3,c4,c5,c6=[c['id'] for c in custom['clips']]
+    active_c2=_playback_moment('m-c2','note',7,clip=c2,clip_start=6)
+    active_c6=_playback_moment('m-c6','highlight',45,clip=c6,clip_start=43)
+    archived_c4=_playback_moment('m-c4-arch','note',27,clip=c4,clip_start=26)
+    archived_c4.update(status='archived',playback_eligible=False)
+    out_of_range_c4=_playback_moment('m-c4-out','note',99,clip=c4,clip_start=26)
+    disliked_c6=dict(id='down-c6',kind='usefulness',record_class='entity_metadata',status='active',version=1,
+                     playback_eligible=True,matched_clip_ids=[c6],related_clip_ids=[c6],
+                     target=dict(scope='clip',clip_id=c6,start_seconds=43,end_seconds=58),
+                     body=dict(value='less_useful',text='',reason=''),context=dict(publication=custom['published_at']))
+    page.route(f'**/api/sessions/{ID}',lambda route:route.fulfill(json=custom))
+    _mock_playback_moments(page,ui_server,[active_c2,active_c6,archived_c4,out_of_range_c4,disliked_c6])
+    page.goto(ui_server+f'/review/{ID}')
+    expect(page.locator('#clip-list .clip-row')).to_have_count(6)
+    assert page.locator('#clip-sort option').evaluate_all('(els)=>els.map(e=>e.textContent)')==['Court order','Smart','Shortest first','Longest first']
+    # Recommended excludes disliked (c6) OR (<10s and no active in-scope moment: c1, c5).
+    # Keeps c2 (<10s with active moment), c3 (>=10s), and c4 (>=10s).
+    page.get_by_role('combobox',name='Clip focus',exact=True).select_option('recommended')
+    expect(page.locator('#clip-list .clip-row')).to_have_count(3)
+    assert page.locator('#clip-list .clip-row').evaluate_all('(els)=>els.map(e=>e.dataset.clip)')==[c2,c3,c4]
+    # Smart sort on Recommended: c2 (has active moment, 8s) > c3 (no active moment, 12s, index 3) > c4 (archived/out-of-range only, 12s, index 4).
+    page.get_by_role('combobox',name='Sort clips',exact=True).select_option('smart')
+    assert page.locator('#clip-list .clip-row').evaluate_all('(els)=>els.map(e=>e.dataset.clip)')==[c2,c3,c4]
+    # Smart sort on All clips:
+    # 1. Liked first: c5 (liked, 5s)
+    # 2. Active in-scope Moments by duration desc: c6 (active moment, 15s), c2 (active moment, 8s)
+    # 3. Remaining by duration desc, then index asc: c3 (12s, idx 3), c4 (12s, idx 4), c1 (6s, idx 1)
+    page.get_by_role('combobox',name='Clip focus',exact=True).select_option('all')
+    assert page.locator('#clip-list .clip-row').evaluate_all('(els)=>els.map(e=>e.dataset.clip)')==[c5,c6,c2,c3,c4,c1]
+    assert not page.evaluate('document.documentElement.scrollWidth>innerWidth')
     page.close()

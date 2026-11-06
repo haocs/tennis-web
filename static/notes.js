@@ -14,10 +14,11 @@ const NoteUI=(()=>{
  const requestId=()=>globalThis.crypto?.randomUUID?.()||'note-'+Date.now()+'-'+Math.random().toString(36).slice(2);
  function lessUseful(c){return items.find(a=>a.kind==='usefulness'&&active(a)&&a.playback_eligible&&related(a,c));}
  function clipMoments(c){return c?MomentPlayback.inScope(items,{mode:'clip',clipId:c.id,clips:source?.clips||[],sourceId:source?.id}).map(e=>e.annotation).filter(a=>active(a)&&MomentPlayback.canPlay(a,items)):[];}
+ function hasMoments(c){return clipMoments(c).length>0;}
  function highlights(c){return clipMoments(c).filter(a=>a.kind==='highlight');}
  function moments(c){return clipMoments(c).filter(a=>a.kind!=='highlight');}
  function clipBadge(c){return `${highlights(c).length?'<span class="note-clip-badge" title="Highlighted moment">★</span>':''}${moments(c).length?'<span class="note-clip-badge note-moment" title="Moment">⚡</span>':''}${lessUseful(c)?'<span class="note-clip-badge note-less" title="Disliked clip">↓</span>':''}`;}
- function filterClip(c){return model.noteFilter==='liked'?!!c.like.value:model.noteFilter==='highlights'?highlights(c).length>0:model.noteFilter==='useful'?!lessUseful(c):true;}
+ function filterClip(c){return model.noteFilter==='liked'?!!c.like.value:model.noteFilter==='highlights'?highlights(c).length>0:(model.noteFilter==='recommended'||model.noteFilter==='useful')?!lessUseful(c)&&(Number(c?.duration_seconds)>=10||hasMoments(c)):true;}
  function pointAtPlayer(){
   const v=$('#player'),c=currentClip();if(!v||!c||v.readyState<1)throw new Error('Wait for the clip to load');
   const match=model.mode==='clip'?c:source.clips.find(c=>v.currentTime>=c.playback_start_seconds&&v.currentTime<c.playback_end_seconds)||source.clips.at(-1);
@@ -237,7 +238,7 @@ const NoteUI=(()=>{
   $('#note-highlight').onclick=highlight;$('#note-demote').onclick=demote;$('#moment-jump').onclick=nextMoment;$('#add-moment').onclick=()=>openEditor('comment');
   $('#moment-toggle').onclick=()=>setExpanded($('#moment-toggle').getAttribute('aria-expanded')!=='true');$('#moment-type').onchange=render;$('#notes-archived').onchange=render;
   const more=$('.player-more');more.classList.remove('hidden');$('.player-more-list').insertAdjacentHTML('beforeend',`<button type="button" id="entity-notes-open">Notes</button><a class="note-cut-link" href="/review/${s.id}/cuts">Review cuts</a>`);$('#entity-notes-open').onclick=()=>{more.open=false;openEntityNotes();};
-  const toolbar=$('.clip-toolbar .toolbar');toolbar.insertAdjacentHTML('beforeend','<select id="note-clip-filter" aria-label="Clip focus"><option value="all">All clips</option><option value="liked">Liked only</option><option value="highlights">Highlights</option><option value="useful">Hide disliked</option></select>');$('#note-clip-filter').value=model.noteFilter||'all';$('#note-clip-filter').onchange=e=>{model.noteFilter=e.target.value;renderClipList();};
+  const toolbar=$('.clip-toolbar .toolbar');toolbar.insertAdjacentHTML('beforeend','<select id="note-clip-filter" aria-label="Clip focus"><option value="all">All clips</option><option value="recommended">Recommended</option><option value="liked">Liked only</option><option value="highlights">Highlights</option></select>');$('#note-clip-filter').value=model.noteFilter||'all';$('#note-clip-filter').onchange=e=>{model.noteFilter=e.target.value;renderClipList();};
   refresh();timer=setInterval(refresh,10000);
  }
  function cuts(s){
@@ -246,5 +247,5 @@ const NoteUI=(()=>{
   const choose=()=>{const c=s.clips.find(c=>c.id===$('#cut-clip').value);model.current=c.id;$('#cut-video').src=mediaURL(s,c.file);$('#cut-original').textContent='Original '+preciseTime(c.original_start_seconds)+'–'+preciseTime(c.original_end_seconds);};
   $('#cut-clip').onchange=choose;$('#cut-report').onclick=()=>{$('#cut-video').pause();openEditor('cut_feedback');};$('#notes-archived').onchange=render;choose();refresh();timer=setInterval(refresh,10000);
  }
- return {init,mount,cuts,current,clipBadge,filterClip,refresh};
+ return {init,mount,cuts,current,clipBadge,filterClip,hasMoments,refresh};
 })();
