@@ -8,6 +8,18 @@ async function ensureDetector(config = {}) {
   if (detector) return detector;
   if (initPromise) return initPromise;
   initPromise = (async () => {
+    // MediaPipe's image upload requires worker graphics even with CPU inference.
+    // Probe the same canvas passed to the runtime rather than failing later in GL.
+    let canvas;
+    try {
+      canvas = new OffscreenCanvas(1, 1);
+      if (!canvas.getContext('webgl2')) canvas = null;
+    } catch (_) { canvas = null; }
+    if (!canvas) {
+      const error = new Error('Auto focus is not supported by this browser.');
+      error.code = 'worker_graphics_unavailable';
+      throw error;
+    }
     const bundleUrl = config.bundleUrl || '/static/vendor/mediapipe/vision_bundle.js';
     const wasmLoaderPath = config.wasmLoaderPath || '/static/vendor/mediapipe/vision_wasm_internal.js';
     const wasmBinaryPath = config.wasmBinaryPath || '/static/vendor/mediapipe/vision_wasm_internal.wasm';
@@ -22,6 +34,7 @@ async function ensureDetector(config = {}) {
     detector = await ObjectDetector.createFromOptions(
       {wasmLoaderPath, wasmBinaryPath},
       {
+        canvas,
         baseOptions: {modelAssetPath, delegate: 'CPU'},
         runningMode: 'IMAGE',
         scoreThreshold: 0.22,
@@ -83,7 +96,8 @@ self.onmessage = async event => {
     }
   } catch (error) {
     self.postMessage({
-      type: 'error',
+      type: error?.code === 'worker_graphics_unavailable' ? 'unsupported' : 'error',
+      code: error?.code,
       epoch: data.epoch,
       seq: data.seq,
       message: error?.message || 'Auto focus detector failed',

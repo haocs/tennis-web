@@ -46,6 +46,7 @@ Auto focus splits responsibilities across three modules:
    - Implements `AutoFocusTracker`, a stateful smoother with exponential damping, snap-to-target convergence thresholds, short-term occlusion hold ($\le 750\text{ ms}$), and graceful ease-back to neutral framing (`1×`, `0, 0`) on sustained target loss.
 2. **`static/autofocus-worker.js` (dedicated Web Worker)**:
    - Lazily created when the user enables Auto focus on desktop.
+   - Requires WebGL2 in an `OffscreenCanvas` for MediaPipe image upload, even though model inference uses the CPU delegate. The worker probes and supplies that canvas explicitly. A browser port without this capability reports a permanent unsupported state while ordinary playback remains available.
    - Loads `/static/vendor/mediapipe/vision_bundle.js` and initializes `ObjectDetector` with `modelAssetPath: '/static/vendor/mediapipe/efficientdet_lite0.tflite'`, `delegate: 'CPU'`, `runningMode: 'IMAGE'`, `categoryAllowlist: ['person']`, `scoreThreshold: 0.22`, and `maxResults: 6`.
    - Processes `{type: 'detect', epoch, seq, width, height, buffer}` messages and replies with `{type: 'result', epoch, seq, detections}` or `{type: 'error', message}`.
 3. **`static/player.js` integration**:
@@ -68,3 +69,5 @@ Auto focus splits responsibilities across three modules:
 ## Verification boundaries
 
 Deterministic detections test framing and player lifecycle behavior. A separate browser smoke test loads the shipped runtime/model under the real CSP and processes local fixture pixels. Recognition of hand-drawn figures is not treated as a portable ground-truth benchmark. Real-tennis validation uses private local playback outside the public fixtures; no user footage is committed.
+
+The reference Chromium smoke must complete real inference. WebKit ports that cannot create worker WebGL2 must report the specific unsupported capability and retain working playback; arbitrary runtime errors still fail the test. See the [upstream vision task runner](https://github.com/google-ai-edge/mediapipe/blob/master/mediapipe/tasks/web/vision/core/vision_task_runner.ts) for its canvas and GPU-buffer image-input contract.

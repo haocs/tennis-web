@@ -72,7 +72,7 @@ def test_autofocus_real_worker_processes_local_pixels(browser, ui_server):
       window.Worker=function(...args) {
         const worker=new NativeWorker(...args);
         const record=(type,detail={})=>window.__realWorkerEvents.push({type,at:Math.round(performance.now()),...detail});
-        worker.addEventListener('message',({data})=>record(data.type,{message:data.message}));
+        worker.addEventListener('message',({data})=>record(data.type,{message:data.message,code:data.code}));
         worker.addEventListener('error',event=>record('worker_error',{message:event.message}));
         const post=worker.postMessage.bind(worker),terminate=worker.terminate.bind(worker);
         worker.postMessage=(data,...rest)=>{record('send:'+data.type);return post(data,...rest);};
@@ -86,6 +86,23 @@ def test_autofocus_real_worker_processes_local_pixels(browser, ui_server):
     button.click()
     try:
         page.wait_for_function("() => Number(document.querySelector('#player')?.dataset.autofocusDetections || 0) >= 1 || document.querySelector('#player')?.dataset.autofocusState === 'unavailable'", timeout=45000)
+        events = page.evaluate('window.__realWorkerEvents')
+        unsupported = any(event['type'] == 'unsupported' and event.get('code') == 'worker_graphics_unavailable' for event in events)
+        if unsupported:
+            # Some WebKit ports expose canvas APIs without worker WebGL. This is
+            # a capability fallback, not permission to accept arbitrary failures.
+            assert browser.browser_type.name != 'chromium', 'Reference Chromium must run real inference'
+            expect(button).to_be_disabled()
+            expect(button).to_have_attribute('aria-pressed', 'false')
+            expect(button).to_have_attribute('data-autofocus-state', 'unavailable')
+            page.locator('#video-stage').hover()
+            page.get_by_role('button', name='Play video', exact=True).click()
+            page.wait_for_function("() => !document.querySelector('#player').paused")
+            assert page.locator('#player').evaluate('v => v.style.transform') == ''
+            assert not errors
+            assert all(url.startswith(ui_server + '/') and method == 'GET' for method, url in requests)
+            page.close()
+            return
         assert int(page.locator('#player').get_attribute('data-autofocus-detections') or '0') >= 1
     except Exception as error:
         state = page.locator('#player').evaluate('v => ({state:v.dataset.autofocusState,captures:v.dataset.autofocusCaptures,inflight:v.dataset.autofocusInflight})')
@@ -1417,6 +1434,22 @@ def test_autofocus_failure_state_and_mobile_hidden(browser, ui_server):
     expect(af_unsupported).to_have_attribute('data-autofocus-state', 'unavailable')
     expect(af_unsupported).to_be_disabled()
     unsupported.close()
+
+    graphics = browser.new_page(viewport={'width': 1280, 'height': 900})
+    graphics.add_init_script("""window.Worker=class {
+      postMessage(data) { if(data.type==='init') setTimeout(()=>this.onmessage?.({data:{type:'unsupported',code:'worker_graphics_unavailable'}}),0); }
+      terminate() {}
+    };""")
+    graphics.goto(ui_server + f'/review/{ID}?clip={CLIP}')
+    expect(graphics.locator('#video-seek')).to_be_enabled()
+    graphics.locator('#video-autofocus').click()
+    expect(graphics.locator('#video-autofocus')).to_be_disabled()
+    expect(graphics.locator('#video-autofocus')).to_have_attribute('aria-pressed', 'false')
+    graphics.locator('#video-stage').hover()
+    graphics.get_by_role('button', name='Play video', exact=True).click()
+    graphics.wait_for_function("() => !document.querySelector('#player').paused")
+    assert graphics.locator('#player').evaluate('v => v.style.transform') == ''
+    graphics.close()
 
     # Deterministic lifecycle test for delayed/stale worker responses, single-flight queue safety across seeking, and watchdog recovery.
     desktop = browser.new_page(viewport={'width': 1280, 'height': 900})

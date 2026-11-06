@@ -243,6 +243,10 @@ const ReviewPlayer = {
      }
      return;
     }
+    if(msg.type==='unsupported'&&msg.code==='worker_graphics_unavailable'){
+     failAutoFocus('Auto focus is not supported by this browser.',false);
+     return;
+    }
     if(msg.type==='error'){
      clearInitWatchdog();
      clearDetectWatchdog();
