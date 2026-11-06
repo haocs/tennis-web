@@ -77,3 +77,17 @@ test('saved coaching response is excerpt context, superseded by verified suggest
  const suggestion={...moment('specific',2,{kind:'coach',end:3}),body:{text:'Cue'},origin:{job_id:'job'}};
  assert.deepEqual(timeline([response,suggestion]).map(e=>e.id),['specific']);
 });
+test('structured saved coaching is readable text in compact cues and full review',()=>{
+ const {displayText}=require('../../static/moments-core.js');
+ const a={kind:'coach',body:{response:true,text:JSON.stringify({schema_version:2,summary:'Recover after each shot.',suggestions:[{title:'Ready position',observation:'Knees straighten.',cue:'Bend knees.',drill:'Reset ten times.',uncertainty:'Contact timing unclear.'}]})}};
+ assert.equal(displayText(a),'Recover after each shot.');
+ assert.match(displayText(a,true),/Cue: Bend knees\./);assert.match(displayText(a,true),/Drill: Reset ten times\./);
+ assert.ok(!displayText(a,true).includes('schema_version'));
+ a.body.text=JSON.stringify({schema_version:2,suggestions:[{cue:'Recover balance.'}]});assert.equal(displayText(a),'Recover balance.');
+});
+test('malformed or truncated structured responses never leak JSON into playback cues',()=>{
+ const {displayText}=require('../../static/moments-core.js');
+ assert.equal(displayText({kind:'coach',body:{response:true,text:'{"suggestions":['}}),'Saved coaching review');
+ assert.equal(displayText({kind:'coach',body:{response:true,text:'Keep your knees soft.'}}),'Keep your knees soft.');
+ assert.equal(displayText({kind:'note',body:{text:'{a user note}'}}),'{a user note}');
+});
