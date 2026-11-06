@@ -113,6 +113,8 @@ Chapter starts are measured against actual keyframe timestamps in the combined e
 
 HEVC HDR playback requires a browser/device that supports the exported format. Codec support and HDR rendering vary by browser. The original generated review and timeline downloads remain available.
 
+Desktop **Auto focus** optionally follows the nearest/largest detected person using a browser Web Worker and bundled model assets. Frames stay in the browser; videos, Moments and processing jobs are unchanged. It is off by default and hidden on mobile. See [the design and runtime contract](docs/AUTO-FOCUS.md) for tracking, cleanup and compatibility behavior.
+
 ## Metadata
 
 Recording date/time and GPS coordinates come from iPhone metadata extracted by the processor. Dates use the recording's calendar date, retaining its original timezone in metadata. Human-readable location labels can be entered locally; no external geocoding service is required. Overrides live in website state and do not rewrite processing metadata.

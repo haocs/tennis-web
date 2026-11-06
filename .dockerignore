@@ -19,6 +19,14 @@
 !static/
 !static/*.css
 !static/*.js
+!static/vendor/
+!static/vendor/mediapipe/
+!static/vendor/mediapipe/LICENSE
+!static/vendor/mediapipe/MANIFEST.json
+!static/vendor/mediapipe/vision_bundle.js
+!static/vendor/mediapipe/vision_wasm_internal.js
+!static/vendor/mediapipe/vision_wasm_internal.wasm
+!static/vendor/mediapipe/efficientdet_lite0.tflite
 
 !coaching.py
 !coaching_routes.py

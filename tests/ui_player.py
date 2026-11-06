@@ -441,7 +441,8 @@ def test_single_fullscreen_action_across_mobile_and_desktop(browser, ui_server):
     expect(page.locator('#video-seek')).to_be_enabled()
     for width,height in [(390,844),(844,390),(320,568),(1280,800)]:
         page.set_viewport_size({'width':width,'height':height})
-        expect(page.locator('.video-view-actions button')).to_have_count(1)
+        expect(page.locator('#video-fullscreen')).to_have_count(1)
+        expect(page.locator('.video-view-actions button:visible')).to_have_count(1 if width<=650 else 2)
         expect(page.get_by_role('button',name='Enter fullscreen',exact=True)).to_be_visible()
         assert page.locator('#video-expand,#video-close-expanded,.player-expanded').count()==0
         assert page.locator('#video-stage').get_attribute('role')=='region'
@@ -1228,3 +1229,289 @@ def test_recommended_filter_and_smart_clip_sort(browser,ui_server,width):
     assert page.locator('#clip-list .clip-row').evaluate_all('(els)=>els.map(e=>e.dataset.clip)')==[c5,c6,c2,c3,c4,c1]
     assert not page.evaluate('document.documentElement.scrollWidth>innerWidth')
     page.close()
+
+
+def test_desktop_autofocus_real_detector_tracking_loss_and_cleanup(browser, ui_server):
+    page = browser.new_page(viewport={'width': 1280, 'height': 900})
+    errors = []
+    requests = []
+    page.on('pageerror', lambda err: errors.append(str(err)))
+    page.on('request', lambda req: requests.append((req.method, req.url)))
+    page.add_init_script("""(() => {
+      window.__testCourtScene = 'two_players';
+      const origDrawImage = CanvasRenderingContext2D.prototype.drawImage;
+      function drawPerson(ctx, px, py, sc, shirt) {
+        ctx.save();
+        ctx.translate(px, py);
+        ctx.scale(sc, sc);
+        ctx.fillStyle = 'rgba(10,15,20,0.45)';
+        ctx.beginPath(); ctx.ellipse(0, 56, 16, 4, 0, 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = '#d4a383';
+        ctx.lineCap = 'round';
+        ctx.lineWidth = 6.5;
+        ctx.beginPath(); ctx.moveTo(-5, 16); ctx.lineTo(-9, 50); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(5, 16); ctx.lineTo(10, 50); ctx.stroke();
+        ctx.fillStyle = '#f0f3f5';
+        ctx.beginPath(); ctx.ellipse(-10, 53, 6, 3, 0, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.ellipse(11, 53, 6, 3, 0, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = '#1b2432';
+        ctx.beginPath(); ctx.roundRect(-11, 0, 22, 20, 4); ctx.fill();
+        ctx.fillStyle = shirt;
+        ctx.beginPath(); ctx.roundRect(-12, -28, 24, 30, 6); ctx.fill();
+        ctx.strokeStyle = '#d4a383';
+        ctx.lineWidth = 5;
+        ctx.beginPath(); ctx.moveTo(-12, -23); ctx.lineTo(-21, -4); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(12, -23); ctx.lineTo(22, -8); ctx.stroke();
+        ctx.fillStyle = '#d4a383';
+        ctx.beginPath(); ctx.arc(0, -37, 7.5, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = '#221a15';
+        ctx.beginPath(); ctx.arc(0, -39, 7.5, Math.PI, Math.PI * 2); ctx.fill();
+        ctx.restore();
+      }
+      CanvasRenderingContext2D.prototype.drawImage = function(source, ...args) {
+        if (source && source.id === 'player') {
+          const w = this.canvas.width || 384;
+          const h = this.canvas.height || 216;
+          const sx = w / 320;
+          const sy = h / 240;
+          this.save();
+          this.scale(sx, sy);
+          const sky = this.createLinearGradient(0, 0, 0, 70);
+          sky.addColorStop(0, '#2a362e');
+          sky.addColorStop(1, '#415548');
+          this.fillStyle = sky;
+          this.fillRect(0, 0, 320, 70);
+          const court = this.createLinearGradient(0, 70, 0, 240);
+          court.addColorStop(0, '#446878');
+          court.addColorStop(1, '#335363');
+          this.fillStyle = court;
+          this.fillRect(0, 70, 320, 170);
+          this.strokeStyle = 'rgba(240,244,240,0.75)';
+          this.lineWidth = 2;
+          this.beginPath();
+          this.moveTo(75, 85); this.lineTo(245, 85);
+          this.lineTo(295, 220); this.lineTo(25, 220); this.closePath();
+          this.stroke();
+          if (window.__testCourtScene === 'two_players') {
+            drawPerson(this, 88, 92, 0.48, '#d64045');
+            drawPerson(this, 210, 145, 0.8, '#e8eef2');
+          }
+          this.restore();
+          return;
+        }
+        return origDrawImage.call(this, source, ...args);
+      };
+    })()""")
+    page.goto(ui_server + f'/review/{ID}?clip={CLIP}')
+    page.wait_for_function("() => document.querySelector('#player')?.readyState >= 2")
+    af_btn = page.get_by_role('button', name='Auto focus main player', exact=True)
+    expect(af_btn).to_be_visible()
+    expect(af_btn).to_have_attribute('aria-pressed', 'false')
+    expect(af_btn).to_have_attribute('data-autofocus-state', 'off')
+    assert page.locator('#player').evaluate('v => v.style.transform') == ''
+
+    # Enable Auto focus while paused: exactly one forced capture runs on ready, and paused interval ticks do not re-capture.
+    af_btn.click()
+    expect(af_btn).to_have_attribute('aria-pressed', 'true')
+    page.wait_for_function(
+        "() => document.querySelector('#video-autofocus')?.dataset.autofocusState === 'tracking' && Number(document.querySelector('#player')?.dataset.autofocusZoom || 1) > 1.15",
+        timeout=15000,
+    )
+    captures_while_paused = int(page.locator('#player').get_attribute('data-autofocus-captures') or '0')
+    assert captures_while_paused == 1
+    page.wait_for_timeout(420)
+    assert int(page.locator('#player').get_attribute('data-autofocus-captures') or '0') == captures_while_paused
+
+    transform = page.locator('#player').evaluate('v => v.style.transform')
+    m = re.match(r'translate\(([-\d.]+)px,\s*([-\d.]+)px\)\s*scale\(([\d.]+)\)', transform)
+    assert m is not None, f'Unexpected transform: {transform}'
+    tx, ty, scale = float(m.group(1)), float(m.group(2)), float(m.group(3))
+    assert scale > 1.15
+    assert tx < -10, f'Expected negative X pan toward right-side near player, got tx={tx}'
+
+    # Seeking immediately invalidates/resets tracking and transform, and seeked captures the new scene.
+    page.evaluate("""() => {
+      window.__testCourtScene = 'empty_court';
+      const v = document.querySelector('#player');
+      v.dispatchEvent(new Event('seeking'));
+    }""")
+    assert page.locator('#player').evaluate('v => v.style.transform') == ''
+    expect(af_btn).to_have_attribute('data-autofocus-state', 'searching')
+    page.evaluate("() => { document.querySelector('#player').dispatchEvent(new Event('seeked')); }")
+    page.wait_for_function(
+        "() => document.querySelector('#video-autofocus')?.dataset.autofocusState === 'searching' && Number(document.querySelector('#player')?.dataset.autofocusZoom || 1) === 1",
+        timeout=10000,
+    )
+    assert page.locator('#player').evaluate('v => v.style.transform') == ''
+
+    # Restore target on seeked, verify re-lock, then verify clip change resets and re-tracks cleanly.
+    page.evaluate("""() => {
+      window.__testCourtScene = 'two_players';
+      document.querySelector('#player').dispatchEvent(new Event('seeked'));
+    }""")
+    page.wait_for_function(
+        "() => document.querySelector('#video-autofocus')?.dataset.autofocusState === 'tracking' && Number(document.querySelector('#player')?.dataset.autofocusZoom || 1) > 1.15",
+        timeout=10000,
+    )
+    page.get_by_role('button', name='Next clip', exact=True).click()
+    expect(page.locator('#player')).to_have_attribute('src', re.compile('clip-002.mp4'))
+    page.wait_for_function(
+        "() => document.querySelector('#video-autofocus')?.dataset.autofocusState === 'tracking' && Number(document.querySelector('#player')?.dataset.autofocusZoom || 1) > 1.15",
+        timeout=10000,
+    )
+
+    # Opening Clip Study suspends/disables Auto focus and restores neutral framing.
+    page.get_by_role('button', name='Study clip', exact=True).click()
+    expect(page.locator('#clip-study')).to_be_visible()
+    expect(af_btn).to_have_attribute('aria-pressed', 'false')
+    expect(af_btn).to_have_attribute('data-autofocus-state', 'off')
+    assert page.locator('#player').evaluate('v => v.style.transform') == ''
+    page.get_by_role('button', name='← Back to review', exact=True).click()
+    expect(page.locator('#clip-study')).not_to_be_visible()
+
+    # Re-enable and manually disable Auto focus; verify immediate transform cleanup.
+    af_btn.click()
+    page.wait_for_function(
+        "() => Number(document.querySelector('#player')?.dataset.autofocusZoom || 1) > 1.15",
+        timeout=10000,
+    )
+    af_btn.click()
+    expect(af_btn).to_have_attribute('aria-pressed', 'false')
+    expect(af_btn).to_have_attribute('data-autofocus-state', 'off')
+    assert page.locator('#player').evaluate('v => v.style.transform') == ''
+
+    # Re-enable on desktop, then resize to mobile layout: Auto focus must automatically disable and clean up.
+    af_btn.click()
+    page.wait_for_function(
+        "() => Number(document.querySelector('#player')?.dataset.autofocusZoom || 1) > 1.15",
+        timeout=10000,
+    )
+    page.set_viewport_size({'width': 390, 'height': 844})
+    expect(page.locator('#video-autofocus')).not_to_be_visible()
+    expect(page.locator('#video-autofocus')).to_have_attribute('aria-pressed', 'false')
+    expect(page.locator('#video-autofocus')).to_have_attribute('data-autofocus-state', 'off')
+    assert page.locator('#player').evaluate('v => v.style.transform') == ''
+
+    # Verify zero third-party network requests and zero media/frame uploads occurred.
+    assert all(url.startswith((ui_server, 'data:', 'blob:')) for _, url in requests), requests
+    assert all(method == 'GET' for method, _ in requests)
+    assert any('/static/vendor/mediapipe/vision_wasm_internal.wasm' in url for _, url in requests)
+    assert any('/static/vendor/mediapipe/efficientdet_lite0.tflite' in url for _, url in requests)
+    assert not errors
+    page.close()
+
+
+def test_autofocus_failure_state_and_mobile_hidden(browser, ui_server):
+    mobile = browser.new_page(viewport={'width': 390, 'height': 844}, has_touch=True)
+    mobile.goto(ui_server + f'/review/{ID}?clip={CLIP}')
+    expect(mobile.locator('#video-seek')).to_be_enabled()
+    expect(mobile.locator('#video-autofocus')).not_to_be_visible()
+    mobile.close()
+
+    # Unsupported browser capabilities permanently disable the control.
+    unsupported = browser.new_page(viewport={'width': 1280, 'height': 900})
+    unsupported.add_init_script("window.__TENNIS_AUTOFOCUS_FORCE_UNSUPPORTED = true;")
+    unsupported.goto(ui_server + f'/review/{ID}?clip={CLIP}')
+    expect(unsupported.locator('#video-seek')).to_be_enabled()
+    af_unsupported = unsupported.get_by_role('button', name='Auto focus main player', exact=True)
+    expect(af_unsupported).to_have_attribute('data-autofocus-state', 'unavailable')
+    expect(af_unsupported).to_be_disabled()
+    unsupported.close()
+
+    # Deterministic lifecycle test for delayed/stale worker responses, single-flight queue safety across seeking, and watchdog recovery.
+    desktop = browser.new_page(viewport={'width': 1280, 'height': 900})
+    desktop.add_init_script("""(() => {
+      window.__afWorkers = [];
+      window.__afMode = 'delayed';
+      window.__TENNIS_AUTOFOCUS_CONFIG = {initTimeoutMs: 400, detectTimeoutMs: 350};
+      class ControlledWorker {
+        constructor(url) {
+          this.url = url;
+          this.terminated = false;
+          this.sent = [];
+          window.__afWorkers.push(this);
+        }
+        postMessage(msg) {
+          if (this.terminated) return;
+          this.sent.push({type: msg.type, epoch: msg.epoch, seq: msg.seq});
+          if (msg.type === 'init') {
+            if (window.__afMode === 'hang_init') return;
+            setTimeout(() => {
+              if (!this.terminated) this.onmessage?.({data: {type: 'ready'}});
+            }, 10);
+          } else if (msg.type === 'detect') {
+            if (window.__afMode === 'hang_detect' || window.__afMode === 'delayed') return;
+            setTimeout(() => {
+              if (!this.terminated) {
+                this.onmessage?.({
+                  data: {
+                    type: 'result',
+                    epoch: msg.epoch,
+                    seq: msg.seq,
+                    detections: [{
+                      boundingBox: {originX: 190, originY: 75, width: 42, height: 68},
+                      categories: [{score: 0.85, categoryName: 'person'}],
+                    }],
+                  },
+                });
+              }
+            }, 15);
+          }
+        }
+        terminate() {
+          this.terminated = true;
+        }
+      }
+      window.Worker = ControlledWorker;
+    })()""")
+    desktop.goto(ui_server + f'/review/{ID}?clip={CLIP}')
+    desktop.wait_for_function("() => document.querySelector('#player')?.readyState >= 2")
+    af_btn = desktop.get_by_role('button', name='Auto focus main player', exact=True)
+    af_btn.click()
+    desktop.wait_for_function("() => window.__afWorkers.length === 1 && window.__afWorkers[0].sent.some(m => m.type === 'detect')")
+
+    # While seq=1 is in flight, firing seeking + seeked must NOT queue a second overlapping detect message.
+    desktop.evaluate("""() => {
+      const v = document.querySelector('#player');
+      v.dispatchEvent(new Event('seeking'));
+      v.dispatchEvent(new Event('seeked'));
+    }""")
+    assert desktop.evaluate("() => window.__afWorkers[0].sent.filter(m => m.type === 'detect').length") == 1
+
+    # Replying with the stale epoch=1 result releases the in-flight lock without applying stale detections, and immediately dispatches the pending forced capture for epoch=2.
+    desktop.evaluate("""() => {
+      const w = window.__afWorkers[0];
+      const first = w.sent.find(m => m.type === 'detect');
+      w.onmessage({
+        data: {
+          type: 'result',
+          epoch: first.epoch,
+          seq: first.seq,
+          detections: [{
+            boundingBox: {originX: 190, originY: 75, width: 42, height: 68},
+            categories: [{score: 0.9, categoryName: 'person'}],
+          }],
+        },
+      });
+    }""")
+    assert desktop.locator('#player').evaluate('v => v.style.transform') == ''
+    assert desktop.evaluate("() => window.__afWorkers[0].sent.filter(m => m.type === 'detect').length") == 2
+
+    # Leaving the second detect request unanswered triggers the inference watchdog, terminating the hung worker and surfacing a visible recoverable failure.
+    expect(af_btn).to_have_attribute('data-autofocus-state', 'unavailable', timeout=3000)
+    expect(af_btn).to_have_attribute('aria-pressed', 'false')
+    expect(af_btn).to_be_enabled()
+    expect(desktop.locator('#toast')).to_contain_text('Auto focus is unavailable in this browser.')
+    assert desktop.evaluate("() => window.__afWorkers[0].terminated") is True
+
+    # Recoverable failure: switching worker to normal mode and clicking Auto focus again succeeds cleanly.
+    desktop.evaluate("() => { window.__afMode = 'ok'; }")
+    af_btn.click()
+    desktop.wait_for_function(
+        "() => document.querySelector('#video-autofocus')?.dataset.autofocusState === 'tracking' && Number(document.querySelector('#player')?.dataset.autofocusZoom || 1) > 1.15",
+        timeout=5000,
+    )
+    desktop.evaluate("() => ReviewPlayer.controller.destroy()")
+    assert desktop.evaluate("() => window.__afWorkers.at(-1).terminated") is True
+    assert desktop.locator('#player').evaluate('v => v.style.transform') == ''
+    desktop.close()
