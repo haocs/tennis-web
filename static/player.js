@@ -179,7 +179,7 @@ const ReviewPlayer = {
    if(afWorker)return afWorker;
    const workerUrl=window.__TENNIS_AUTOFOCUS_WORKER_URL||'/static/autofocus-worker.js';
    const config=window.__TENNIS_AUTOFOCUS_CONFIG||{};
-   const initTimeoutMs=Math.max(100,Number(config.initTimeoutMs)||8000);
+   const initTimeoutMs=Math.max(100,Number(config.initTimeoutMs)||30000);
    let worker;
    try{
     worker=new Worker(workerUrl);

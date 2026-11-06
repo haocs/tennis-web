@@ -63,3 +63,8 @@ Auto focus splits responsibilities across three modules:
 - **Explicit unsupported / recoverable failure state**:
   - If `Worker` or `WebAssembly` is unsupported, `#video-autofocus` sets `aria-pressed="false"`, `disabled = true`, and `data-autofocus-state="unavailable"`.
   - If worker/model initialization or inference fails or exceeds bounded initialization/inference watchdogs, Auto focus terminates the worker, resets `video.style.transform = ''`, transitions `#video-autofocus` to `aria-pressed="false"` and `data-autofocus-state="unavailable"`, and surfaces a visible error via `onError('Auto focus is unavailable in this browser.')` while keeping the control recoverable on subsequent user retry.
+  - Initialization allows up to 30 seconds for a cold runtime/model download and compilation. The user can disable Auto focus while it loads; inference has its own shorter watchdog.
+
+## Verification boundaries
+
+Deterministic detections test framing and player lifecycle behavior. A separate browser smoke test loads the shipped runtime/model under the real CSP and processes local fixture pixels. Recognition of hand-drawn figures is not treated as a portable ground-truth benchmark. Real-tennis validation uses private local playback outside the public fixtures; no user footage is committed.

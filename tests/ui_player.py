@@ -1231,75 +1231,29 @@ def test_recommended_filter_and_smart_clip_sort(browser,ui_server,width):
     page.close()
 
 
-def test_desktop_autofocus_real_detector_tracking_loss_and_cleanup(browser, ui_server):
+def test_desktop_autofocus_tracking_loss_and_cleanup(browser, ui_server):
     page = browser.new_page(viewport={'width': 1280, 'height': 900})
     errors = []
     requests = []
     page.on('pageerror', lambda err: errors.append(str(err)))
     page.on('request', lambda req: requests.append((req.method, req.url)))
+    # Deterministic detections exercise framing/lifecycle independently of model
+    # confidence or platform-specific rasterization of illustrated people.
     page.add_init_script("""(() => {
       window.__testCourtScene = 'two_players';
-      const origDrawImage = CanvasRenderingContext2D.prototype.drawImage;
-      function drawPerson(ctx, px, py, sc, shirt) {
-        ctx.save();
-        ctx.translate(px, py);
-        ctx.scale(sc, sc);
-        ctx.fillStyle = 'rgba(10,15,20,0.45)';
-        ctx.beginPath(); ctx.ellipse(0, 56, 16, 4, 0, 0, Math.PI * 2); ctx.fill();
-        ctx.strokeStyle = '#d4a383';
-        ctx.lineCap = 'round';
-        ctx.lineWidth = 6.5;
-        ctx.beginPath(); ctx.moveTo(-5, 16); ctx.lineTo(-9, 50); ctx.stroke();
-        ctx.beginPath(); ctx.moveTo(5, 16); ctx.lineTo(10, 50); ctx.stroke();
-        ctx.fillStyle = '#f0f3f5';
-        ctx.beginPath(); ctx.ellipse(-10, 53, 6, 3, 0, 0, Math.PI * 2); ctx.fill();
-        ctx.beginPath(); ctx.ellipse(11, 53, 6, 3, 0, 0, Math.PI * 2); ctx.fill();
-        ctx.fillStyle = '#1b2432';
-        ctx.beginPath(); ctx.roundRect(-11, 0, 22, 20, 4); ctx.fill();
-        ctx.fillStyle = shirt;
-        ctx.beginPath(); ctx.roundRect(-12, -28, 24, 30, 6); ctx.fill();
-        ctx.strokeStyle = '#d4a383';
-        ctx.lineWidth = 5;
-        ctx.beginPath(); ctx.moveTo(-12, -23); ctx.lineTo(-21, -4); ctx.stroke();
-        ctx.beginPath(); ctx.moveTo(12, -23); ctx.lineTo(22, -8); ctx.stroke();
-        ctx.fillStyle = '#d4a383';
-        ctx.beginPath(); ctx.arc(0, -37, 7.5, 0, Math.PI * 2); ctx.fill();
-        ctx.fillStyle = '#221a15';
-        ctx.beginPath(); ctx.arc(0, -39, 7.5, Math.PI, Math.PI * 2); ctx.fill();
-        ctx.restore();
-      }
-      CanvasRenderingContext2D.prototype.drawImage = function(source, ...args) {
-        if (source && source.id === 'player') {
-          const w = this.canvas.width || 384;
-          const h = this.canvas.height || 216;
-          const sx = w / 320;
-          const sy = h / 240;
-          this.save();
-          this.scale(sx, sy);
-          const sky = this.createLinearGradient(0, 0, 0, 70);
-          sky.addColorStop(0, '#2a362e');
-          sky.addColorStop(1, '#415548');
-          this.fillStyle = sky;
-          this.fillRect(0, 0, 320, 70);
-          const court = this.createLinearGradient(0, 70, 0, 240);
-          court.addColorStop(0, '#446878');
-          court.addColorStop(1, '#335363');
-          this.fillStyle = court;
-          this.fillRect(0, 70, 320, 170);
-          this.strokeStyle = 'rgba(240,244,240,0.75)';
-          this.lineWidth = 2;
-          this.beginPath();
-          this.moveTo(75, 85); this.lineTo(245, 85);
-          this.lineTo(295, 220); this.lineTo(25, 220); this.closePath();
-          this.stroke();
-          if (window.__testCourtScene === 'two_players') {
-            drawPerson(this, 88, 92, 0.48, '#d64045');
-            drawPerson(this, 210, 145, 0.8, '#e8eef2');
+      window.Worker = class {
+        constructor() { this.closed = false; }
+        postMessage(data) {
+          if (data.type === 'init') {
+            setTimeout(() => {if (!this.closed) this.onmessage?.({data:{type:'ready'}});}, 0);
+          } else if (data.type === 'detect') {
+            const w=data.width,h=data.height;
+            const person=(x,y,width,height)=>({boundingBox:{originX:x*w,originY:y*h,width:width*w,height:height*h},categories:[{categoryName:'person',score:.95}]});
+            const detections=window.__testCourtScene==='two_players'?[person(.25,.3,.08,.2),person(.6,.3,.16,.4)]:[];
+            setTimeout(() => {if (!this.closed) this.onmessage?.({data:{type:'result',epoch:data.epoch,seq:data.seq,detections}});}, 0);
           }
-          this.restore();
-          return;
         }
-        return origDrawImage.call(this, source, ...args);
+        terminate() { this.closed = true; }
       };
     })()""")
     page.goto(ui_server + f'/review/{ID}?clip={CLIP}')
@@ -1395,9 +1349,37 @@ def test_desktop_autofocus_real_detector_tracking_loss_and_cleanup(browser, ui_s
     # Verify zero third-party network requests and zero media/frame uploads occurred.
     assert all(url.startswith((ui_server, 'data:', 'blob:')) for _, url in requests), requests
     assert all(method == 'GET' for method, _ in requests)
+    assert not errors
+    page.close()
+
+
+def test_autofocus_real_worker_processes_local_pixels(browser, ui_server):
+    # Exercise the shipped model/runtime under real CSP without assuming a
+    # learned model must recognize a particular hand-drawn illustration.
+    page = browser.new_page(viewport={'width': 1280, 'height': 900})
+    requests = []
+    errors = []
+    page.on('request', lambda request: requests.append((request.method, request.url)))
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    page.goto(ui_server + f'/review/{ID}?clip={CLIP}')
+    page.wait_for_function("() => document.querySelector('#player')?.readyState >= 2")
+    button = page.get_by_role('button', name='Auto focus main player', exact=True)
+    button.click()
+    try:
+        page.wait_for_function("() => Number(document.querySelector('#player')?.dataset.autofocusDetections || 0) >= 1", timeout=45000)
+    except Exception as error:
+        state = page.locator('#player').evaluate('v => ({state:v.dataset.autofocusState,captures:v.dataset.autofocusCaptures,inflight:v.dataset.autofocusInflight})')
+        raise AssertionError(f'Real detector did not process a frame: {state}; errors={errors}') from error
+    expect(button).to_have_attribute('aria-pressed', 'true')
+    assert button.get_attribute('data-autofocus-state') in ('searching', 'tracking', 'holding')
     assert any('/static/vendor/mediapipe/vision_wasm_internal.wasm' in url for _, url in requests)
     assert any('/static/vendor/mediapipe/efficientdet_lite0.tflite' in url for _, url in requests)
+    assert all(url.startswith(ui_server + '/') and method == 'GET' for method, url in requests)
     assert not errors
+    page.locator('#video-stage').hover()
+    button.click()
+    expect(button).to_have_attribute('aria-pressed', 'false')
+    assert page.locator('#player').evaluate('v => v.style.transform') == ''
     page.close()
 
 
