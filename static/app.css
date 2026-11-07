@@ -141,3 +141,51 @@ button.clip-row:hover{background:#eef3e0}button.clip-row:focus-visible{outline:3
 .like-button svg{display:block;width:20px;height:20px}.like-button[aria-pressed=true] svg{fill:currentColor}.player-reactions{display:inline-flex;align-items:center;gap:3px;flex-shrink:0}.player-options .player-reactions .like-button{border:0;border-radius:4px;width:40px;min-width:40px;height:40px;min-height:40px;background:transparent;color:#edf4e6;padding:10px}.player-reactions .like-button[aria-pressed=true]{color:var(--lime);background:transparent}.player-reactions .like-button:focus-visible{outline:2px solid var(--lime);outline-offset:-3px}.player-options .player-reactions .like-button:hover{background:#ffffff16}
 
 @media(max-width:650px){.player-options .player-reactions .like-button{width:44px;min-width:44px;height:44px;min-height:44px;padding:12px}}
+
+/* Home page redesign: top Processing nav dot, clickable summary cards, and compact library cards. */
+.site-header nav a{display:inline-flex;align-items:center;gap:6px}
+.status-dot{display:inline-block;width:8px;height:8px;border-radius:50%;flex-shrink:0;background:#d69e2e;box-shadow:0 0 0 2px #153c3114}
+.status-dot.status-green{background:#66a63b}
+.status-dot.status-yellow{background:#d69e2e}
+.status-dot.status-red{background:var(--red)}
+.status-orb.danger .dot{background:var(--red)}
+
+.library-overview{display:flex;align-items:stretch;justify-content:space-between;gap:12px;margin:4px 0 24px;flex-wrap:wrap}
+.library-overview .intro-stats,.library-overview .summary-entities{display:flex;align-items:stretch;gap:10px;padding:0;flex-wrap:wrap}
+.library-overview .intro-stats{flex:2 1 460px}
+.library-overview .summary-entities{flex:1 1 220px;justify-content:flex-end}
+.summary-item{appearance:none;border:1px solid var(--line);border-radius:14px;background:var(--white);color:var(--ink);padding:11px 14px;min-width:105px;min-height:66px;flex:1 1 110px;display:flex;flex-direction:column;justify-content:space-between;align-items:flex-start;gap:5px;text-align:left;transition:border-color .15s,background .15s}
+.summary-item:hover{background:#eef3e2;border-color:#b8c7a3;text-decoration:none}
+.summary-item.active{background:var(--ink);border-color:var(--ink);color:var(--white)}
+.summary-item strong{font-size:23px;font-weight:600;line-height:1.05;letter-spacing:-.04em;display:inline-block}
+.summary-item strong small{font-size:13px;font-weight:500;margin-left:1px}
+.summary-item>span:last-child{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.07em;font-weight:600;line-height:1.2}
+.summary-item.active>span:last-child,.summary-item.active .summary-subcount{color:#d3dec6}
+.summary-value-row{display:flex;align-items:baseline;gap:7px;flex-wrap:wrap;width:100%}
+.summary-subcount{font-size:11px;color:var(--muted);font-weight:500;white-space:nowrap}
+.player-avatar-stack{display:inline-flex;align-items:center;margin-left:auto}
+.player-avatar-stack .player-avatar{width:22px;height:22px;font-size:9px;border:1.5px solid var(--white);margin-left:-6px}
+.player-avatar-stack .player-avatar:first-child{margin-left:0}
+.player-avatar-stack .player-avatar-more{background:#e4ead8;color:var(--ink)}
+
+.section-heading{margin:18px 0 16px}
+.sessions-grid{gap:18px}
+.card-body{padding:14px 16px}
+.card-date{margin-bottom:6px}
+.card-title-row h3{font-size:17px;line-height:1.3}
+.card-location{margin-top:7px}
+.card-footer{margin-top:12px;padding-top:11px}
+.practice-recordings{margin-top:11px}
+.practice-recording{padding:10px 0}
+
+@media(max-width:650px){
+ .library-overview{display:grid;grid-template-columns:1fr;gap:8px;margin:2px 0 18px}
+ .library-overview .intro-stats,.library-overview .summary-entities{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:0}
+ .summary-item{min-width:0;min-height:56px;padding:9px 11px;border-radius:12px;gap:4px}
+ .summary-item strong{font-size:19px}
+ .summary-item>span:last-child{font-size:9px;letter-spacing:.05em}
+ .summary-subcount{font-size:10px}
+ .player-avatar-stack .player-avatar{width:19px;height:19px;font-size:8px}
+ .card-body{padding:13px 14px}
+ .card-title-row h3{font-size:16px}
+}

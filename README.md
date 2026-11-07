@@ -77,15 +77,11 @@ Newest/oldest sorting uses the original recording's timezone-aware creation time
 
 The home page groups overlapping recordings and recordings starting within 30 minutes of the previous recording ending into one practice card. Each card retains a separate link and favorite control for every recording. Durations and clip counts are summed. This does not merge files, change stable identities, alter review pages, or migrate existing likes/edits. `TENNIS_SESSION_GAP_MINUTES` configures the gap (default 30). Liked views retain the existing individual recording/clip favorites.
 
-## Home-page worker summary
+## Home summary and Processing navigation
 
-The home header places a compact, live worker-status link to the left of session,
-clip and practice-time totals. Slogans are removed; the logo and brand remain.
-Set `TENNIS_PROCESSING_ROOM_URL` to your existing processing control portal in
-private deployment settings. The link opens that portal in the same tab. Without
-this setting, `/processing` provides a local read-only worker/queue status page.
-Worker unavailable, stale and paused states remain visible and clickable. Status
-refreshes every 15 seconds; the detailed queue is kept off the home summary.
+Top navigation orders **Library**, **Learning**, and **Processing**, with a live status dot on **Processing** indicating ready/online (`green`), paused/stale/unavailable (`yellow`), or error/attention-needed (`red`). Set `TENNIS_PROCESSING_ROOM_URL` to your processing control portal in private deployment settings; without this setting, `/processing` provides a local read-only worker/queue status page. Detailed worker and queue status stay on `/processing` and refresh every 15 seconds.
+
+The home summary row provides clickable counted items for **Sessions** (grouped practice sessions), **Clips** (all clip cards), **Practice** (total practice minutes and video count, loading all processed video cards), and **Likes & highlights** (deduplicated union of liked videos, liked clips, and clips with active in-scope highlights), alongside **Players** (player count and avatar circles) and **Courts** (court count) management dialogs.
 
 ## Saved courts and home-page names
 

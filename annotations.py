@@ -272,6 +272,39 @@ class AnnotationStore:
                 result[key]={**(result[key] if key in result else self.like_seed(source,item)),'value':False}
             return result
 
+    def active_highlights_by_source(self,source_ids=None):
+        with self.db() as db:
+            if source_ids is not None:
+                ids=[s for s in source_ids if isinstance(s,str)]
+                if not ids:return {}
+                placeholders=','.join('?' for _ in ids)
+                rows=db.execute(f"SELECT source_id,data FROM annotations WHERE kind='highlight' AND json_extract(data,'$.status')='active' AND source_id IN ({placeholders}) ORDER BY id",ids).fetchall()
+            else:
+                rows=db.execute("SELECT source_id,data FROM annotations WHERE kind='highlight' AND json_extract(data,'$.status')='active' ORDER BY id").fetchall()
+        grouped={}
+        for row in rows:
+            grouped.setdefault(row['source_id'],[]).append(json.loads(row['data']))
+        return grouped
+
+    def clip_highlights(self,data,rows=None):
+        identity=data['id']
+        if rows is None:
+            rows=self.active_highlights_by_source([identity]).get(identity,[])
+        by_clip={c['id']:[] for c in data.get('clips',[])}
+        for raw in rows:
+            if raw.get('kind')!='highlight' or raw.get('status')!='active':continue
+            projected=project(raw,data)
+            if projected['status']!='active' or not projected['playback_eligible']:continue
+            text=(projected.get('body') or {}).get('text','')
+            for interval in projected.get('visible_intervals',[]):
+                cid=interval['clip_id']
+                if cid in by_clip:
+                    by_clip[cid].append(dict(id=projected['id'],start_seconds=interval['original_start'],
+                        end_seconds=interval['original_end'],local_start=interval['local_start'],text=text))
+        for items in by_clip.values():
+            items.sort(key=lambda h:(h['start_seconds'],h['id']))
+        return by_clip
+
     def write_like(self,source,item,liked,expected,publication):
         """One transaction enforces the up/down invariant, including downvote history."""
         from state import Conflict

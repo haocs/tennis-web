@@ -33,6 +33,9 @@ const NoteUI=(()=>{
    if(owner!==source||rev!==generation)return;
    if($('#notes-status'))$('#notes-status').textContent='';
    const changed=JSON.stringify(all)!==JSON.stringify(items);items=all;
+   for(const c of source.clips||[]){const hl=highlights(c);c.highlighted=hl.length>0;c.highlight_count=hl.length;}
+   const homeSession=model.sessions.find(v=>v.id===source.id);
+   if(homeSession&&homeSession!==source){for(const c of homeSession.clips||[]){const sc=source.clips.find(x=>x.id===c.id);if(sc){c.highlighted=sc.highlighted;c.highlight_count=sc.highlight_count;}}}
    if(changed){if($('#clip-list'))renderClipList();render();renderEntityNotes();markers();}
    current();
   }catch(e){const status=$('#notes-status');if(status)status.textContent='Notes unavailable. '+e.message;}
