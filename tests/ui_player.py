@@ -1475,6 +1475,10 @@ def test_desktop_autofocus_tracking_loss_and_cleanup(browser, ui_server):
     # Deterministic detections exercise framing/lifecycle independently of model
     # confidence or platform-specific rasterization of illustrated people.
     page.add_init_script("""(() => {
+      window.__cspViolations = [];
+      document.addEventListener('securitypolicyviolation', e => {
+        window.__cspViolations.push({directive: e.violatedDirective, blocked: e.blockedURI, sample: e.sample});
+      });
       window.__testCourtScene = 'two_players';
       window.Worker = class {
         constructor() { this.closed = false; }
@@ -1484,7 +1488,7 @@ def test_desktop_autofocus_tracking_loss_and_cleanup(browser, ui_server):
           } else if (data.type === 'detect') {
             const w=data.width,h=data.height;
             const person=(x,y,width,height)=>({boundingBox:{originX:x*w,originY:y*h,width:width*w,height:height*h},categories:[{categoryName:'person',score:.95}]});
-            const detections=window.__testCourtScene==='two_players'?[person(.25,.3,.08,.2),person(.6,.3,.16,.4)]:[];
+            const detections=window.__testCourtScene==='two_players'?[person(.25,.3,.08,.2),person(.6,.3,.16,.4)]:window.__testCourtScene==='close_player'?[person(.35,.1,.3,.72)]:[];
             setTimeout(() => {if (!this.closed) this.onmessage?.({data:{type:'result',epoch:data.epoch,seq:data.seq,detections}});}, 0);
           }
         }
@@ -1499,17 +1503,48 @@ def test_desktop_autofocus_tracking_loss_and_cleanup(browser, ui_server):
     expect(af_btn).to_have_attribute('data-autofocus-state', 'off')
     assert page.locator('#player').evaluate('v => v.style.transform') == ''
 
+    # Enable Dev mode from the 3-dot menu before Auto focus: shows video stats and truthful 'not measured' verdicts without starting inference.
+    expect(page.locator('#video-dev-layer')).to_be_hidden()
+    page.get_by_label('More video actions', exact=True).click()
+    dev_btn = page.get_by_role('button', name='Dev mode', exact=True)
+    expect(dev_btn).to_have_attribute('aria-pressed', 'false')
+    dev_btn.click()
+    expect(page.locator('#player-dev-mode')).to_have_attribute('aria-pressed', 'true')
+    expect(page.locator('#video-dev-layer')).to_be_visible()
+    expect(page.locator('#video-dev-stats')).to_contain_text('Video:')
+    expect(page.locator('#video-dev-stats')).to_contain_text('Auto focus: off')
+    expect(page.locator('#video-dev-stats')).to_contain_text('play not measured · swing not measured')
+    expect(page.locator('#video-dev-boxes .video-dev-box')).to_have_count(0)
+    assert int(page.locator('#player').get_attribute('data-autofocus-captures') or '0') == 0
+
     # Enable Auto focus while paused: exactly one forced capture runs on ready, and paused interval ticks do not re-capture.
     af_btn.click()
     expect(af_btn).to_have_attribute('aria-pressed', 'true')
     page.wait_for_function(
-        "() => document.querySelector('#video-autofocus')?.dataset.autofocusState === 'tracking' && Number(document.querySelector('#player')?.dataset.autofocusZoom || 1) > 1.15",
+        "() => document.querySelector('#video-autofocus')?.dataset.autofocusState === 'tracking' && Number(document.querySelector('#player')?.dataset.autofocusZoom || 1) >= 1.28",
         timeout=15000,
     )
     captures_while_paused = int(page.locator('#player').get_attribute('data-autofocus-captures') or '0')
     assert captures_while_paused == 1
     page.wait_for_timeout(420)
     assert int(page.locator('#player').get_attribute('data-autofocus-captures') or '0') == captures_while_paused
+
+    expect(page.locator('#video-dev-stats')).to_contain_text('Auto focus: tracking')
+    expect(page.locator('#video-dev-stats')).to_contain_text('Detector: captures 1 · results 1 · persons 2 · score 95%')
+    expect(page.locator('#video-dev-stats')).to_contain_text('Verdict: player tracked · steady · play not measured · swing not measured')
+    expect(page.locator('#video-dev-boxes [data-dev-box="primary"]')).to_be_visible()
+    expect(page.locator('#video-dev-boxes [data-dev-box="candidate"]')).to_be_visible()
+    stage_box = page.locator('#video-stage').bounding_box()
+    prim_box = page.locator('#video-dev-boxes [data-dev-box="primary"]').bounding_box()
+    cand_box = page.locator('#video-dev-boxes [data-dev-box="candidate"]').bounding_box()
+    assert prim_box['width'] > 80 and prim_box['height'] > 150
+    assert cand_box['width'] > 40 and cand_box['height'] > 70
+    assert prim_box['x'] > stage_box['x'] + 40 and prim_box['y'] > stage_box['y'] + 40
+    assert prim_box['x'] + prim_box['width'] <= stage_box['x'] + stage_box['width'] + 1
+    # Because the zoomed/panned video shifts the right-side player toward the center, the mapped dev box center is shifted left of unzoomed 0.68 * width.
+    prim_center_x = (prim_box['x'] - stage_box['x']) + prim_box['width'] / 2
+    assert prim_center_x < stage_box['width'] * 0.63 and prim_center_x > stage_box['width'] * 0.45
+    assert page.evaluate('() => window.__cspViolations') == []
 
     transform = page.locator('#player').evaluate('v => v.style.transform')
     m = re.match(r'translate\(([-\d.]+)px,\s*([-\d.]+)px\)\s*scale\(([\d.]+)\)', transform)
@@ -1532,11 +1567,36 @@ def test_desktop_autofocus_tracking_loss_and_cleanup(browser, ui_server):
         timeout=10000,
     )
     assert page.locator('#player').evaluate('v => v.style.transform') == ''
+    expect(page.locator('#video-dev-stats')).to_contain_text('player lost · searching')
+    expect(page.locator('#video-dev-boxes .video-dev-box')).to_have_count(0)
+
+    # Steady 1x close-player detection (no zoom animation after initial creation) still positions the box immediately via CSSOM under strict CSP.
+    page.evaluate("""() => {
+      window.__testCourtScene = 'close_player';
+      document.querySelector('#player').dispatchEvent(new Event('seeked'));
+    }""")
+    page.wait_for_function(
+        "() => document.querySelector('#video-autofocus')?.dataset.autofocusState === 'tracking' && document.querySelectorAll('#video-dev-boxes .video-dev-box').length === 1",
+        timeout=10000,
+    )
+    assert page.locator('#player').evaluate('v => v.style.transform') == ''
+    close_box = page.locator('#video-dev-boxes [data-dev-box="primary"]').bounding_box()
+    assert close_box['width'] > 200 and close_box['height'] > 300
+    assert close_box['x'] > stage_box['x'] + 200 and close_box['y'] > stage_box['y'] + 20
+    assert page.evaluate('() => window.__cspViolations') == []
+
+    # Toggling Dev mode off hides the overlay cleanly.
+    page.get_by_label('More video actions', exact=True).click()
+    dev_btn.click()
+    expect(page.locator('#player-dev-mode')).to_have_attribute('aria-pressed', 'false')
+    expect(page.locator('#video-dev-layer')).to_be_hidden()
 
     # Restore target on seeked, verify re-lock, then verify clip change resets and re-tracks cleanly.
     page.evaluate("""() => {
       window.__testCourtScene = 'two_players';
-      document.querySelector('#player').dispatchEvent(new Event('seeked'));
+      const v = document.querySelector('#player');
+      v.dispatchEvent(new Event('seeking'));
+      v.dispatchEvent(new Event('seeked'));
     }""")
     page.wait_for_function(
         "() => document.querySelector('#video-autofocus')?.dataset.autofocusState === 'tracking' && Number(document.querySelector('#player')?.dataset.autofocusZoom || 1) > 1.15",

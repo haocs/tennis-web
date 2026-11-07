@@ -56,7 +56,17 @@
 .player-more summary::-webkit-details-marker{display:none}
 .player-more-list{position:absolute;right:0;bottom:calc(100% + 8px);min-width:220px;padding:6px;background:var(--white);color:var(--ink);border:1px solid var(--line);border-radius:12px;box-shadow:0 8px 25px #0003;z-index:5}
 .player-more-list button{display:block;width:100%;text-align:left;padding:12px;border:0;border-radius:7px;background:transparent;color:inherit;font-size:13px;min-height:44px}
-.player-more-list button:hover{background:var(--lime)}.player-more-list p{margin:4px 12px 8px;font-size:11px;color:var(--muted)}
+.player-more-list button:hover{background:var(--lime)}.player-more-list button[aria-pressed="true"]{font-weight:600;background:#eef3e0}.player-more-list p{margin:4px 12px 8px;font-size:11px;color:var(--muted)}
+.video-dev-layer{position:absolute;inset:0;z-index:1;pointer-events:none;overflow:hidden}#video-dev-layer[hidden]{display:none!important}
+.video-dev-stats{position:absolute;top:42px;left:12px;max-width:min(440px,calc(100% - 24px));padding:7px 10px;border-radius:8px;background:#07120dcc;border:1px solid #ffffff2e;color:#eef4e4;font:11px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;font-variant-numeric:tabular-nums;pointer-events:none;backdrop-filter:blur(4px)}
+.video-dev-line{white-space:normal;overflow-wrap:anywhere}
+.video-dev-boxes{position:absolute;inset:0;pointer-events:none}
+.video-dev-box{position:absolute;border:2px solid var(--lime);border-radius:6px;box-shadow:0 0 0 1px #0008,inset 0 0 0 1px #0006;pointer-events:none}
+.video-dev-box.candidate{border-color:#a8d5f2;border-style:dashed;opacity:.85}
+.video-dev-box.holding{border-color:#efc67f;border-style:dashed}
+.video-dev-box-tag{position:absolute;left:2px;top:2px;padding:1px 5px;border-radius:4px;background:var(--lime);color:var(--ink);font:600 10px/1.3 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:nowrap;max-width:calc(100% - 4px);overflow:hidden;text-overflow:ellipsis}
+.video-dev-box.candidate .video-dev-box-tag{background:#a8d5f2;color:#0b2230}
+.video-dev-box.holding .video-dev-box-tag{background:#efc67f;color:#2b1d07}
 button.clip-row{width:100%;text-align:left;color:var(--ink);border:0;border-bottom:1px solid var(--line);border-radius:0;grid-template-columns:43px minmax(140px,1fr) minmax(100px,180px) 75px}
 button.clip-row:hover{background:#eef3e0}button.clip-row:focus-visible{outline:3px solid #7a9738;outline-offset:-3px}
 .clip-row .clip-name,.clip-row .clip-origin{display:block}
