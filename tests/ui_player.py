@@ -878,12 +878,14 @@ def test_session_metadata_and_entity_note_targets(browser,ui_server,width):
     expect(page.locator('.session-note').first).to_have_text('Recovery drills')
     page.goto(ui_server+f'/review/{ID}?clip={CLIP}')
     page.get_by_label('More video actions',exact=True).click()
-    page.get_by_role('button',name='Notes',exact=True).click()
-    expect(page.get_by_role('dialog',name='Clip notes',exact=True)).to_be_visible()
+    expect(page.locator('.player-more-list').get_by_role('button',name='Notes',exact=True)).to_have_count(0)
+    page.get_by_label('More video actions',exact=True).click()
+    page.get_by_role('button',name='Edit clip',exact=True).click()
+    expect(page.get_by_role('dialog',name='Clip details',exact=True)).to_be_visible()
     page.get_by_role('button',name='Add note',exact=True).click()
     assert page.locator('#note-scope option').evaluate_all('(items)=>items.map(i=>i.value)')==['clip']
     page.get_by_role('button',name='Close note editor',exact=True).click()
-    page.get_by_role('button',name='Close entity notes',exact=True).click()
+    page.get_by_role('button',name='Close',exact=True).click()
     assert not page.evaluate('document.documentElement.scrollWidth>innerWidth')
     page.goto(ui_server+'/')
     page.locator('.practice-options > summary').first.click()
@@ -936,6 +938,147 @@ def test_review_actions_follow_video_or_clip_and_editor_keeps_its_target(browser
     # Restore the clip title so subsequent engines exercise the same fixture.
     clip=updated['clips'][0]
     r=page.request.put(ui_server+f'/api/videos/{ID}/clips/{CLIP}/details',data=dict(title='Clip 01',publication=updated['published_at'],version=clip['details']['version']),headers={'X-Tennis-Request':'1'});assert r.ok
+    page.close()
+
+
+def test_edit_dialog_entity_notes_scope_history_and_conflicts(browser,ui_server):
+    page=browser.new_page(viewport={'width':1280,'height':900})
+    _archive_test_metadata(page,ui_server)
+    headers={'X-Tennis-Request':'1'}
+    initial=page.request.get(ui_server+f'/api/sessions/{ID}').json()
+    pub=initial['published_at']
+    page.goto(ui_server+f'/review/{ID}?clip={CLIP}')
+    expect(page.locator('#video-seek')).to_be_enabled()
+    # 1. Create a clip note directly in Edit clip even if playback switches clip while open.
+    page.get_by_role('button',name='Edit clip',exact=True).click()
+    expect(page.get_by_role('dialog',name='Clip details',exact=True)).to_be_visible()
+    page.get_by_role('textbox',name='Note',exact=True).fill('Clip 1 primary note')
+    page.evaluate("()=>{model.current='cccccccccccccccccccccccc';updatePlayerState();}")
+    page.get_by_role('button',name='Save details',exact=True).click()
+    expect(page.locator('#edit-dialog')).not_to_be_visible()
+    # Switch back to Clip 1 and verify existing note is retained and editable.
+    page.evaluate(f"()=>{{model.current='{CLIP}';updatePlayerState();}}")
+    page.get_by_role('button',name='Edit clip',exact=True).click()
+    expect(page.locator('#edit-note')).to_have_value('Clip 1 primary note')
+    expect(page.locator('#entity-notes-list')).to_contain_text('Clip 1 primary note')
+    # Concurrent update in another client triggers a conflict without losing the draft or misreporting partial save.
+    notes=[a for a in page.request.get(ui_server+f'/api/recordings/{ID}/metadata').json()['annotations'] if a['record_class']=='entity_metadata' and a['kind']=='note' and a['status']=='active']
+    assert len(notes)==1 and notes[0]['target']['clip_id']==CLIP
+    note_id=notes[0]['id']
+    r=page.request.put(ui_server+f'/api/metadata/{note_id}',headers=headers,data=dict(publication=pub,version=notes[0]['version'],body=dict(text='Concurrent remote clip note')))
+    assert r.ok
+    page.get_by_role('textbox',name='Title',exact=True).fill('Clip 01 retitled')
+    page.get_by_role('textbox',name='Note',exact=True).fill('Stale local clip note draft')
+    page.get_by_role('button',name='Save details',exact=True).click()
+    expect(page.locator('#edit-dialog')).to_be_visible()
+    expect(page.locator('#edit-error')).to_contain_text('Details saved, but note could not be saved')
+    expect(page.locator('#edit-note')).to_have_value('Stale local clip note draft')
+    expect(page.locator('#edit-load-latest-note')).to_be_visible()
+    page.locator('#edit-load-latest-note').click()
+    expect(page.locator('#edit-note')).to_have_value('Concurrent remote clip note')
+    page.get_by_role('textbox',name='Note',exact=True).fill('Merged clip note v3')
+    page.get_by_role('button',name='Save details',exact=True).click()
+    expect(page.locator('#edit-dialog')).not_to_be_visible()
+    # 2. Multiple existing notes on the same clip are preserved and history is retained.
+    r=page.request.post(ui_server+'/api/metadata',headers=headers,data=dict(source_id=ID,publication=pub,kind='note',target=dict(scope='clip',clip_id=CLIP,start_seconds=0,end_seconds=2),body=dict(text='Second independent clip note'),request_id=f'extra-clip-note-{browser.browser_type.name}'))
+    assert r.status==201
+    page.get_by_role('button',name='Edit clip',exact=True).click()
+    expect(page.locator('#entity-notes-list .note-item')).to_have_count(2)
+    expect(page.locator('#entity-notes-list')).to_contain_text('Merged clip note v3')
+    expect(page.locator('#entity-notes-list')).to_contain_text('Second independent clip note')
+    expect(page.locator('#edit-note')).to_have_value('')
+    first_item=page.locator('#entity-notes-list .note-item').filter(has_text='Merged clip note v3')
+    first_item.get_by_label('Note actions',exact=True).click()
+    first_item.get_by_role('button',name='History',exact=True).click()
+    expect(first_item.locator('.note-history')).to_contain_text('v1')
+    expect(first_item.locator('.note-history')).to_contain_text('v2')
+    expect(first_item.locator('.note-history')).to_contain_text('v3')
+    page.get_by_role('textbox',name='Title',exact=True).fill('Clip 01')
+    page.get_by_role('button',name='Save details',exact=True).click()
+    expect(page.locator('#edit-dialog')).not_to_be_visible()
+    # Both clip notes remain active after saving title details.
+    active_clip_notes=[a for a in page.request.get(ui_server+f'/api/recordings/{ID}/metadata').json()['annotations'] if a['record_class']=='entity_metadata' and a['kind']=='note' and a['status']=='active' and a['target'].get('clip_id')==CLIP]
+    assert len(active_clip_notes)==2
+    # 3. Video notes stay separate from Clip notes.
+    page.get_by_role('button',name='Full practice ↗',exact=True).click()
+    page.get_by_role('button',name='Edit video',exact=True).click()
+    expect(page.get_by_role('dialog',name='Video details',exact=True)).to_be_visible()
+    expect(page.locator('#entity-notes-list .note-item')).to_have_count(0)
+    page.get_by_role('textbox',name='Note',exact=True).fill('Whole video note')
+    page.get_by_role('button',name='Save details',exact=True).click()
+    expect(page.locator('#edit-dialog')).not_to_be_visible()
+    page.get_by_role('button',name='Edit video',exact=True).click()
+    expect(page.locator('#edit-note')).to_have_value('Whole video note')
+    expect(page.locator('#entity-notes-list')).to_contain_text('Whole video note')
+    page.get_by_role('button',name='Close',exact=True).click()
+    # 4. Delayed details save preserves captured entity, note ID/version, and draft even if globals mutate mid-save.
+    page.locator('#clip-list [data-play]').first.click()
+    page.get_by_role('button',name='Edit clip',exact=True).click()
+    expect(page.get_by_role('dialog',name='Clip details',exact=True)).to_be_visible()
+    # Archive the second clip note so Clip 1 has one active note to test single-note captured update across await.
+    second_item=page.locator('#entity-notes-list .note-item').filter(has_text='Second independent clip note')
+    second_item.get_by_label('Note actions',exact=True).click()
+    second_item.get_by_role('button',name='Archive',exact=True).click()
+    expect(page.locator('#edit-note')).to_have_value('Merged clip note v3')
+    page.evaluate("""()=>{
+        const orig=window.fetch;
+        window.fetch=async function(url,opts){
+            if(String(url).includes('/details')){
+                window.fetch=orig;
+                model.current='cccccccccccccccccccccccc';updatePlayerState();
+                NoteUI.openEntityNotes({video_id:model.session.id,clip_id:'cccccccccccccccccccccccc',publication:model.session.published_at});
+                document.querySelector('#edit-note').value='Mutated mid-await wrong clip draft';
+            }
+            return orig.apply(this,arguments);
+        };
+    }""")
+    page.get_by_role('textbox',name='Title',exact=True).fill('Clip 01 captured')
+    page.get_by_role('textbox',name='Note',exact=True).fill('Captured before await v4')
+    page.get_by_role('button',name='Save details',exact=True).click()
+    expect(page.locator('#edit-dialog')).not_to_be_visible()
+    all_notes=[a for a in page.request.get(ui_server+f'/api/recordings/{ID}/metadata').json()['annotations'] if a['record_class']=='entity_metadata' and a['kind']=='note' and a['status']=='active']
+    clip1_notes=[a for a in all_notes if a['target'].get('clip_id')==CLIP]
+    clip2_notes=[a for a in all_notes if a['target'].get('clip_id')=='cccccccccccccccccccccccc']
+    assert len(clip1_notes)==1 and clip1_notes[0]['id']==note_id and clip1_notes[0]['body']['text']=='Captured before await v4' and clip1_notes[0]['version']==4
+    assert len(clip2_notes)==0
+    r=page.request.put(ui_server+f'/api/videos/{ID}/clips/{CLIP}/details',data=dict(title='Clip 01',publication=pub,version=page.request.get(ui_server+f'/api/sessions/{ID}').json()['clips'][0]['details']['version']),headers=headers);assert r.ok
+    # 5. Failed initial metadata GET blocks note creation instead of duplicating an unknown existing note.
+    fail_meta={'active':True}
+    post_calls=[]
+    page.on('request',lambda req:post_calls.append(req.url) if req.method=='POST' and '/api/metadata' in req.url else None)
+    def handle_meta(route):
+        if fail_meta['active']:
+            route.fulfill(status=503,json={'error':'Metadata store offline'})
+        else:
+            route.continue_()
+    page.route(f'**/api/recordings/{ID}/metadata*',handle_meta)
+    page.goto(ui_server+f'/review/{ID}?clip={CLIP}')
+    expect(page.locator('#video-seek')).to_be_enabled()
+    page.get_by_role('button',name='Edit clip',exact=True).click()
+    expect(page.locator('#entity-notes-list')).to_contain_text('Notes unavailable')
+    page.get_by_role('textbox',name='Note',exact=True).fill('Draft while metadata offline')
+    page.get_by_role('button',name='Save details',exact=True).click()
+    expect(page.locator('#edit-dialog')).to_be_visible()
+    expect(page.locator('#edit-error')).to_contain_text('Notes unavailable')
+    expect(page.locator('#edit-note')).to_have_value('Draft while metadata offline')
+    assert not post_calls
+    # Once metadata recovers, saveEditNote sees the existing server note was unknown when typed and prompts to load it rather than duplicating.
+    fail_meta['active']=False
+    page.get_by_role('button',name='Save details',exact=True).click()
+    expect(page.locator('#edit-dialog')).to_be_visible()
+    expect(page.locator('#edit-error')).to_contain_text('Existing notes loaded')
+    expect(page.locator('#edit-load-latest-note')).to_be_visible()
+    assert not post_calls
+    page.locator('#edit-load-latest-note').click()
+    expect(page.locator('#edit-note')).to_have_value('Captured before await v4')
+    page.get_by_role('textbox',name='Note',exact=True).fill('Recovered clip note v5')
+    page.get_by_role('button',name='Save details',exact=True).click()
+    expect(page.locator('#edit-dialog')).not_to_be_visible()
+    assert not post_calls
+    final_clip1=[a for a in page.request.get(ui_server+f'/api/recordings/{ID}/metadata').json()['annotations'] if a['record_class']=='entity_metadata' and a['kind']=='note' and a['status']=='active' and a['target'].get('clip_id')==CLIP]
+    assert len(final_clip1)==1 and final_clip1[0]['id']==note_id and final_clip1[0]['body']['text']=='Recovered clip note v5' and final_clip1[0]['version']==5
+    page.unroute(f'**/api/recordings/{ID}/metadata*',handle_meta)
+    _archive_test_metadata(page,ui_server)
     page.close()
 
 
@@ -1145,13 +1288,14 @@ def test_add_moment_optional_note_end_and_captured_scope(browser,ui_server,width
     rows=page.request.get(ui_server+f'/api/recordings/{ID}/moments').json()['moments']
     assert next(m for m in rows if m['payload']['text']=='Captured clip moment')['start_ms']==500
     expect(page.locator('#notes-list')).not_to_contain_text('Captured clip moment')
-    # Untimed notes have their own entity UI, outside Moments.
-    page.get_by_label('More video actions',exact=True).click()
-    page.get_by_role('button',name='Notes',exact=True).click()
+    # Untimed notes live in Edit clip / Edit video, outside Moments and the 3-dot menu.
+    page.get_by_role('button',name='Edit clip',exact=True).click()
+    expect(page.get_by_role('dialog',name='Clip details',exact=True)).to_be_visible()
     page.get_by_role('button',name='Add note',exact=True).click()
     page.get_by_role('textbox',name='Note',exact=True).fill('Second clip metadata')
     page.get_by_role('button',name='Save note',exact=True).click()
     expect(page.locator('#entity-notes-list')).to_contain_text('Second clip metadata')
+    expect(page.locator('#edit-note')).to_have_value('Second clip metadata')
     expect(clips.nth(1).locator('.note-moment')).to_have_count(0)
     expect(page.locator('#entity-notes-list').get_by_role('button',name='Jump to moment',exact=True)).to_have_count(0)
     note=page.locator('#entity-notes-list .note-item').filter(has_text='Second clip metadata')
@@ -1160,7 +1304,8 @@ def test_add_moment_optional_note_end_and_captured_scope(browser,ui_server,width
     page.get_by_role('textbox',name='Note',exact=True).fill('Second clip metadata revised')
     page.get_by_role('button',name='Save note',exact=True).click()
     expect(page.locator('#entity-notes-list')).to_contain_text('Second clip metadata revised')
-    page.get_by_role('button',name='Close entity notes',exact=True).click()
+    expect(page.locator('#edit-note')).to_have_value('Second clip metadata revised')
+    page.get_by_role('button',name='Close',exact=True).click()
     expect(page.locator('#notes-list')).not_to_contain_text('Second clip metadata')
     assert not page.evaluate('document.documentElement.scrollWidth>innerWidth')
     _archive_test_metadata(page,ui_server)

@@ -247,28 +247,49 @@ function updateReviewHeading(){
  document.title=`${clip?clip.title+' · ':''}${s.title} — Courtside`;
 }
 function openEdit(){
+ if(model.editSaving)return;
  const s=model.session,clip=model.mode==='clip'?s.clips.find(c=>c.id===model.current):null;
+ model.editGen=(model.editGen||0)+1;
  model.editTarget={video_id:s.id,clip_id:clip?.id||null,publication:s.published_at};
  model.editVersion=clip?clip.details.version:s.overrides.version;
+ model.editInitialTitle=(clip?clip.title:s.title).trim();
+ model.editInitialLocation=(s.location_label||'').trim();
  $('#edit-dialog-title').textContent=clip?'Clip details':'Video details';$('#edit-context').textContent=clip?s.title+' · Original '+preciseTime(clip.original_start_seconds)+'–'+preciseTime(clip.original_end_seconds):s.title;
  $('#edit-title').value=clip?clip.title:s.title;$('#edit-location').value=s.location_label||'';$('#edit-location-row').hidden=!!clip;$('#edit-video-players').hidden=!!clip;$('#edit-clip-players').hidden=!clip;
  $('#edit-player-badges').innerHTML=PlayerUI.avatars(s.recording_players,true);$('#edit-clip-player-badges').innerHTML=PlayerUI.avatars(clip?.players||[],true);
  $('#clip-detail-player-edit').onclick=()=>PlayerUI.openClip(model.editTarget.clip_id);
- $('#edit-error').textContent='';$('#edit-dialog').showModal();
+ NoteUI.openEntityNotes(model.editTarget);
+ $('#edit-error').textContent='';$('#edit-load-latest-note').hidden=true;$('#edit-dialog').showModal();
 }
-$('#close-edit').addEventListener('click',()=>$('#edit-dialog').close());
+$('#close-edit').addEventListener('click',()=>{if(!model.editSaving)$('#edit-dialog').close();});
+$('#edit-dialog').addEventListener('cancel',event=>{if(model.editSaving)event.preventDefault();});
 $('#edit-form').addEventListener('submit',async event=>{
- event.preventDefault();const s=model.session,target={...model.editTarget};const button=$('button[type=submit]',$('#edit-form'));button.disabled=true;
+ event.preventDefault();if(model.editSaving)return;
+ const s=model.session,editGen=model.editGen,target={...model.editTarget},editVersion=model.editVersion;
+ const title=$('#edit-title').value.trim(),location=$('#edit-location').value.trim();
  const clip=target.clip_id?s.clips.find(c=>c.id===target.clip_id):null;
+ const detailsChanged=title!==model.editInitialTitle||(!clip&&location!==model.editInitialLocation);
+ const noteSnapshot=NoteUI.captureEditNote(target);
+ const noteChanged=noteSnapshot.changed;
+ const button=$('button[type=submit]',$('#edit-form'));
+ model.editSaving=true;button.disabled=true;$('#close-edit').disabled=true;
+ let detailsSaved=false;
  try{
-  if(s.id!==target.video_id||(target.clip_id&&(!clip||s.published_at!==target.publication)))throw new Error('This clip changed. Close the editor and refresh before saving.');
-  const path=target.clip_id?`/api/videos/${target.video_id}/clips/${target.clip_id}/details`:`/api/videos/${target.video_id}/details`;
-  const body={title:$('#edit-title').value.trim(),version:model.editVersion,...(clip?{publication:target.publication}:{location:$('#edit-location').value.trim()})};
-  const result=await api(path,{method:'PUT',body:JSON.stringify(body)});
-  if(clip){clip.details=result;clip.title=result.value.title;}else{s.overrides=result;s.title=result.value.title;s.location_label=result.value.location;}
-  updateReviewHeading();$('#review-location').textContent='⌾ '+locationText(s);renderClipList();$('#edit-dialog').close();toast(clip?'Clip details saved.':'Video details saved.');
- }catch(error){$('#edit-error').textContent=error.message;/* Keep the captured entity and draft on conflict. */}
- finally{button.disabled=false;}
+  if(s.id!==target.video_id||(target.clip_id&&(!clip||s.published_at!==target.publication))||noteSnapshot.mismatch)throw new Error('This clip changed. Close the editor and refresh before saving.');
+  if(detailsChanged||!noteChanged){
+   const path=target.clip_id?`/api/videos/${target.video_id}/clips/${target.clip_id}/details`:`/api/videos/${target.video_id}/details`;
+   const body={title,version:editVersion,...(clip?{publication:target.publication}:{location})};
+   const result=await api(path,{method:'PUT',body:JSON.stringify(body)});
+   if(clip){clip.details=result;clip.title=result.value.title;}else{s.overrides=result;s.title=result.value.title;s.location_label=result.value.location;}
+   if(model.editGen===editGen){model.editVersion=result.version;model.editInitialTitle=result.value.title;if(!clip)model.editInitialLocation=result.value.location||'';}
+   updateReviewHeading();$('#review-location').textContent='⌾ '+locationText(s);renderClipList();
+   detailsSaved=detailsChanged;
+  }
+  if(noteChanged)await NoteUI.saveEditNote(noteSnapshot);
+  if(model.editGen===editGen)$('#edit-dialog').close();
+  toast(clip?'Clip details saved.':'Video details saved.');
+ }catch(error){if(model.editGen===editGen)$('#edit-error').textContent=detailsSaved?`Details saved, but note could not be saved: ${error.message}`:error.message;/* Keep the captured entity and draft on conflict. */}
+ finally{model.editSaving=false;button.disabled=false;$('#close-edit').disabled=false;}
 });
 async function refreshStatus(){try{model.status=await api('/api/status');updateProcessingDot();const panel=$('#processing-status');if(panel){panel.innerHTML=location.pathname==='/processing'?statusHTML():workerStatusHTML();applyBars();}}catch(error){model.status={available:false,error:true};updateProcessingDot();const panel=$('#processing-status');if(panel){panel.innerHTML=location.pathname==='/processing'?statusHTML():workerStatusHTML();}}}
 async function refreshShared(){if(document.hidden||['/processing','/learning'].includes(location.pathname))return;try{if(model.session){const fresh=await api(`/api/sessions/${model.session.id}`);const playersChanged=JSON.stringify([fresh.players,fresh.player_assignment,fresh.clips.map(c=>[c.main_player,c.player_assignment])])!==JSON.stringify([model.session.players,model.session.player_assignment,model.session.clips.map(c=>[c.main_player,c.player_assignment])]);const changed=playersChanged||fresh.clips.some((c,i)=>c.like.version!==model.session.clips[i]?.like.version||c.details.version!==model.session.clips[i]?.details.version||c.highlighted!==model.session.clips[i]?.highlighted||c.highlight_count!==model.session.clips[i]?.highlight_count)||fresh.like.version!==model.session.like.version;model.session.players=fresh.players;model.session.recording_players=fresh.recording_players;model.session.player_assignment=fresh.player_assignment;model.session.like=fresh.like;model.session.overrides=fresh.overrides;model.session.title=fresh.title;model.session.location_label=fresh.location_label;model.session.court=fresh.court;model.session.court_status=fresh.court_status;model.session.court_name=fresh.court_name;fresh.clips.forEach(c=>{const current=model.session.clips.find(v=>v.id===c.id);if(current){current.like=c.like;current.highlighted=c.highlighted;current.highlight_count=c.highlight_count;current.highlights=c.highlights;current.title=c.title;current.details=c.details;current.main_player=c.main_player;current.players=c.players;current.player_assignment=c.player_assignment;}});updateReviewHeading();$('#review-location').textContent='⌾ '+locationText(fresh);if(changed){if(playersChanged){model.players=(await api('/api/players')).players;PlayerUI.syncReview();updatePlayerDownload();}refreshLikeButtons();renderClipList();}}else{const data=await api('/api/sessions');const fingerprint=JSON.stringify([data.players,data.courts,data.practice_groups,data.sessions.map(s=>[s.id,s.published_at,s.recorded_at_iso,s.like,s.overrides,s.players,s.player_assignment,s.clips.map(c=>[c.like,c.highlighted,c.highlight_count,c.main_player,c.player_assignment])])]);if(fingerprint!==model.fingerprint){model.fingerprint=fingerprint;model.sessions=data.sessions;model.practiceGroups=data.practice_groups||[];model.courts=data.courts||[];model.players=data.players||[];model.libraryAvailable=data.library_available;model.invalidSessions=data.invalid_sessions;PlayerUI.syncHome();homeResults();nav();CourtUI.renderSaved();}}}catch(error){/* Keep the current player and last loaded library during a transient outage. */}}
