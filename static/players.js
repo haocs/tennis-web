@@ -4,6 +4,7 @@ const PlayerUI = (() => {
  const levels={kids:'Kids',beginner:'Beginner',intermediate:'Intermediate',experienced:'Experienced',pro:'Pro'};
  const initials=p=>p.name.trim().split(/\s+/).slice(0,2).map(s=>[...s][0]).join('').toLocaleUpperCase();
  function avatars(players=[],full=false){return players.map(p=>`<span class="player-chip" title="${esc(p.name)}" data-player-id="${p.id}"${full?'':` role="img" aria-label="${esc(p.name)}"`}><span class="player-avatar" aria-hidden="true">${esc(initials(p))}</span>${full?`<span>${esc(p.name)}</span>`:''}</span>`).join('');}
+ function avatarStack(players=[],max=4){if(!players.length)return '';const shown=players.slice(0,max),extra=players.length-shown.length;return `<span class="player-avatar-stack" aria-hidden="true">${shown.map(p=>`<span class="player-avatar" title="${esc(p.name)}">${esc(initials(p))}</span>`).join('')}${extra>0?`<span class="player-avatar player-avatar-more">+${extra}</span>`:''}</span>`;}
  function options(value){return `<option value="">All players</option>${model.players.map(p=>`<option value="${p.id}"${value===p.id?' selected':''}>${esc(p.name)}</option>`).join('')}`;}
  function filter(id,value,label='Filter by player'){return `<select id="${id}" aria-label="${label}">${options(value)}</select>`;}
  function syncHome(){const field=$('#home-player-filter');if(field)field.innerHTML=options(model.homePlayer);}
@@ -106,5 +107,5 @@ const PlayerUI = (() => {
    }catch(error){$('#player-picker-error').textContent=error.message;}finally{b.disabled=false;}
   };
  }
- return {openClip:id=>openPicker('clip',id),init,avatars,filter,syncHome,matches,openSaved,bindReview,syncReview,current};
+ return {openClip:id=>openPicker('clip',id),init,avatars,avatarStack,filter,syncHome,matches,openSaved,bindReview,syncReview,current};
 })();

@@ -600,7 +600,7 @@ def test_player_profiles_assignments_and_filters(browser, ui_server):
     page = browser.new_page(viewport={'width':390,'height':844},has_touch=True)
     name='Player '+browser.browser_type.name
     page.goto(ui_server+'/')
-    page.get_by_role('button',name='Saved players',exact=True).click()
+    page.locator('#manage-players').click()
     page.get_by_role('button',name='Add player',exact=True).click()
     page.get_by_label('Name',exact=True).fill(name)
     page.get_by_label('Height (cm, optional)',exact=True).fill('172')
@@ -630,7 +630,7 @@ def test_player_profiles_assignments_and_filters(browser, ui_server):
     page.get_by_role('combobox',name='Filter by player',exact=True).select_option(label=name)
     expect(page.locator('.practice-card')).to_have_count(1)
     expect(page.locator('.practice-card .player-chip').first).to_be_visible()
-    page.get_by_role('button',name='Saved players',exact=True).click()
+    page.locator('#manage-players').click()
     row=page.locator('.saved-player-row').filter(has_text=name)
     row.get_by_role('button',name='Edit',exact=True).click()
     page.get_by_label('Name',exact=True).fill(name+' updated')
@@ -1548,3 +1548,203 @@ def test_autofocus_failure_state_and_mobile_hidden(browser, ui_server):
     assert desktop.evaluate("() => window.__afWorkers.at(-1).terminated") is True
     assert desktop.locator('#player').evaluate('v => v.style.transform') == ''
     desktop.close()
+
+
+def test_home_redesign_views_counts_deduplication_and_status_dot(browser, ui_server):
+    page = browser.new_page(viewport={'width': 1280, 'height': 900})
+    errors = []
+    page.on('pageerror', lambda err: errors.append(str(err)))
+    _archive_test_metadata(page, ui_server)
+    headers = {'X-Tennis-Request': '1'}
+
+    # Mock /api/status dynamically to verify green, yellow, and red dot states on top Processing nav.
+    status_state = {'mode': 'green'}
+    def handle_status(route):
+        mode = status_state['mode']
+        if mode == 'http_error':
+            route.fulfill(status=500, json={'error': 'Status backend error'})
+            return
+        payload = {
+            'available': mode != 'unavailable',
+            'stale': mode == 'stale',
+            'has_error': mode == 'red_error',
+            'service': 'Stopped' if mode == 'paused' else 'Running',
+            'stage': 'Idle',
+            'heartbeat': 1700000000,
+            'current_video': None,
+            'progress': None,
+            'files': [{'name': 'test.mov', 'status': 'needs_attention', 'error': 'failed'}] if mode == 'file_error' else [],
+        }
+        route.fulfill(json=payload)
+
+    page.route('**/api/status', handle_status)
+
+    # Ensure at least one player exists so avatar circles render on the Players summary item.
+    players = page.request.get(ui_server + '/api/players').json()['players']
+    if not players:
+        r = page.request.post(ui_server + '/api/players', headers=headers, data={'name': 'Home Player', 'height_cm': 175, 'level': 'intermediate'})
+        assert r.ok
+        players = page.request.get(ui_server + '/api/players').json()['players']
+
+    page.goto(ui_server + '/')
+    # 1. Top nav order and Processing status dot states (green / yellow / red), no worker status card in home overview.
+    assert page.locator('.site-header nav a').evaluate_all("els => els.map(e => e.id)") == ['nav-library', 'nav-learning', 'nav-processing']
+    assert [t.strip() for t in page.locator('.site-header nav a').all_inner_texts()] == ['Library', 'Learning', 'Processing']
+    expect(page.locator('#nav-processing')).to_have_attribute('href', '/processing')
+    expect(page.locator('.library-overview #processing-status')).to_have_count(0)
+    expect(page.locator('.library-overview .worker-status')).to_have_count(0)
+
+    dot = page.locator('#nav-processing-dot')
+    expect(dot).to_have_attribute('data-status', 'green')
+    expect(dot).to_have_class(re.compile(r'\bstatus-green\b'))
+
+    for mode in ('paused', 'stale', 'unavailable'):
+        status_state['mode'] = mode
+        page.evaluate('() => refreshStatus()')
+        expect(dot).to_have_attribute('data-status', 'yellow')
+        expect(dot).to_have_class(re.compile(r'\bstatus-yellow\b'))
+
+    for mode in ('red_error', 'file_error', 'http_error'):
+        status_state['mode'] = mode
+        page.evaluate('() => refreshStatus()')
+        expect(dot).to_have_attribute('data-status', 'red')
+        expect(dot).to_have_class(re.compile(r'\bstatus-red\b'))
+
+    status_state['mode'] = 'green'
+    page.evaluate('() => refreshStatus()')
+    expect(dot).to_have_attribute('data-status', 'green')
+
+    # 2. Summary row items, counts, and entity dialogs (no "Saved players" wording on home button).
+    expect(page.locator('#stat-sessions')).to_have_text('1')
+    expect(page.locator('#stat-clips')).to_have_text('3')
+    expect(page.locator('#stat-minutes')).to_have_text('0m')
+    expect(page.locator('#stat-videos')).to_have_text('1 video')
+    expect(page.locator('#stat-likes')).to_have_text('2')
+    expect(page.locator('#stat-players')).to_have_text(str(len(players)))
+    expect(page.locator('#manage-players .player-avatar-stack .player-avatar').first).to_be_visible()
+    assert 'saved players' not in page.locator('#manage-players').inner_text().lower()
+    expect(page.locator('#stat-courts')).to_have_text('1')
+    expect(page.locator('#label-courts')).to_have_text('Court')
+
+    page.locator('#manage-players').click()
+    expect(page.locator('#players-dialog')).to_be_visible()
+    page.get_by_role('button', name='Close saved players', exact=True).click()
+    expect(page.locator('#players-dialog')).not_to_be_visible()
+
+    page.locator('#manage-courts').click()
+    expect(page.locator('#courts-dialog')).to_be_visible()
+    page.get_by_role('button', name='Close saved courts', exact=True).click()
+    expect(page.locator('#courts-dialog')).not_to_be_visible()
+
+    # 3. Default Sessions view, then in-place switching to Clips, Practice, and Likes & highlights + URL/history.
+    expect(page.locator('#summary-sessions')).to_have_attribute('aria-current', 'page')
+    expect(page.locator('#home-section-title')).to_have_text('Sessions')
+    expect(page.locator('#result-count')).to_have_text('1 session')
+    expect(page.locator('#session-grid .practice-card')).to_have_count(1)
+
+    page.locator('#summary-clips').click()
+    expect(page).to_have_url(ui_server + '/#clips')
+    expect(page.locator('#summary-clips')).to_have_attribute('aria-current', 'page')
+    expect(page.locator('#home-section-title')).to_have_text('Clips')
+    expect(page.locator('#result-count')).to_have_text('3 clips')
+    expect(page.locator('#session-grid .session-card[data-card-kind="clip"]')).to_have_count(3)
+    expect(page.locator('#session-grid .session-card .card-visual img').nth(0)).to_have_attribute('src', re.compile(f'/clips/{CLIP}/poster'))
+
+    # Sort clips in Clips view (latest/oldest/longest/shortest) and search filter + empty state.
+    page.locator('#search').fill('nonexistent-query-xyz')
+    expect(page.locator('#result-count')).to_have_text('0 clips')
+    expect(page.locator('#session-grid .empty h3')).to_have_text('No matches')
+    page.locator('#search').fill('')
+    expect(page.locator('#result-count')).to_have_text('3 clips')
+
+    page.locator('#summary-practice').click()
+    expect(page).to_have_url(ui_server + '/#practice')
+    expect(page.locator('#summary-practice')).to_have_attribute('aria-current', 'page')
+    expect(page.locator('#home-section-title')).to_have_text('Practice')
+    expect(page.locator('#result-count')).to_have_text('1 video')
+    expect(page.locator('#session-grid .session-card[data-card-kind="video"]')).to_have_count(1)
+    expect(page.locator('#session-grid .session-card .card-visual img').first).to_have_attribute('src', re.compile(f'/api/sessions/{ID}/poster'))
+
+    # 4. Likes & highlights view: deduplication of liked+highlighted clip, multiple highlights, clip vs video likes, and exclusion of archived/out-of-range highlights.
+    page.locator('#summary-likes').click()
+    expect(page).to_have_url(ui_server + '/#likes')
+    expect(page.locator('#summary-likes')).to_have_attribute('aria-current', 'page')
+    expect(page.locator('#home-section-title')).to_have_text('Likes & highlights')
+    expect(page.locator('#result-count')).to_have_text('2 items')
+    expect(page.locator('#session-grid .session-card')).to_have_count(2)
+
+    pub = page.request.get(ui_server + f'/api/sessions/{ID}').json()['published_at']
+    c2_id = 'c' * 24
+    suffix = browser.browser_type.name
+    # Highlighting Clip 1 (already liked) must NOT increase count or create a duplicate card; badge becomes LIKED · ★ HIGHLIGHT.
+    h1_res = page.request.post(
+        ui_server + '/api/annotations',
+        headers=headers,
+        data={'source_id': ID, 'publication': pub, 'kind': 'highlight', 'target': {'scope': 'point', 'start_seconds': 0.5}, 'body': {'text': 'Clip 1 highlight'}, 'request_id': f'hl-71-c1-{suffix}'},
+    )
+    assert h1_res.ok
+    h1 = h1_res.json()
+    # Highlighting Clip 2 (not liked) twice + a plain note on Clip 3:
+    # Clip 2 must appear ONCE with clip thumbnail and ★ HIGHLIGHT badge; Clip 3 must not appear.
+    h2a_res = page.request.post(
+        ui_server + '/api/annotations',
+        headers=headers,
+        data={'source_id': ID, 'publication': pub, 'kind': 'highlight', 'target': {'scope': 'point', 'start_seconds': 2.5}, 'body': {'text': 'Clip 2 highlight A'}, 'request_id': f'hl-71-c2a-{suffix}'},
+    )
+    assert h2a_res.ok
+    h2a = h2a_res.json()
+    h2b_res = page.request.post(
+        ui_server + '/api/annotations',
+        headers=headers,
+        data={'source_id': ID, 'publication': pub, 'kind': 'highlight', 'target': {'scope': 'interval', 'start_seconds': 2.8, 'end_seconds': 3.5}, 'body': {'text': 'Clip 2 highlight B'}, 'request_id': f'hl-71-c2b-{suffix}'},
+    )
+    assert h2b_res.ok
+    h2b = h2b_res.json()
+    note3_res = page.request.post(
+        ui_server + '/api/annotations',
+        headers=headers,
+        data={'source_id': ID, 'publication': pub, 'kind': 'note', 'target': {'scope': 'point', 'start_seconds': 4.5}, 'body': {'text': 'Clip 3 plain note'}, 'request_id': f'hl-71-n3-{suffix}'},
+    )
+    assert note3_res.ok
+    note3 = note3_res.json()
+
+    page.evaluate('() => CourtUI.bindCards() || refreshShared()')
+    expect(page.locator('#stat-likes')).to_have_text('3')
+    expect(page.locator('#result-count')).to_have_text('3 items')
+    expect(page.locator('#session-grid .session-card')).to_have_count(3)
+    expect(page.locator(f'#session-grid .session-card[data-clip-id="{CLIP}"]')).to_have_attribute('data-card-reason', 'liked-highlight')
+    expect(page.locator(f'#session-grid .session-card[data-clip-id="{CLIP}"] .card-badges')).to_contain_text('LIKED · ★ HIGHLIGHT')
+    expect(page.locator(f'#session-grid .session-card[data-clip-id="{c2_id}"]')).to_have_attribute('data-card-reason', 'highlight')
+    expect(page.locator(f'#session-grid .session-card[data-clip-id="{c2_id}"] .card-badges')).to_contain_text('★ HIGHLIGHT')
+    expect(page.locator(f'#session-grid .session-card[data-clip-id="{c2_id}"] .card-visual img')).to_have_attribute('src', re.compile(f'/clips/{c2_id}/poster'))
+    expect(page.locator('#session-grid .session-card[data-card-kind="video"]')).to_have_attribute('data-card-reason', 'liked')
+
+    # Archiving Clip 2's highlights immediately removes Clip 2 from Likes & highlights and updates count back to 2.
+    for h in (h1, h2a, h2b, note3):
+        r = page.request.put(ui_server + f"/api/annotations/{h['id']}", headers=headers, data={'publication': pub, 'version': h['version'], 'status': 'archived'})
+        assert r.ok
+    page.evaluate('() => refreshShared()')
+    expect(page.locator('#stat-likes')).to_have_text('2')
+    expect(page.locator('#result-count')).to_have_text('2 items')
+    expect(page.locator(f'#session-grid .session-card[data-clip-id="{c2_id}"]')).to_have_count(0)
+
+    # Browser back/forward navigates cleanly between views.
+    page.go_back()
+    expect(page).to_have_url(ui_server + '/#practice')
+    expect(page.locator('#summary-practice')).to_have_attribute('aria-current', 'page')
+    page.go_back()
+    expect(page).to_have_url(ui_server + '/#clips')
+    expect(page.locator('#summary-clips')).to_have_attribute('aria-current', 'page')
+    page.go_back()
+    expect(page).to_have_url(ui_server + '/')
+    expect(page.locator('#summary-sessions')).to_have_attribute('aria-current', 'page')
+
+    # Verify responsive layout at 1280px, 390px, and 320px across views with zero horizontal overflow.
+    for view_btn in ('#summary-sessions', '#summary-clips', '#summary-practice', '#summary-likes'):
+        page.locator(view_btn).click()
+        for width in (1280, 390, 320):
+            page.set_viewport_size({'width': width, 'height': 844})
+            assert not page.evaluate('document.documentElement.scrollWidth > innerWidth'), f'Overflow at {width}px on {view_btn}'
+
+    assert not errors
+    page.close()

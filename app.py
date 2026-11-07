@@ -95,9 +95,10 @@ def create_app(config=None):
         if expected != data.get('published_at'):
             abort(409, 'This recording was reprocessed. Refresh the review to load its new context.')
 
-    def decorate(data, shared=None):
+    def decorate(data, shared=None, highlights=None):
         data = copy.deepcopy(data)
         shared = {**(shared if shared is not None else state.all()), **app.extensions['annotations'].like_states(data['id'],data['published_at'])}
+        clip_hl = app.extensions['annotations'].clip_highlights(data, highlights)
         identity = data["id"]
         data['recorded_at_iso'], data['recorded_at_epoch'] = recording_time(data['source'].get('recorded_at'))
         directory = data.get('media_directory', identity)
@@ -112,6 +113,10 @@ def create_app(config=None):
             clip['title'] = (clip['details']['value'] or {}).get('title') or 'Clip '+str(clip['index']).zfill(2)
             clip['nas_url'] = nas_media_address(media_smb, directory, clip['file'])
             clip["like"] = shared.get(f"like:{identity}:{clip['id']}", {"value": False, "version": 0})
+            hl = clip_hl.get(clip['id'], [])
+            clip['highlights'] = hl
+            clip['highlight_count'] = len(hl)
+            clip['highlighted'] = bool(hl)
         return catalog.decorate(decorate_players(data, shared))
 
     @app.before_request
@@ -160,7 +165,8 @@ def create_app(config=None):
         except OSError:
             return jsonify(sessions=[], practice_groups=[], invalid_sessions=0, library_available=False, shared_preferences=True)
         shared = state.all()
-        decorated = [decorate(s, shared) for s in sessions]
+        hl_map = app.extensions['annotations'].active_highlights_by_source([s['id'] for s in sessions])
+        decorated = [decorate(s, shared, hl_map.get(s['id'], [])) for s in sessions]
         groups = decorate_groups(enrich_groups(serving_groups(decorated), decorated, shared), decorated)
         for group in groups:
             group['title'] = group['metadata'].get('title') or group['title']
@@ -234,8 +240,9 @@ def create_app(config=None):
         except OSError:
             abort(503, 'The recording library is unavailable')
         # Resolve the entire practice, including assignments/GPS on its siblings.
-        recordings = [decorate(s, shared) for s in recordings if s['id'] != identity]
-        result = decorate(data, shared)
+        hl_map = app.extensions['annotations'].active_highlights_by_source([s['id'] for s in recordings] + [identity])
+        recordings = [decorate(s, shared, hl_map.get(s['id'], [])) for s in recordings if s['id'] != identity]
+        result = decorate(data, shared, hl_map.get(data['id'], []))
         recordings.append(result)
         enrich_groups(serving_groups(recordings), recordings, shared)
         return jsonify(result)

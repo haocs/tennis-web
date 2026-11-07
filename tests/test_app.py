@@ -513,3 +513,70 @@ def test_autofocus_vendored_assets_mime_types_and_csp(setup):
         assert not is_ignored(required), f'{required} must not be excluded by .dockerignore'
     assert is_ignored('tests/ui_player.py')
     assert is_ignored('docs/AUTO-FOCUS.md')
+
+
+def test_session_api_projects_active_in_scope_clip_highlights_without_archived_or_out_of_range(setup):
+    app, root, data = setup
+    second_clip = 'c' * 24
+    data['clips'].append({
+        'id': second_clip,
+        'index': 2,
+        'file': 'Clips/clip-002.mp4',
+        'original_start_seconds': 16,
+        'original_end_seconds': 20,
+        'duration_seconds': 4,
+        'playback_start_seconds': 10,
+        'playback_end_seconds': 14,
+    })
+    data['video']['duration_seconds'] = 14
+    data['kept_seconds'] = 14
+    (root / 'media' / ID / 'Clips/clip-002.mp4').write_bytes(b'clip video 2')
+    (root / 'metadata/sessions' / f'{ID}.json').write_text(json.dumps(data))
+    client = app.test_client()
+    headers = {'X-Tennis-Request': '1'}
+    pub = data['published_at']
+
+    # Active point highlight inside clip 1 (original 5..15)
+    r1 = client.post(
+        '/api/annotations',
+        json={'source_id': ID, 'publication': pub, 'kind': 'highlight', 'target': {'scope': 'point', 'start_seconds': 7.5}, 'body': {'text': 'Forehand winner'}, 'request_id': 'req-hl-001'},
+        headers=headers,
+    )
+    assert r1.status_code == 201
+    # Second active interval highlight inside clip 1
+    r2 = client.post(
+        '/api/annotations',
+        json={'source_id': ID, 'publication': pub, 'kind': 'highlight', 'target': {'scope': 'interval', 'start_seconds': 9.0, 'end_seconds': 11.0}, 'body': {'text': 'Net finish'}, 'request_id': 'req-hl-002'},
+        headers=headers,
+    )
+    assert r2.status_code == 201
+    # Highlight in cut region (original 1.0, outside 5..15 and 16..20)
+    r_cut = client.post(
+        '/api/annotations',
+        json={'source_id': ID, 'publication': pub, 'kind': 'highlight', 'target': {'scope': 'point', 'start_seconds': 1.0}, 'body': {'text': 'Cut region'}, 'request_id': 'req-hl-cut'},
+        headers=headers,
+    )
+    assert r_cut.status_code == 201
+    # Highlight on clip 2 that is then archived
+    r_arch = client.post(
+        '/api/annotations',
+        json={'source_id': ID, 'publication': pub, 'kind': 'highlight', 'target': {'scope': 'point', 'start_seconds': 17.0}, 'body': {'text': 'Archived highlight'}, 'request_id': 'req-hl-arch'},
+        headers=headers,
+    )
+    assert r_arch.status_code == 201
+    arch_doc = r_arch.json
+    assert put(client, f"/api/annotations/{arch_doc['id']}", {'publication': pub, 'version': arch_doc['version'], 'status': 'archived'}).status_code == 200
+    # Regular note on clip 2 (not a highlight)
+    r_note = client.post(
+        '/api/annotations',
+        json={'source_id': ID, 'publication': pub, 'kind': 'note', 'target': {'scope': 'point', 'start_seconds': 18.0}, 'body': {'text': 'Plain note'}, 'request_id': 'req-note-001'},
+        headers=headers,
+    )
+    assert r_note.status_code == 201
+
+    for payload in (client.get('/api/sessions').json['sessions'][0], client.get(f'/api/sessions/{ID}').json):
+        c1, c2 = payload['clips']
+        assert c1['id'] == CLIP and c1['highlighted'] is True and c1['highlight_count'] == 2
+        assert [h['text'] for h in c1['highlights']] == ['Forehand winner', 'Net finish']
+        assert c2['id'] == second_clip and c2['highlighted'] is False and c2['highlight_count'] == 0
+        assert c2['highlights'] == []
