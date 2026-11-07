@@ -14,7 +14,7 @@ import time
 import urllib.request
 import urllib.error
 import uuid
-from .annotations import CAPABILITY, expected_frames, evidence_manifest, coaching_prompt, response_schema
+from .annotations import CAPABILITY, RENDER_SHARE_CAPABILITY, expected_frames, evidence_manifest, coaching_prompt, response_schema
 
 
 def atomic(path,data):
@@ -35,6 +35,23 @@ def digest(path):
     return h.hexdigest()
 
 
+def atempo_chain(speed):
+    if abs(speed - 1.0) < 1e-6:
+        return []
+    stages = []
+    remaining = float(speed)
+    while remaining < 0.5 - 1e-6:
+        stages.append('atempo=0.5')
+        remaining /= 0.5
+    stages.append(f'atempo={remaining:.6f}')
+    return stages
+
+
+def source_has_audio(ff, src):
+    probe = subprocess.run([ff, '-hide_banner', '-i', str(src)], capture_output=True, text=True, timeout=15)
+    return 'Audio:' in (probe.stderr or '')
+
+
 def render(config,job,local):
     """Media-only worker: fixed normalized crop, SDR export, no provider calls."""
     t=time.monotonic();s=job['body'];src=inside(config['library_media_root'],s['media_ref']['path'])
@@ -42,7 +59,9 @@ def render(config,job,local):
     if s.get('input_sha256') and digest(src)!=s['input_sha256']:raise ValueError('Published clip changed; prepare a fresh excerpt')
     ff=config.get('ffmpeg') or shutil.which('ffmpeg')
     if not ff:raise ValueError('Configure ffmpeg for the media-export worker')
-    x,y,w,h=s['crop'];edge=960 if s['quality']=='balanced' else 640
+    is_share=s.get('intent')=='share'
+    x,y,w,h=s['crop'];edge=1920 if is_share else (960 if s['quality']=='balanced' else 640)
+    crf='18' if is_share else ('24' if s['quality']=='balanced' else '29')
     crop=f'crop=trunc(iw*{w}/2)*2:trunc(ih*{h}/2)*2:trunc(iw*{x}/2)*2:trunc(ih*{y}/2)*2'
     filters=[]
     if s['hdr']:
@@ -50,26 +69,39 @@ def render(config,job,local):
         filters+=['zscale=t=linear:npl=100','format=gbrpf32le','tonemap=tonemap=mobius:desat=0','zscale=p=bt709:t=bt709:m=bt709:r=tv']
     filters += [f'trim=duration={s["end"]-s["start"]}',crop,f'scale=w=trunc(iw*min(1\\,{edge}/max(iw\\,ih))/2)*2:h=trunc(ih*min(1\\,{edge}/max(iw\\,ih))/2)*2',f'setpts=(PTS-STARTPTS)/{s["speed"]}','fps=30','format=yuv420p']
     out=local/'excerpt.mp4';seconds=s['end']-s['start']
-    subprocess.run([ff,'-hide_banner','-loglevel','error','-y','-ss',str(s['start']),'-i',str(src),'-t',str(seconds/s['speed']),'-vf',','.join(filters),'-an','-c:v','libx264','-preset','fast','-crf','24' if s['quality']=='balanced' else '29','-color_primaries','bt709','-color_trc','bt709','-colorspace','bt709','-movflags','+faststart',str(out)],check=True,capture_output=True,timeout=600)
+    audio_args=['-an'];audio_output='removed'
+    if is_share:
+        if source_has_audio(ff, src):
+            af_stages=[f'atrim=duration={seconds}','asetpts=PTS-STARTPTS']+atempo_chain(s['speed'])
+            audio_args=['-af',','.join(af_stages),'-c:a','aac','-b:a','128k']
+            audio_output='retimed' if abs(s['speed']-1.0)>=1e-6 else 'preserved'
+        else:
+            audio_output='none'
+    subprocess.run([ff,'-hide_banner','-loglevel','error','-y','-ss',str(s['start']),'-i',str(src),'-t',str(seconds/s['speed']),'-vf',','.join(filters),*audio_args,'-c:v','libx264','-preset','fast','-crf',crf,'-color_primaries','bt709','-color_trc','bt709','-colorspace','bt709','-movflags','+faststart',str(out)],check=True,capture_output=True,timeout=600)
     # Input trim occurs before setpts using -to via trim; ensure no later source frames leak.
-    count=min(32,max(4,math.ceil(seconds*4)))
     frames=[]
-    for i in range(count):
-        original=(i+.5)*seconds/count;name=f'frame-{i:03d}.jpg'
-        subprocess.run([ff,'-hide_banner','-loglevel','error','-y','-ss',str(original/s['speed']),'-i',str(out),'-frames:v','1','-q:v','3',str(local/name)],check=True,capture_output=True,timeout=30)
-        if not (local/name).is_file():raise ValueError('Frame extraction failed')
-        frames.append(dict(file=name,excerpt_seconds=original/s['speed'],clip_seconds=s['start']+original,original_seconds=s['original_start']+original,sha256=digest(local/name)))
+    if not is_share:
+        count=min(32,max(4,math.ceil(seconds*4)))
+        for i in range(count):
+            original=(i+.5)*seconds/count;name=f'frame-{i:03d}.jpg'
+            subprocess.run([ff,'-hide_banner','-loglevel','error','-y','-ss',str(original/s['speed']),'-i',str(out),'-frames:v','1','-q:v','3',str(local/name)],check=True,capture_output=True,timeout=30)
+            if not (local/name).is_file():raise ValueError('Frame extraction failed')
+            frames.append(dict(file=name,excerpt_seconds=original/s['speed'],clip_seconds=s['start']+original,original_seconds=s['original_start']+original,sha256=digest(local/name)))
     info=dict(recipe=s,lease_token=job['token'],frames=frames,bytes=out.stat().st_size,output_seconds=seconds/s['speed'],sha256=digest(out),render_seconds=time.monotonic()-t)
+    if is_share:
+        info['audio_output']=audio_output
     atomic(local/'recipe.json',info)
-    prompt=(s.get('question') or 'Please coach this beginner tennis excerpt. Identify only observable details; give up to three practical cues and one drill. State uncertainty. Refer to original timestamps.')+'\n\n'+json.dumps({k:s[k] for k in ['original_start','original_end','speed','crop','audio','color']},indent=2)
-    (local/'prompt.txt').write_text(prompt)
+    if not is_share:
+        prompt=(s.get('question') or 'Please coach this beginner tennis excerpt. Identify only observable details; give up to three practical cues and one drill. State uncertainty. Refer to original timestamps.')+'\n\n'+json.dumps({k:s[k] for k in ['original_start','original_end','speed','crop','audio','color']},indent=2)
+        (local/'prompt.txt').write_text(prompt)
     fence=hashlib.sha256(job['token'].encode()).hexdigest()[:24]
     dest=inside(config['artifact_root'],job['id']+'/'+fence)
     dest.mkdir(parents=True,exist_ok=True)
     if config.get('readable_exports'):
         dest.parent.chmod(0o755);dest.chmod(0o755)
     # Publish the small completion manifest last, after all media are available.
-    for name in ['excerpt.mp4','prompt.txt']+[f['file'] for f in frames]+['recipe.json']:
+    published=['excerpt.mp4','recipe.json'] if is_share else (['excerpt.mp4','prompt.txt']+[f['file'] for f in frames]+['recipe.json'])
+    for name in published:
         shutil.copy2(local/name,dest/name)
         if config.get('readable_exports'):(dest/name).chmod(0o644)
     return info
@@ -177,7 +209,7 @@ class Worker:
         try:self.storage_ready()
         except Exception:
             self.state(status='storage_unavailable');return False
-        response=self.api('worker/'+self.role+'/claim',{'worker_id':self.identity,'capabilities':[CAPABILITY] if self.role=='ai' else []});job=response['job']
+        response=self.api('worker/'+self.role+'/claim',{'worker_id':self.identity,'capabilities':[CAPABILITY] if self.role=='ai' else [RENDER_SHARE_CAPABILITY]});job=response['job']
         if not job:self.state(status='ready');return False
         identity=job['id'];local=self.root/'jobs'/identity/hashlib.sha256(job['token'].encode()).hexdigest()[:24];local.mkdir(parents=True,exist_ok=True)
         self.state(status='working',job_id=identity);atomic(local/'job.json',job)

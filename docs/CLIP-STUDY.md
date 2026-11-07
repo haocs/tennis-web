@@ -5,7 +5,7 @@ Entry button: **Study clip**. Focused view: **Clip study**. Release and NAS depl
 
 ## Interaction design
 
-Select an individual clip, then open **More video actions → Study clip**. This
+Select an individual clip, then use the **Study clip** magnifier beside Like. This
 action is hidden while the combined practice is loaded. The normal player keeps
 its lightweight overlays and compact action layout from PR 24. It opens a modal focused on that clip. Desktop uses a large
 video/control column and an independently scrolling context/AI column. Mobile stacks
@@ -13,11 +13,23 @@ those sections with a sticky return header. Native dialog focus trapping and Esc
 are retained; returning restores the studied clip position, paused, and the parent's
 original playback speed. Study never auto-advances to a different clip.
 
-Playback starts paused at the parent's position. Controls provide 0.1-second steps,
-0.01-second seek-slider increments, 0.1–1× playback, optional clip looping and mute.
-Arrow keys seek 0.1 seconds; Shift+arrow seeks one second, outside form controls.
-These are browser time seeks, not a guarantee of frame-exact decoding. Zoom is 1–4×
-with bounded drag-to-pan, touch pinch and Reset view; zoom does not alter media.
+Playback starts paused at the parent's position. The progress bar includes two
+accessible draggable pins (**Interval start** and **Interval end**, defaulting to
+the beginning and end of the clip) alongside the playhead slider. Dragging or
+stepping either pin clamps the active `[start, end]` interval with at least a
+0.1-second span (or full clip duration for shorter clips) and keeps the playhead
+inside that interval. Ordinary playback, stepping, seeking and looping are strictly
+bounded to the selected `[start, end]` interval: playback pauses at the end pin
+unless loop is enabled, in which case it wraps directly back to the start pin.
+
+Compact transport controls provide `<` (0.1-second step back), a play/pause icon
+button, `>` (0.1-second step forward), a watch-style playback speed selector
+(`0.1×`–`1×`), a loop icon toggle (`aria-pressed`), a `1×`–`4×` zoom scrubber with
+bounded drag-to-pan and touch pinch, and a high-quality **Download interval**
+action. Mute and Reset view buttons are omitted to keep the transport bar compact.
+Arrow keys seek 0.1 seconds and Shift+arrow seeks one second within the selected
+interval, outside form controls. These are browser time seeks, not a guarantee of
+frame-exact decoding.
 
 ## Watch player integration
 
@@ -62,7 +74,16 @@ Current processing publications normally provide the detector name and boundarie
 not clip-specific observations. Adding producer annotations is a separate processing
 change. This feature consumes the optional contract without changing that pipeline.
 
-## AI review preparation
+## Coaching and sharing
+
+The primary **Ask coach** flow freezes the selected interval, crop, speed and
+question, prepares the excerpt, then requests a structured frame-sequence review.
+See [coaching and render-worker contracts](COACHING.md). Nothing calls AI merely
+because Study opens. **Download interval** creates a separate sharing artifact;
+it neither starts AI nor becomes coaching evidence. Old responses cannot replace
+the result for a newer selection or reopened clip.
+
+## Optional manual frame preparation
 
 The user can download the existing original-quality clip, add the current frame,
 or replace their selection with six evenly spaced interior samples. Frames are
@@ -80,10 +101,11 @@ Use the clip when timing/footwork/contact is important. Browser canvas output of
 video may have different colors; the original-quality download remains available.
 
 Copy prompt handles secure Clipboard API and LAN HTTP fallback/manual selection.
-Open ChatGPT and optional Claude/Gemini links open a normal provider homepage. The
+Open ChatGPT opens the normal provider homepage. The
 user unzips/attaches images or uploads the clip and pastes the prompt. No provider
-credentials, automatic upload, automatic prompt submission or AI inference is wired
-into this application. AI responses are not persisted as training annotations.
+credentials or automatic prompt submission are used by these manual tools. The
+separate **Ask coach** path above does submit an explicit request through the
+installed worker. Saved coaching is serving metadata, not accepted training truth.
 
 ## Local validation and handoff
 

@@ -137,7 +137,8 @@ Keep the backup outside the application volume too. Back up the published librar
 
 Tests cover ranged video serving, path/symlink isolation, optimistic concurrency, simultaneous writers, metadata persistence, original-review integration, and redacted/stale-aware status. Browser verification also covers sorting, embedded playback, chapter seeking, navigation, and responsive layouts.
 
-Cut-quality feedback and algorithm improvement remain future work. See the project todo document and algorithm roadmap.
+Cut-quality reports are available; automatically using feedback to improve the
+algorithm remains future work. See the project todo document and algorithm roadmap.
 
 ## Player controls and browser regression tests
 
@@ -162,9 +163,12 @@ The tiny MP4s in `tests/fixtures` are generated solid-color test videos, not use
 ## Clip study
 
 Select an individual clip, then use the magnifier **Study clip** action beside Like for focused slow playback,
-precise time seeking, looping and zoom/pan. Published processor observations appear
-when available. Prepare a clip or small selected-frame package with a coaching
-prompt for manual use in your AI chat. No footage uploads automatically.
+precise interval seeking, looping and zoom/pan. A/B pins bound playback and exports.
+**Ask coach** prepares the selected view and requests a timestamped-frame review
+through the separate coaching workers; the question and framing are frozen at submission.
+Suggestions can be saved, discarded or followed up. **Download interval** uses a
+separate higher-quality render profile with audio when available. Manual frame
+tools remain under a collapsed disclosure. Nothing is sent to AI just by opening Study.
 See [Clip study design and local validation](docs/CLIP-STUDY.md).
 
 ### Saved players
@@ -173,7 +177,7 @@ Saved players (name, initial avatar, optional height in cm and level) live in
 `website.sqlite3`, alongside other shared website preferences. They never modify
 published recording metadata or media. There is no account/login relationship.
 
-- Library **Saved players** creates and edits profiles. Session options →
+- Library **Players** creates and edits profiles. Session options →
   **Players** assigns a roster to every recording atomically. **Players** above
   a review player edits only that recording's roster.
 - Select a clip, then **Main player** to choose/add its focus player. A recording
@@ -211,11 +215,11 @@ Use **Select** in the watch list to choose clips and **Assign main player** to u
 
 ### Moments, notes and cut feedback
 
-Watch pages offer **Highlight moment**, **Less useful**, and **Moments & notes**.
-Notes can refer to a moment, interval, clip or whole original recording. Timeline
-markers and list jumps use current playback positions; saved targets always use
-original-video time. **Clip focus** shows highlights or hides less-useful clips.
-Archive/restore and revision history keep edits reversible. Hearts remain separate.
+The **Moments** panel keeps Highlight, Jump and Add Moment available while collapsed.
+Text teasers appear inside it; clicking a teaser or the panel surface expands the
+in-range list. Moment anchors use original-recording time, optionally with an end.
+Untimed notes belong in **Edit clip** or **Edit video**, with their history and
+archive state preserved. Like/dislike are entity reactions outside Moments.
 
 Use **More video actions → Review cuts** for processing-quality reports, including
 early/late boundaries and downtime. These are tied to the reviewed publication;
@@ -236,8 +240,9 @@ reviews appear only through an assigned current main player and are labelled as
 such. Reprocessed or unavailable media keeps its saved review with a clear notice.
 No new AI request is generated.
 
-The clip list uses one content filter: All clips, Liked only, Highlights, or Hide
-less useful. Player and duration controls remain independent. **Select clips** is
+The clip list uses one content filter: All clips, Recommended, Liked only, or
+Highlights. Smart sorting prioritizes liked clips, then clips with active Moments,
+then duration. Player and duration controls remain independent. **Select clips** is
 inside the clip list's three-dot menu. Point highlights are unique per original
 source and millisecond; repeated clicks reuse the saved highlight, and conflicting
 retarget/restore edits return a conflict instead of creating duplicates. Existing

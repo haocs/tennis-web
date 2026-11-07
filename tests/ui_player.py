@@ -340,6 +340,11 @@ def test_clip_study_action_precision_and_return(browser, ui_server):
     dialog = page.get_by_role('dialog', name='Clip study · 01', exact=True)
     expect(dialog).to_be_visible()
     expect(page.locator('#study-play')).to_be_enabled()
+    expect(page.locator('#study-mute,#study-reset')).to_have_count(0)
+    expect(page.locator('#study-back')).to_have_text('<')
+    expect(page.locator('#study-forward')).to_have_text('>')
+    expect(page.locator('#study-pin-start')).to_have_attribute('aria-valuenow', '0')
+    expect(page.locator('#study-pin-end')).to_have_attribute('aria-valuenow', '2')
     assert page.locator('#player').evaluate('v => v.paused')
     dialog.get_by_role('button', name='Step forward 0.1 seconds').click()
     assert page.locator('#study-video').evaluate('v => v.currentTime') == pytest.approx(.5, abs=.08)
@@ -350,8 +355,10 @@ def test_clip_study_action_precision_and_return(browser, ui_server):
     for _ in range(4):
         zoom.press('ArrowRight')
     expect(page.locator('#study-zoom-value')).to_have_text('2×')
-    dialog.get_by_role('checkbox', name='Loop clip', exact=True).check()
-    assert page.locator('#study-video').evaluate('v => v.loop')
+    loop_btn = dialog.get_by_role('button', name='Loop clip', exact=True)
+    expect(loop_btn).to_have_attribute('aria-pressed', 'false')
+    loop_btn.click()
+    expect(loop_btn).to_have_attribute('aria-pressed', 'true')
     dialog.get_by_role('button', name='← Back to review', exact=True).click()
     expect(dialog).not_to_be_visible()
     # The native dialog close event runs after its open attribute is removed.
@@ -373,6 +380,8 @@ def test_clip_study_frame_package_is_local_and_resets(browser, ui_server, tmp_pa
     page.goto(ui_server+f'/review/{ID}?clip={CLIP}')
     page.get_by_role('button', name='Study clip', exact=True).click()
     dialog = page.get_by_role('dialog', name='Clip study · 01', exact=True)
+    expect(dialog.locator('.study-extra-tools')).not_to_have_attribute('open', '')
+    dialog.get_by_text('Recording & frame tools', exact=True).click()
     expect(dialog.get_by_role('button', name='Sample 6 moments', exact=True)).to_be_enabled()
     dialog.get_by_role('button', name='Sample 6 moments', exact=True).click()
     expect(page.locator('.study-frame')).to_have_count(6, timeout=15000)
@@ -403,22 +412,33 @@ def test_coaching_selection_queues_export_without_ai_upload(browser, ui_server):
     page.goto(ui_server+f'/review/{ID}?clip={CLIP}')
     page.get_by_role('button',name='Study clip',exact=True).click()
     expect(page.locator('#study-play')).to_be_enabled()
-    expect(page.locator('#coach-prepare')).to_be_enabled()
-    page.get_by_role('textbox',name='What would you like help with?',exact=True).fill('Check my balance')
+    expect(page.locator('#coach-ask')).to_be_enabled()
+    page.locator('#study-pin-start').evaluate("el => { el.value = 0.2; el.dispatchEvent(new Event('input', {bubbles:true})); }")
+    page.locator('#study-pin-end').evaluate("el => { el.value = 1.4; el.dispatchEvent(new Event('input', {bubbles:true})); }")
+    page.get_by_label('Preset',exact=True).select_option('footwork')
+    expect(page.locator('#coach-question')).to_have_value(re.compile('footwork'))
+    page.get_by_role('textbox',name='Question for coach',exact=True).fill('Check my balance')
     zoom=page.get_by_role('slider',name='Video zoom',exact=True)
     zoom.press('Home')
     for _ in range(4):zoom.press('ArrowRight')
     with page.expect_response(lambda r:r.url.endswith('/api/coaching/exports') and r.request.method=='POST') as event:
-        page.get_by_role('button',name='Prepare coaching clip',exact=True).click()
+        page.get_by_role('button',name='Ask coach',exact=True).click()
     response=event.value
     assert response.status==201
     job=response.json()
     assert job['role']=='render' and job['state']=='queued'
     spec=job['body']
     assert spec['question']=='Check my balance' and spec['speed']==.5
+    assert spec['start']==pytest.approx(0.2,abs=0.01) and spec['end']==pytest.approx(1.4,abs=0.01)
     assert 0 < min(spec['crop'][2:]) < 1
     expect(page.locator('#coach-ask')).to_be_disabled()
-    expect(page.locator('#coach-status')).to_contain_text('queued',ignore_case=True)
+    expect(page.locator('#coach-status')).to_contain_text('Preparing your clip…')
+    with page.expect_response(lambda r:r.url.endswith('/api/coaching/exports') and r.request.method=='POST') as share_event:
+        page.get_by_role('button',name='Download interval',exact=True).click()
+    share_job=share_event.value.json()
+    assert share_job['body']['intent']=='share' and share_job['body']['quality']=='high'
+    assert share_job['body']['start']==pytest.approx(0.2,abs=0.01) and share_job['body']['end']==pytest.approx(1.4,abs=0.01)
+    expect(page.locator('#study-status')).to_contain_text('Preparing high-quality download…')
     page.get_by_role('button',name='← Back to review',exact=True).click()
     page.close()
 
@@ -539,10 +559,8 @@ def test_structured_coaching_evidence_review_and_draft(browser, ui_server, width
     page.goto(ui_server+f'/review/{ID}?clip={CLIP}')
     page.get_by_role('button',name='Study clip',exact=True).click()
     if width<761:page.get_by_role('button',name='Coach',exact=True).click()
-    question=page.get_by_role('textbox',name='What would you like help with?',exact=True)
-    if width<761:page.locator('#coach-question-options summary').click()
+    question=page.get_by_role('textbox',name='Question for coach',exact=True)
     question.fill('Keep my custom question')
-    page.locator('#coach-step-4').click()
     expect(page.get_by_role('heading',name='Balanced reset',exact=True)).to_be_visible()
     card=page.locator('.coach-suggestion')
     expect(card.get_by_text('Needs your review',exact=True)).to_be_visible()
@@ -550,27 +568,26 @@ def test_structured_coaching_evidence_review_and_draft(browser, ui_server, width
     expect(image).to_have_attribute('src','/api/coaching/evidence/job-test/f_test.jpg')
     card.get_by_role('button',name=re.compile('Frame 1')).click()
     assert page.locator('#study-video').evaluate('v=>v.currentTime')==pytest.approx(.5,abs=.08)
-    card.get_by_role('button',name='Accept suggestion',exact=True).click()
-    expect(page.locator('.coach-review-state')).to_have_text('Accepted')
+    card.get_by_role('button',name='Discard',exact=True).click()
+    expect(page.locator('.coach-review-state')).to_have_text('Discarded')
+    card.get_by_role('button',name='Save',exact=True).click()
+    expect(page.locator('.coach-review-state')).to_have_text('Saved')
     assert page.locator('#clip-study').evaluate('d=>d.scrollWidth<=d.clientWidth')
     page.get_by_role('button',name='← Back to review',exact=True).click()
     page.get_by_role('button',name='Study clip',exact=True).click()
-    expect(page.locator('#coach-step-4')).to_have_attribute('aria-current','step')
     if width<761:page.get_by_role('button',name='Coach',exact=True).click()
-    page.locator('#coach-step-1').click()
     expect(question).to_have_value('Keep my custom question')
-    page.locator('#coach-step-4').click()
-    page.get_by_role('button',name='Ask a follow-up',exact=True).click()
-    follow=page.get_by_role('textbox',name='Your question',exact=True)
-    expect(follow).to_be_visible()
-    follow.fill('Please reassess all snapshots, including footwork.')
+    page.get_by_role('button',name='Re-ask',exact=True).click()
+    expect(question).to_be_visible()
+    question.fill('Please reassess all snapshots, including footwork.')
     sent=[]
     def ask(route):
         sent.append(route.request.post_data_json)
         new=copy.deepcopy(job);new.update(id='follow-up-job',version=1,state='queued');new['body'].update(prompt=sent[-1]['prompt'],follow_up_of='job-test');state['jobs'].insert(0,new)
         route.fulfill(status=201,json=new)
     page.route('**/api/coaching/requests',ask)
-    page.get_by_role('button',name='Send follow-up · frames to OpenAI',exact=True).click()
+    page.get_by_role('button',name='Ask coach',exact=True).click()
+    expect(page.locator('#coach-status')).to_have_text('Getting response…')
     expect(page.locator('#coach-history')).to_contain_text('Queued')
     assert sent[0]['follow_up_of']=='job-test' and sent[0]['export_id']=='render-test'
     assert sent[0]['prompt']=='Please reassess all snapshots, including footwork.'
@@ -580,18 +597,37 @@ def test_structured_coaching_evidence_review_and_draft(browser, ui_server, width
 
 def test_normal_playback_ignores_coaching_end_until_play_selection(browser,ui_server):
     page=browser.new_page()
+    csp_errors=[]
+    page.add_init_script("window.cspViolations=[]; document.addEventListener('securitypolicyviolation', e => window.cspViolations.push(e.blockedURI + ':' + e.violatedDirective));")
     page.goto(ui_server+f'/review/{ID}?clip={CLIP}')
     page.get_by_role('button',name='Study clip',exact=True).click()
     expect(page.locator('#study-play')).to_be_enabled()
-    page.locator('#coach-out').evaluate("e=>{e.value=.3;e.dispatchEvent(new Event('input',{bubbles:true}));}")
+    bar_box=page.locator('#study-interval-bar').bounding_box()
+    pin_start=page.locator('#study-pin-start')
+    pin_end=page.locator('#study-pin-end')
+    # Drag start pin to ~10% (0.2s) and end pin to ~35% (0.7s) along the progress bar.
+    start_box=pin_start.bounding_box()
+    page.mouse.move(start_box['x']+start_box['width']/2,start_box['y']+start_box['height']/2)
+    page.mouse.down()
+    page.mouse.move(bar_box['x']+bar_box['width']*0.1,bar_box['y']+bar_box['height']/2)
+    page.mouse.up()
+    end_box=pin_end.bounding_box()
+    page.mouse.move(end_box['x']+end_box['width']/2,end_box['y']+end_box['height']/2)
+    page.mouse.down()
+    page.mouse.move(bar_box['x']+bar_box['width']*0.35,bar_box['y']+bar_box['height']/2)
+    page.mouse.up()
+    assert float(pin_start.get_attribute('aria-valuenow'))==pytest.approx(0.2,abs=0.05)
+    assert float(pin_end.get_attribute('aria-valuenow'))==pytest.approx(0.7,abs=0.05)
+    # Without loop, playing starts at intervalStart (0.2s) and pauses at intervalEnd (0.7s).
     page.get_by_role('button',name='Play',exact=True).click()
-    page.wait_for_function("()=>document.querySelector('#study-video').currentTime>.6&&!document.querySelector('#study-video').paused")
+    page.wait_for_function("()=>document.querySelector('#study-video').paused&&document.querySelector('#study-video').currentTime>=0.65")
+    assert page.locator('#study-video').evaluate('v=>v.currentTime')==pytest.approx(0.7,abs=0.06)
+    # With loop enabled, reaching intervalEnd wraps back to intervalStart and keeps playing.
+    page.get_by_role('button',name='Loop clip',exact=True).click()
+    page.get_by_role('button',name='Play',exact=True).click()
+    page.wait_for_function("()=>!document.querySelector('#study-video').paused&&document.querySelector('#study-video').currentTime>=0.18&&document.querySelector('#study-video').currentTime<=0.45")
     page.get_by_role('button',name='Pause',exact=True).click()
-    page.get_by_role('button',name='Play selection',exact=True).click()
-    page.wait_for_function("()=>document.querySelector('#study-video').paused&&document.querySelector('#study-video').currentTime>=.3")
-    assert page.locator('#study-video').evaluate('v=>v.currentTime')<.7
-    page.get_by_role('button',name='Play',exact=True).click()
-    page.wait_for_function("()=>document.querySelector('#study-video').currentTime>.8&&!document.querySelector('#study-video').paused")
+    assert page.evaluate('window.cspViolations')==[]
     page.close()
 
 
@@ -622,9 +658,8 @@ def test_player_profiles_assignments_and_filters(browser, ui_server):
     assert not page.evaluate('document.documentElement.scrollWidth > innerWidth')
     page.get_by_role('button',name='Study clip',exact=True).click()
     page.locator('#study-mode-coach').click()
-    page.locator('#coach-step-3').click()
     expect(page.locator('#coach-player-context')).to_contain_text(name)
-    expect(page.locator('#coach-send-question')).not_to_have_value(re.compile('I am a beginner'))
+    expect(page.locator('#coach-question')).not_to_have_value(re.compile('I am a beginner'))
     page.get_by_role('button',name='← Back to review',exact=True).click()
     page.goto(ui_server+'/')
     page.get_by_role('combobox',name='Filter by player',exact=True).select_option(label=name)
@@ -1319,7 +1354,7 @@ def test_add_moment_optional_note_end_and_captured_scope(browser,ui_server,width
     page.get_by_role('button',name='Edit clip',exact=True).click()
     expect(page.get_by_role('dialog',name='Clip details',exact=True)).to_be_visible()
     page.get_by_role('button',name='Add note',exact=True).click()
-    page.get_by_role('textbox',name='Note',exact=True).fill('Second clip metadata')
+    page.locator('#note-editor').get_by_role('textbox',name='Note',exact=True).fill('Second clip metadata')
     page.get_by_role('button',name='Save note',exact=True).click()
     expect(page.locator('#entity-notes-list')).to_contain_text('Second clip metadata')
     expect(page.locator('#edit-note')).to_have_value('Second clip metadata')
@@ -1328,7 +1363,7 @@ def test_add_moment_optional_note_end_and_captured_scope(browser,ui_server,width
     note=page.locator('#entity-notes-list .note-item').filter(has_text='Second clip metadata')
     note.get_by_label('Note actions',exact=True).click()
     note.get_by_role('button',name='Edit',exact=True).click()
-    page.get_by_role('textbox',name='Note',exact=True).fill('Second clip metadata revised')
+    page.locator('#note-editor').get_by_role('textbox',name='Note',exact=True).fill('Second clip metadata revised')
     page.get_by_role('button',name='Save note',exact=True).click()
     expect(page.locator('#entity-notes-list')).to_contain_text('Second clip metadata revised')
     expect(page.locator('#edit-note')).to_have_value('Second clip metadata revised')
@@ -1979,4 +2014,118 @@ def test_home_redesign_views_counts_deduplication_and_status_dot(browser, ui_ser
             assert not page.evaluate('document.documentElement.scrollWidth > innerWidth'), f'Overflow at {width}px on {view_btn}'
 
     assert not errors
+    page.close()
+
+
+@pytest.mark.parametrize('delayed', ['create', 'poll'])
+def test_share_download_ignores_old_selection_results(browser, ui_server, delayed):
+    from playwright.sync_api import Error as PlaywrightError
+    page = browser.new_page(accept_downloads=True)
+    page.set_default_timeout(6000)
+    exports, held = [], []
+    page.add_init_script("""(() => {
+      window.shareDownloads=[];
+      const click=HTMLAnchorElement.prototype.click;
+      HTMLAnchorElement.prototype.click=function(...args){
+        if(this.id==='study-download-ready'){window.shareDownloads.push(this.href);return;}
+        return click.apply(this,args);
+      };
+    })()""")
+
+    def create(route):
+        body = route.request.post_data_json
+        exports.append(body)
+        job = dict(id=f'share-{len(exports)}', role='render', state='queued', body=body, result={})
+        if len(exports) == 1 and delayed == 'create':
+            held.append((route, job))
+        else:
+            route.fulfill(status=201, json=job)
+
+    def poll(route):
+        identity = route.request.url.rsplit('/', 1)[-1]
+        job = dict(id=identity, role='render', state='completed', result={})
+        if identity == 'share-1':
+            held.append((route, job))
+        else:
+            route.fulfill(json=job)
+
+    page.route('**/api/coaching/exports', create)
+    page.route('**/api/coaching/jobs/share-*', poll)
+    page.goto(ui_server + f'/review/{ID}?clip={CLIP}')
+    page.get_by_role('button', name='Study clip', exact=True).click()
+    download = page.get_by_role('button', name='Download interval', exact=True)
+    expect(download).to_be_enabled()
+    expected = '/api/coaching/exports' if delayed == 'create' else '/api/coaching/jobs/share-1'
+    with page.expect_request(lambda r: r.url.endswith(expected)):
+        download.click()
+    expect(download).to_be_disabled()
+    page.locator('#study-pin-start').evaluate("el=>{el.value=.4;el.dispatchEvent(new Event('input',{bubbles:true}));}")
+    page.locator('#study-speed').select_option('0.25')
+    page.get_by_role('slider', name='Video zoom', exact=True).press('End')
+    expect(download).to_be_enabled()
+    download.click()
+    expect(page.locator('#study-download-ready')).to_have_attribute('href', re.compile('/share-2/'))
+    page.wait_for_function('window.shareDownloads.length===1')
+    assert len(exports) == 2
+    assert exports[0]['request_id'] != exports[1]['request_id']
+    assert exports[1]['start'] == pytest.approx(.4) and exports[1]['speed'] == .25
+    assert exports[1]['crop'] != exports[0]['crop']
+    assert held
+    for route, old_job in held:
+        try:
+            route.fulfill(status=201 if delayed == 'create' else 200, json=old_job)
+        except PlaywrightError:
+            pass  # The intentionally aborted request may no longer accept a response.
+    page.wait_for_timeout(100)
+    expect(page.locator('#study-download-ready')).to_have_attribute('href', re.compile('/share-2/'))
+    downloads = page.evaluate('window.shareDownloads')
+    assert len(downloads) == 1 and '/share-2/' in downloads[0]
+    page.close()
+
+
+def test_old_coach_failure_cannot_clear_reopened_clip_request(browser, ui_server):
+    page = browser.new_page()
+    page.set_default_timeout(6000)
+    state = dict(enabled=True, jobs=[], annotations=[], workers=[])
+    held, exported, asked = [], [], []
+    page.route('**/api/coaching/sessions/*', lambda route: route.fulfill(json=state))
+
+    def create(route):
+        body = route.request.post_data_json
+        exported.append(body)
+        if len(exported) == 1:
+            held.append(route)
+            return
+        start = 2 + body['start']
+        job = dict(id='new-clip-render', version=1, role='render', state='queued',
+                   body={**body, 'original_start': start, 'original_end': 2 + body['end']}, result={})
+        state['jobs'].append(job)
+        route.fulfill(status=201, json=job)
+
+    def ask(route):
+        body = route.request.post_data_json
+        asked.append(body)
+        job = dict(id='new-clip-answer', version=1, role='ai', state='queued',
+                   body={**state['jobs'][0]['body'], **body}, result={})
+        state['jobs'].append(job)
+        route.fulfill(status=201, json=job)
+
+    page.route('**/api/coaching/exports', create)
+    page.route('**/api/coaching/requests', ask)
+    page.goto(ui_server + f'/review/{ID}?clip={CLIP}')
+    page.get_by_role('button', name='Study clip', exact=True).click()
+    with page.expect_request(lambda r: r.url.endswith('/api/coaching/exports')):
+        page.get_by_role('button', name='Ask coach', exact=True).click()
+    page.get_by_role('button', name='← Back to review', exact=True).click()
+    page.get_by_role('button', name=re.compile(r'^Play clip 2,')).click()
+    page.get_by_role('button', name='Study clip', exact=True).click()
+    page.get_by_role('button', name='Ask coach', exact=True).click()
+    expect(page.locator('#coach-status')).to_contain_text('Preparing your clip')
+    assert len(exported) == 2 and exported[1]['clip_id'] != CLIP
+    assert held
+    held[0].fulfill(status=500, json={'error': 'Old request failed'})
+    page.wait_for_timeout(100)
+    with page.expect_response(lambda r: r.url.endswith('/api/coaching/requests'), timeout=10000):
+        state['jobs'][0].update(state='completed', version=2)
+    assert len(asked) == 1 and asked[0]['export_id'] == 'new-clip-render'
     page.close()

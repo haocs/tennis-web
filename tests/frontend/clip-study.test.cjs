@@ -40,3 +40,17 @@ test('manual coaching prompt includes anonymous profile without name or player I
   const prompt=C.coachingPrompt({...clip,main_player:{id:'private-player-id',name:'PrivateName',height_cm:181,level:'experienced'}});
   assert.match(prompt,/181/);assert.match(prompt,/experienced/);assert.doesNotMatch(prompt,/PrivateName|private-player-id|I am a beginner/);
 });
+
+test('interval bounds clamp start and end pins and enforce strict interval playback and loop',()=>{
+  assert.deepEqual(C.clampInterval(0,2,2),{start:0,end:2});
+  assert.deepEqual(C.clampInterval(1.95,2,2,'start'),{start:1.9,end:2});
+  assert.deepEqual(C.clampInterval(0.5,0.4,2,'end'),{start:0.5,end:0.6});
+  assert.deepEqual(C.clampInterval(-1,5,2),{start:0,end:2});
+  assert.equal(C.clampToInterval(0.1,0.4,1.2,2),0.4);
+  assert.equal(C.clampToInterval(1.8,0.4,1.2,2),1.2);
+  assert.equal(C.clampToInterval(0.8,0.4,1.2,2),0.8);
+  assert.deepEqual(C.resolveIntervalPlayback(0.2,0.4,1.2,false),{action:'seek',time:0.4});
+  assert.deepEqual(C.resolveIntervalPlayback(0.8,0.4,1.2,false),{action:'continue',time:0.8});
+  assert.deepEqual(C.resolveIntervalPlayback(1.2,0.4,1.2,false),{action:'pause',time:1.2});
+  assert.deepEqual(C.resolveIntervalPlayback(1.2,0.4,1.2,true),{action:'loop',time:0.4});
+});

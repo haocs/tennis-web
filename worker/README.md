@@ -112,14 +112,24 @@ change originals, the published library, application state or unrelated paths.
 This option defaults off; configure the artifact root's own read/traverse access
 explicitly at deployment.
 
-## Structured coaching (worker 0.2.0)
+## Structured coaching and high-quality share exports (worker 0.3.0)
 
-For the evidence-linked coaching UI, upgrade this installed package as well as the
-website container. The AI role advertises `coaching-annotations-v1`; older workers
-leave these requests queued instead of consuming them incorrectly. No new account,
-queue or configuration secret is required. The existing artifact mount needs write
-access to `evidence/frames/`; the website reads it through its existing read-only
-mount. These content-addressed snapshots are retained separately from expiring
+For the evidence-linked coaching UI and high-quality Clip study interval downloads,
+upgrade this installed package as well as the website container:
+
+- The AI role advertises `coaching-annotations-v1`; older AI workers leave structured
+  coaching requests queued instead of consuming them incorrectly.
+- The render role advertises `share-export-v1`; older render workers leave high-quality
+  interval download jobs (`intent: "share"`) queued instead of rendering low-resolution
+  silent coaching previews. Share exports render up to 1920px (`crf: 18`), apply
+  validated HDR-to-SDR `zscale`/`tonemap=mobius` conversion to `bt709` when the source
+  is HDR, retime audio with chained `atempo` filters when source audio is present, and
+  publish only `excerpt.mp4` + `recipe.json` (skipping `frame-*.jpg` and `prompt.txt`
+  to minimize NAS writes).
+
+No new account, queue or configuration secret is required. The existing artifact mount
+needs write access to `evidence/frames/`; the website reads it through its existing
+read-only mount. These content-addressed snapshots are retained separately from expiring
 prepared videos. Keep them with coaching database backups; never apply export TTLs
 to evidence. See [the contract](../docs/COACHING-ANNOTATIONS.md) for review, retention,
 reprocessing and recovery rules. The worker verifies/prepares evidence before

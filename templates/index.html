@@ -25,16 +25,22 @@
       <div class="study-stage" id="study-stage"><video id="study-video" playsinline preload="metadata" aria-label="Selected clip for close study"></video><span class="study-zoom-badge" id="study-zoom-badge">1×</span></div>
       <p id="study-media-error" class="study-error" role="alert" hidden></p>
       <div class="study-transport">
-        <div class="study-time-row"><span id="study-current">0:00.000</span><span id="study-duration">Loading clip…</span></div>
-        <input id="study-seek" type="range" min="0" max="1" step="0.01" value="0" aria-label="Seek within this clip" disabled>
-        <div class="study-playback-row">
-          <div class="study-play-buttons"><button class="study-button" id="study-back" type="button" aria-label="Step back 0.1 seconds" disabled>−0.1s</button><button class="study-button study-primary" id="study-play" type="button" disabled>Play</button><button class="study-button" id="study-forward" type="button" aria-label="Step forward 0.1 seconds" disabled>+0.1s</button></div>
-          <label class="study-speed">Speed <select id="study-speed" aria-label="Playback speed"><option value="0.1">0.1×</option><option value="0.25">0.25×</option><option value="0.5" selected>0.5×</option><option value="0.75">0.75×</option><option value="1">1×</option></select></label>
-          <label class="study-check"><input id="study-loop" type="checkbox"> Loop clip</label>
-          <button class="study-button" id="study-mute" type="button" aria-pressed="false">Mute</button>
+        <div class="study-time-row"><span id="study-current">0:00.000</span><span id="study-interval-readout" class="study-interval-readout">0:00.000–0:00.000</span><span id="study-duration">Loading clip…</span></div>
+        <div class="study-interval-bar" id="study-interval-bar">
+          <div class="study-interval-track" aria-hidden="true"><div class="study-interval-fill" id="study-interval-fill"></div></div>
+          <input id="study-seek" type="range" min="0" max="1" step="0.01" value="0" aria-label="Seek within this clip" disabled>
+          <button type="button" class="study-interval-pin study-interval-pin-start" id="study-pin-start" role="slider" aria-label="Interval start" aria-valuemin="0" aria-valuemax="1" aria-valuenow="0" aria-valuetext="0:00.000" disabled><span aria-hidden="true">A</span></button>
+          <button type="button" class="study-interval-pin study-interval-pin-end" id="study-pin-end" role="slider" aria-label="Interval end" aria-valuemin="0" aria-valuemax="1" aria-valuenow="1" aria-valuetext="0:00.000" disabled><span aria-hidden="true">B</span></button>
         </div>
-        <div class="study-zoom-row"><label for="study-zoom">Zoom</label><input id="study-zoom" type="range" min="1" max="4" step="0.25" value="1" aria-label="Video zoom"><output id="study-zoom-value" for="study-zoom">1×</output><button class="study-button" id="study-reset" type="button">Reset view</button></div>
-        <details class="study-control-help"><summary>Shortcuts & gestures</summary><p class="study-hint">Drag to pan when zoomed; pinch to zoom. ← / → seek 0.1s; Shift seeks 1s.</p></details>
+        <div class="study-playback-row">
+          <div class="study-play-buttons"><button class="study-button study-icon-button" id="study-back" type="button" aria-label="Step back 0.1 seconds" title="Step back 0.1 seconds" disabled>&lt;</button><button class="study-button study-primary study-icon-button" id="study-play" type="button" aria-label="Play" title="Play" disabled><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M8 5v14l11-7z"/></svg></button><button class="study-button study-icon-button" id="study-forward" type="button" aria-label="Step forward 0.1 seconds" title="Step forward 0.1 seconds" disabled>&gt;</button></div>
+          <label class="study-speed" for="study-speed"><span class="sr-only">Playback speed</span><select id="study-speed" class="player-speed-select study-speed-select" aria-label="Playback speed"><option value="0.1">0.1×</option><option value="0.25">0.25×</option><option value="0.5" selected>0.5×</option><option value="0.75">0.75×</option><option value="1">1×</option></select></label>
+          <button class="study-button study-icon-button" id="study-loop" type="button" aria-pressed="false" aria-label="Loop clip" title="Loop selected interval"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z"/></svg></button>
+          <div class="study-zoom-row"><label for="study-zoom">Zoom</label><input id="study-zoom" type="range" min="1" max="4" step="0.25" value="1" aria-label="Video zoom"><output id="study-zoom-value" for="study-zoom">1×</output></div>
+          <button class="study-button study-download-interval" id="study-download-interval" type="button" disabled>Download interval</button>
+          <a class="study-button" id="study-download-ready" download hidden>Save video</a>
+        </div>
+        <details class="study-control-help"><summary>Shortcuts & gestures</summary><p class="study-hint">Drag pins A/B to select an interval. Drag video to pan when zoomed; pinch to zoom. ← / → seek 0.1s; Shift seeks 1s.</p></details>
       </div>
     </section>
     <aside class="study-sidebar" aria-label="Processor context and AI review preparation">

@@ -66,6 +66,20 @@ Auto focus splits responsibilities across three modules:
   - If worker/model initialization or inference fails or exceeds bounded initialization/inference watchdogs, Auto focus terminates the worker, resets `video.style.transform = ''`, transitions `#video-autofocus` to `aria-pressed="false"` and `data-autofocus-state="unavailable"`, and surfaces a visible error via `onError('Auto focus is unavailable in this browser.')` while keeping the control recoverable on subsequent user retry.
   - Initialization allows up to 30 seconds for a cold runtime/model download and compilation. The user can disable Auto focus while it loads; inference has its own shorter watchdog.
 
+## Optional player diagnostics
+
+The watch player's three-dot menu offers **Dev mode**. It displays video/frame
+statistics and, while Auto focus is enabled, the existing detector's person boxes,
+scores, tracking/loss state and estimated box movement. Box positions account for
+letterboxing, zoom and pan; they use CSSOM assignments under the normal strict CSP.
+Turning diagnostics off removes the overlay. It does not start another detector,
+upload frames, create annotations or change published media.
+
+Movement is an image-box heuristic. Scores are detector scores, not calibrated
+tennis-play probabilities. Play and swing verdicts are explicitly **not measured**.
+Unsupported/mobile Auto focus keeps ordinary video diagnostics available without
+inventing person detections.
+
 ## Verification boundaries
 
 Deterministic detections test framing and player lifecycle behavior. A separate browser smoke test loads the shipped runtime/model under the real CSP and processes local fixture pixels. Recognition of hand-drawn figures is not treated as a portable ground-truth benchmark. Real-tennis validation uses private local playback outside the public fixtures; no user footage is committed.
