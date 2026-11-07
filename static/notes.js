@@ -360,7 +360,9 @@ const NoteUI=(()=>{
   };
  }
  function setExpanded(open){
-  const toggle=$('#moment-toggle');if(!toggle)return;toggle.setAttribute('aria-expanded',String(open));$('#moment-panel-content').hidden=!open;if(open)render();
+  const toggle=$('#moment-toggle');if(!toggle)return;toggle.setAttribute('aria-expanded',String(open));$('#moment-panel-content').hidden=!open;
+  $('#notes-panel')?.classList.toggle('expanded',open);
+  if(open)render();
  }
  function mount(s){
   source=s;items=[];itemsLoaded=false;itemsLoadedSourceId=null;itemsLoadedPub=null;loadError='';markerKey='';lastCurrent=null;generation++;clearInterval(timer);clearTimeout(cueTimer);cueClock.reset();mediaKey='';cueKey='';
@@ -369,9 +371,14 @@ const NoteUI=(()=>{
   player.addEventListener('seeked',()=>cueTick(true));player.addEventListener('play',()=>cueTick());player.addEventListener('pause',()=>cueTick());player.addEventListener('ended',()=>cueTick());
   player.addEventListener('emptied',()=>{clearTimeout(cueTimer);cueClock.reset();cueKey='';$('#moment-cues')?.replaceChildren();});
   window.addEventListener('coach-notes-changed',refresh);document.addEventListener('visibilitychange',()=>cueTick(true));
-  $('.player-shell').insertAdjacentHTML('afterend',`<section id="moments-area" aria-label="Moment panel"><div id="moment-cues" class="moment-cues" role="status" aria-live="polite" aria-atomic="true"></div><div id="notes-panel" class="notes-panel"><div class="moment-bar"><button type="button" id="moment-toggle" aria-expanded="false" aria-controls="moment-panel-content">Moments <span aria-hidden="true">⌄</span></button><button type="button" class="button small" id="moment-jump" aria-label="Jump to next moment" hidden>Jump</button><button type="button" class="button small" id="note-highlight" aria-label="Highlight this moment">Highlight</button><button type="button" class="button small" id="add-moment" aria-label="Add moment">+ Moment</button></div><div id="moment-panel-content" hidden><div class="notes-toolbar moment-filters"><select id="moment-type" aria-label="Moment type"><option value="all">All types</option><option value="highlight">Highlight</option><option value="coaching">Coaching</option><option value="comment">Moment</option></select><label class="check-label"><input id="notes-archived" type="checkbox">Show archived</label></div><p id="notes-status" role="status"></p><div id="notes-list"></div></div></div></section>`);
+  $('.player-shell').insertAdjacentHTML('afterend',`<section id="moments-area" aria-label="Moment panel"><div id="notes-panel" class="notes-panel"><div class="moment-bar"><button type="button" id="moment-toggle" aria-expanded="false" aria-controls="moment-panel-content">Moments <span aria-hidden="true">⌄</span></button><button type="button" class="button small" id="moment-jump" aria-label="Jump to next moment" hidden>Jump</button><button type="button" class="button small" id="note-highlight" aria-label="Highlight this moment">Highlight</button><button type="button" class="button small" id="add-moment" aria-label="Add moment">+ Moment</button></div><div id="moment-cues" class="moment-cues" role="status" aria-live="polite" aria-atomic="true"></div><div id="moment-panel-content" hidden><div class="notes-toolbar moment-filters"><select id="moment-type" aria-label="Moment type"><option value="all">All types</option><option value="highlight">Highlight</option><option value="coaching">Coaching</option><option value="comment">Moment</option></select><label class="check-label"><input id="notes-archived" type="checkbox">Show archived</label></div><p id="notes-status" role="status"></p><div id="notes-list"></div></div></div></section>`);
   $('#note-highlight').onclick=highlight;$('#note-demote').onclick=demote;$('#moment-jump').onclick=nextMoment;$('#add-moment').onclick=()=>openEditor('comment');
-  $('#moment-toggle').onclick=()=>setExpanded($('#moment-toggle').getAttribute('aria-expanded')!=='true');$('#moment-type').onchange=render;$('#notes-archived').onchange=render;
+  $('#moment-toggle').onclick=()=>setExpanded($('#moment-toggle').getAttribute('aria-expanded')!=='true');
+  $('#notes-panel').addEventListener('click',e=>{
+   if(e.target.closest('button,select,input,label,a,summary,details,#moment-panel-content'))return;
+   if(e.target.closest('#moment-cues,.moment-cue')||$('#moment-toggle')?.getAttribute('aria-expanded')!=='true')setExpanded(true);
+  });
+  $('#moment-type').onchange=render;$('#notes-archived').onchange=render;
   const more=$('.player-more');more.classList.remove('hidden');$('.player-more-list').insertAdjacentHTML('beforeend',`<a class="note-cut-link" href="/review/${s.id}/cuts">Review cuts</a>`);
   const toolbar=$('.clip-toolbar .toolbar');toolbar.insertAdjacentHTML('beforeend','<select id="note-clip-filter" aria-label="Clip focus"><option value="all">All clips</option><option value="recommended">Recommended</option><option value="liked">Liked only</option><option value="highlights">Highlights</option></select>');$('#note-clip-filter').value=model.noteFilter||'all';$('#note-clip-filter').onchange=e=>{model.noteFilter=e.target.value;renderClipList();};
   loadPromise=refresh(true);timer=setInterval(refresh,10000);

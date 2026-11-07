@@ -1109,22 +1109,49 @@ def test_moment_cues_default_durations_ranges_and_collapsed_area(browser,ui_serv
     expect(page.get_by_role('button',name='Highlight this moment',exact=True)).to_be_visible()
     expect(page.locator('.note-marker')).to_have_count(3)
     assert page.locator('#note-markers').evaluate("e=>e.parentElement.classList.contains('video-seek-label')")
+    assert page.locator('#moment-cues').evaluate("e=>e.parentElement.id==='notes-panel'")
+    empty_panel=page.locator('#notes-panel').bounding_box()
+    bar_box=page.locator('.moment-bar').bounding_box()
+    assert empty_panel['height']<=bar_box['height']+16
     page.locator('#player').evaluate('v=>{v.pause();v.currentTime=.25;}')
     expect(page.locator('[data-active-moment="point"]')).to_have_count(0)
     expect(page.locator('[data-active-moment="range"]')).to_be_visible()
+    with_teaser=page.locator('#notes-panel').bounding_box()
+    cue_box=page.locator('[data-active-moment="range"]').bounding_box()
+    assert with_teaser['height']>empty_panel['height']+20
+    assert cue_box['y']>=with_teaser['y'] and cue_box['y']+cue_box['height']<=with_teaser['y']+with_teaser['height']+1
     expect(page.locator('[data-active-moment="point"]')).to_have_count(0,timeout=2500)
     # A point expiry does not repeatedly re-trigger at a paused playhead.
     expect(page.locator('[data-active-moment="range"]')).to_be_visible()
     page.locator('#player').evaluate('v=>{v.currentTime=.5;}')
     expect(page.locator('[data-active-moment="coach-point"]')).to_be_visible()
+    with_two_teasers=page.locator('#notes-panel').bounding_box()
+    assert with_two_teasers['height']>with_teaser['height']+20
     expect(page.locator('[data-active-moment="coach-point"]')).to_have_count(0,timeout=4500)
     expect(page.locator('[data-active-moment="range"]')).to_be_visible()
     page.locator('#player').evaluate('v=>{v.currentTime=1.75;}')
     expect(page.locator('[data-active-moment="range"]')).to_have_count(0)
+    page.locator('#player').evaluate('v=>{v.currentTime=.05;}')
+    expect(page.locator('#moment-cues .moment-cue')).to_have_count(0)
+    shrunk_panel=page.locator('#notes-panel').bounding_box()
+    assert abs(shrunk_panel['height']-empty_panel['height'])<=2
     page.locator('#player').evaluate('v=>{v.currentTime=.25;}')
     expect(page.locator('[data-active-moment="point"]')).to_have_count(0)
+    expect(page.locator('[data-active-moment="range"]')).to_be_visible()
     expect(page.locator('#player')).to_have_js_property('paused',True)
     expect(page.locator('#moment-toggle')).to_have_attribute('aria-expanded','false')
+    # Clicking an action button in the bar does not expand the panel.
+    page.get_by_role('button',name='Jump to next moment',exact=True).click()
+    expect(page.locator('#moment-toggle')).to_have_attribute('aria-expanded','false')
+    # Clicking the teaser inside the Moments panel expands the panel.
+    page.locator('[data-active-moment="range"]').click()
+    expect(page.locator('#moment-toggle')).to_have_attribute('aria-expanded','true')
+    expect(page.locator('#moment-panel-content')).to_be_visible()
+    page.locator('#moment-toggle').click()
+    expect(page.locator('#moment-toggle')).to_have_attribute('aria-expanded','false')
+    # Clicking the collapsed panel surface (outside action buttons) also expands it.
+    page.locator('#notes-panel').click(position={'x':4,'y':4})
+    expect(page.locator('#moment-toggle')).to_have_attribute('aria-expanded','true')
     assert not page.evaluate('document.documentElement.scrollWidth>innerWidth')
     assert not errors
     page.close()
