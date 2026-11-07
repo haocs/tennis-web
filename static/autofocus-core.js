@@ -149,6 +149,72 @@
     };
   }
 
+  function projectBoxToStage(box, stageWidth, stageHeight, videoWidth, videoHeight, framing = null) {
+    if (
+      !box ||
+      ![box.x, box.y, box.width, box.height, stageWidth, stageHeight, videoWidth, videoHeight].every(finite) ||
+      Math.min(stageWidth, stageHeight, videoWidth, videoHeight) <= 0 ||
+      box.width <= 0 ||
+      box.height <= 0
+    ) {
+      return null;
+    }
+    const active = Boolean(framing && finite(framing.zoom) && framing.zoom > 1.01);
+    const zoom = active ? framing.zoom : 1;
+    const tx = active && finite(framing.x) ? framing.x : 0;
+    const ty = active && finite(framing.y) ? framing.y : 0;
+    const bounds = panBounds(stageWidth, stageHeight, videoWidth, videoHeight, zoom);
+    const rw = bounds.renderedWidth * zoom;
+    const rh = bounds.renderedHeight * zoom;
+    const rawLeft = stageWidth / 2 + (box.x - 0.5) * rw + tx;
+    const rawTop = stageHeight / 2 + (box.y - 0.5) * rh + ty;
+    const rawRight = rawLeft + box.width * rw;
+    const rawBottom = rawTop + box.height * rh;
+    const left = clamp(rawLeft, 0, stageWidth);
+    const top = clamp(rawTop, 0, stageHeight);
+    const right = clamp(rawRight, 0, stageWidth);
+    const bottom = clamp(rawBottom, 0, stageHeight);
+    const width = Math.max(0, right - left);
+    const height = Math.max(0, bottom - top);
+    return {
+      left: Number(left.toFixed(2)),
+      top: Number(top.toFixed(2)),
+      width: Number(width.toFixed(2)),
+      height: Number(height.toFixed(2)),
+      rawLeft: Number(rawLeft.toFixed(2)),
+      rawTop: Number(rawTop.toFixed(2)),
+      rawWidth: Number((box.width * rw).toFixed(2)),
+      rawHeight: Number((box.height * rh).toFixed(2)),
+      visible: width >= 2 && height >= 2,
+    };
+  }
+
+  function diagnosticsVerdict(tracker, afEnabled = false, afState = 'off') {
+    if (!afEnabled || !tracker) {
+      return {
+        trackingState: afState || 'off',
+        playerStatus: afState === 'unavailable' ? 'unavailable' : 'off',
+        motion: 'not active',
+        playVerdict: 'not measured',
+        swingVerdict: 'not measured',
+      };
+    }
+    const state = afState === 'loading' || afState === 'unavailable' ? afState : tracker.state || 'idle';
+    let playerStatus = 'searching';
+    if (state === 'loading') playerStatus = 'loading detector';
+    else if (state === 'unavailable') playerStatus = 'unavailable';
+    else if (state === 'tracking') playerStatus = tracker.motion === 'moving' ? 'tracked · moving' : 'tracked · steady';
+    else if (state === 'holding') playerStatus = 'lost briefly · holding';
+    else if (state === 'searching') playerStatus = tracker.lostCount > 0 ? 'player lost · searching' : 'searching';
+    return {
+      trackingState: state,
+      playerStatus,
+      motion: state === 'tracking' ? tracker.motion || 'steady' : state === 'holding' ? 'holding' : 'lost',
+      playVerdict: 'not measured',
+      swingVerdict: 'not measured',
+    };
+  }
+
   class AutoFocusTracker {
     constructor(options = {}) {
       this.holdMs = finite(options.holdMs) ? options.holdMs : 750;
@@ -161,15 +227,40 @@
       this.current = {zoom: 1, x: 0, y: 0};
       this.target = {zoom: 1, x: 0, y: 0};
       this.trackedBox = null;
+      this.lastRawBox = null;
+      this.lastCandidates = [];
       this.lastDetectedAt = null;
       this.lostCount = 0;
+      this.motion = 'idle';
+      this.motionSpeed = 0;
       this.state = 'idle';
     }
 
     updateDetection(rawDetections, frameWidth, frameHeight, stageWidth, stageHeight, videoWidth, videoHeight, nowMs = 0) {
       const candidates = normalizeDetections(rawDetections, frameWidth, frameHeight);
       const chosen = selectPrimaryPerson(candidates, this.trackedBox);
+      this.lastCandidates = candidates.map(c => ({
+        ...c,
+        primary: Boolean(
+          chosen &&
+            Math.abs(c.x - chosen.x) <= 1e-6 &&
+            Math.abs(c.y - chosen.y) <= 1e-6 &&
+            Math.abs(c.width - chosen.width) <= 1e-6 &&
+            Math.abs(c.height - chosen.height) <= 1e-6
+        ),
+      }));
       if (chosen) {
+        const prevBox = this.lastRawBox || this.trackedBox;
+        if (prevBox && this.lastDetectedAt !== null && finite(nowMs) && nowMs >= this.lastDetectedAt) {
+          const dtSec = Math.max(0.05, (nowMs - this.lastDetectedAt) / 1000);
+          const delta = Math.hypot(chosen.cx - prevBox.cx, chosen.cy - prevBox.cy);
+          this.motionSpeed = Number((delta / dtSec).toFixed(3));
+          this.motion = delta >= 0.012 || this.motionSpeed >= 0.04 ? 'moving' : 'steady';
+        } else {
+          this.motionSpeed = 0;
+          this.motion = 'steady';
+        }
+        this.lastRawBox = {...chosen};
         if (this.trackedBox && Math.hypot(chosen.cx - this.trackedBox.cx, chosen.cy - this.trackedBox.cy) < 0.25) {
           const b = 0.55;
           const x = this.trackedBox.x * (1 - b) + chosen.x * b;
@@ -196,12 +287,16 @@
         this.state = 'tracking';
       } else {
         this.lostCount += 1;
+        this.motionSpeed = 0;
         if (this.lastDetectedAt !== null && finite(nowMs) && nowMs - this.lastDetectedAt <= this.holdMs) {
           this.state = 'holding';
+          this.motion = 'holding';
         } else {
           this.trackedBox = null;
+          this.lastRawBox = null;
           this.target = {zoom: 1, x: 0, y: 0};
           this.state = 'searching';
+          this.motion = 'lost';
         }
       }
       return {state: this.state, target: {...this.target}, trackedBox: this.trackedBox ? {...this.trackedBox} : null};
@@ -236,6 +331,8 @@
     selectPrimaryPerson,
     panBounds,
     targetFraming,
+    projectBoxToStage,
+    diagnosticsVerdict,
     AutoFocusTracker,
   };
 });

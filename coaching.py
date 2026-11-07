@@ -9,6 +9,7 @@ import sqlite3
 import time
 import uuid
 from coaching_annotations import Annotations
+from worker.tennis_coach.annotations import RENDER_SHARE_CAPABILITY
 
 
 class QueueConflict(ValueError):
@@ -20,9 +21,13 @@ def number(v):
 
 
 def recipe(body, data, clip):
+    intent = body.get('intent', 'coaching')
+    if intent not in ('coaching', 'share'):
+        raise ValueError('Invalid export intent')
     start, end = body.get('start'), body.get('end')
-    if not number(start) or not number(end) or not 0 <= start < end <= clip['duration_seconds'] + .05 or end-start > 30:
-        raise ValueError('Select between 0.1 and 30 seconds within this clip')
+    max_seconds = 120 if intent == 'share' else 30
+    if not number(start) or not number(end) or not 0 <= start < end <= clip['duration_seconds'] + .05 or end-start > max_seconds:
+        raise ValueError(f'Select between 0.1 and {max_seconds} seconds within this clip')
     if end-start < .1:
         raise ValueError('Select at least 0.1 seconds')
     speed = body.get('speed', 1)
@@ -37,18 +42,27 @@ def recipe(body, data, clip):
     question=body.get('question','')
     if not isinstance(question,str) or len(question)>4000:
         raise ValueError('Question must be at most 4000 characters')
-    quality = body.get('quality', 'balanced')
-    if quality not in ('balanced', 'small'):
+    quality = body.get('quality', 'high' if intent == 'share' else 'balanced')
+    if intent == 'share':
+        if quality != 'high':
+            raise ValueError('Invalid quality')
+    elif quality not in ('balanced', 'small'):
         raise ValueError('Invalid quality')
-    return dict(start=start, end=end, speed=speed, crop=crop, quality=quality,
+    spec = dict(start=start, end=end, speed=speed, crop=crop, quality=quality,
                 schema_version=1, question=question.strip(), source_id=data['id'], clip_id=clip['id'], publication=data['published_at'],
                 original_start=min(clip['original_end_seconds'],clip['original_start_seconds']+start),
                 original_end=min(clip['original_end_seconds'],clip['original_start_seconds']+end),
                 media_ref={'storage_id':'library', 'path':data.get('media_directory',data['id'])+'/'+clip['file']},
                 input_sha256=data.get('media_checksums',{}).get(clip['file']),
-                hdr=bool(data['video'].get('hdr')), audio='removed', color='sdr-bt709',
-                analysis_mode='timestamped_frames', renderer_version=1,
+                hdr=bool(data['video'].get('hdr')),
+                audio='retime_if_present' if intent == 'share' else 'removed',
+                color='sdr-bt709',
+                analysis_mode='none' if intent == 'share' else 'timestamped_frames',
+                renderer_version=2 if intent == 'share' else 1,
                 source_sha256=data.get('source',{}).get('sha256',data['id']),processing=data.get('processing'))
+    if intent == 'share':
+        spec.update(intent='share', required_capability=RENDER_SHARE_CAPABILITY)
+    return spec
 
 
 class Coaching(Annotations):

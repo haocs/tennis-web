@@ -6,31 +6,53 @@ container. The original tennis-processing service and worker are untouched.
 
 ## User flow
 
-Open **Study clip → Ask a coach**, mark a start/end (0.1–30 seconds), set a fixed
-focus with existing zoom/pan and select playback speed. **Prepare coaching clip**
-queues a media-only export. Preview the resulting muted SDR H.264 file, with the
-crop and speed baked in. Balanced limits the longest edge to 960 pixels; Smaller
-uses 640 pixels and higher compression. No upscaling; no exact byte-size promise.
-A 30-second selection at 0.1× is a five-minute exported video.
+Open **Study clip**, adjust the **Interval start** and **Interval end** pins on the
+study progress bar (0.1–30 seconds for coaching), set framing with the zoom scrubber
+and drag-to-pan, and choose playback speed (`0.1×`–`1×`).
 
-Choose either path:
+In **Ask a coach**, pick a preset question or type a custom question and click
+**Ask coach**. The browser captures an immutable snapshot of the selected interval,
+normalized crop, playback speed and prompt:
 
-- **Ask coach · send frames to OpenAI** sends up to 32 timestamped stills and the
-  question through a dedicated Mac AI worker using its ChatGPT/Codex sign-in. It
-  saves the answer and analysis mode automatically. This is **not native video
-  analysis**. Frame density is bounded and can miss events between frames.
-- Download the prepared video, copy the question plus timing and open regular
-  ChatGPT. Attach the video yourself. The media worker also keeps an excerpt,
-  prompt and metadata in its local task folder; `--package JOB_ID --role render`
-  prints that folder. No supported automatic local-video attachment/deep link has
-  been established. An MCP pickup/response tool remains a separate investigation;
-  no tunnel, custom connector or external inbound access is configured.
+1. **Preparing your clip…** — queues a `render` job (`intent: "coaching"`) that
+   renders the cropped, speed-adjusted SDR H.264 preview (`max_edge: 960`, muted)
+   and extracts up to 32 chronological evidence frames.
+2. **Getting response…** — once the coaching excerpt completes, automatically
+   submits the `ai` request using the dedicated Mac AI worker (`coaching-annotations-v1`)
+   and its ChatGPT/Codex sign-in. This is **not native video analysis**; frame
+   density is bounded and can miss events between frames.
+3. **Review response** — displays the AI coach summary, structured suggestions, and
+   clickable original-recording evidence stills. Each suggestion can be **Saved**
+   (accepted as a playback Moment cue) or **Discarded** (dismissed), or the user can
+   click **Re-ask** to ask a follow-up question reusing the prepared excerpt and
+   retained original-time evidence.
 
-Review the saved answer and write a short playback cue. Cues are shared app data;
-there are no inferred per-visitor AI accounts. A cue appears during the matching
-clip or combined-practice interval, and can be read without interrupting playback.
-Old publications retain their history but do not apply cues to new cuts silently.
-Regular ChatGPT answers are not imported automatically in this first version.
+### High-quality interval download (`intent: "share"`)
+
+Clicking **Download interval** in Clip study queues a separate render profile
+(`intent: "share"`, `quality: "high"`, `required_capability: "share-export-v1"`):
+
+- Preserves the selected `[start, end]` interval, normalized zoom/pan crop, and
+  playback speed at high spatial quality (`max_edge: 1920` without upscaling,
+  `crf: 18`, 30 fps H.264 `yuv420p`).
+- Retimes source audio when present using chained FFmpeg `atempo` filters (covering
+  `0.1×`–`1×` speeds) rather than inheriting the silent `-an` coaching preview path;
+  falls back cleanly to video-only when the source clip has no audio stream.
+- Applies the validated HDR-to-SDR Mobius tonemapping pipeline (`zscale` linear
+  transfer, `tonemap=mobius`, `bt709` primaries/transfer/matrix) when the source
+  clip is HDR, rather than simply relabeling HDR pixels as SDR. Input color metadata
+  remains authoritative; full HDR container metadata pass-through is not claimed.
+- Skips coaching frame extraction (`frame-*.jpg`) and `prompt.txt` generation,
+  publishing only `excerpt.mp4` and `recipe.json` to shared storage to minimize NAS
+  writes. Share exports cannot be submitted to `/api/coaching/requests` as coaching
+  evidence.
+- Requires render workers advertising `share-export-v1` (worker package `0.3.0+`) so
+  older render workers leave share jobs queued rather than producing low-resolution
+  muted output.
+
+Export tests encode real SDR and 10-bit HLG fixtures, verify the HDR input tags,
+then inspect output timing, dimensions, audio and color tags. These checks exercise
+conversion and metadata handling; they are not a color-reference calibration.
 
 ## Placement
 

@@ -1,7 +1,7 @@
 'use strict';
 const NoteUI=(()=>{
- let source=null,items=[],generation=0,timer=null,editing=null,editingKind='note',saveRequest=null,saving=false,markerKey='',lastCurrent=null,pendingHighlight=null,saveFingerprint=null;
- let editorContext=null,entityNotesTarget=null;
+ let source=null,items=[],itemsLoaded=false,itemsLoadedSourceId=null,itemsLoadedPub=null,loadError='',loadPromise=null,generation=0,timer=null,editing=null,editingKind='note',saveRequest=null,saving=false,markerKey='',lastCurrent=null,pendingHighlight=null,saveFingerprint=null;
+ let editorContext=null,entityNotesTarget=null,entityNotesGen=0,editNoteRecord={id:null,version:0,initialText:'',mode:'new',player_id:null,unloaded:true},editNoteDirty=false,editNoteSaveRequest=null,editNoteFingerprint=null;
  let cueTimer=null,cueKey='',mediaKey='',cueClock=new MomentPlayback.CueClock();
  const names={comment:'Moment',note:'Moment',highlight:'Highlight',usefulness:'Less useful',cut_feedback:'Cut report',coach:'Coach suggestion'};
  const reasons={poor_cut:'Poor cut',no_play:'No tennis play',downtime:'Too much downtime',too_short:'Too short',wrong_player:'Wrong player',start_early:'Start too early',start_late:'Start too late',end_early:'End too early',end_late:'End too late'};
@@ -32,13 +32,20 @@ const NoteUI=(()=>{
    do{const data=await api(`/api/recordings/${owner.id}/metadata${after?'?after='+encodeURIComponent(after):''}`);all.push(...data.annotations);after=data.next_after;}while(after&&rev===generation);
    if(owner!==source||rev!==generation)return;
    if($('#notes-status'))$('#notes-status').textContent='';
+   loadError='';
+   const wasUnloaded=!itemsLoaded||itemsLoadedSourceId!==owner.id||itemsLoadedPub!==owner.published_at;
    const changed=JSON.stringify(all)!==JSON.stringify(items);items=all;
+   itemsLoaded=true;itemsLoadedSourceId=owner.id;itemsLoadedPub=owner.published_at;
    for(const c of source.clips||[]){const hl=highlights(c);c.highlighted=hl.length>0;c.highlight_count=hl.length;}
    const homeSession=model.sessions.find(v=>v.id===source.id);
    if(homeSession&&homeSession!==source){for(const c of homeSession.clips||[]){const sc=source.clips.find(x=>x.id===c.id);if(sc){c.highlighted=sc.highlighted;c.highlight_count=sc.highlight_count;}}}
-   if(changed){if($('#clip-list'))renderClipList();render();renderEntityNotes();markers();}
+   if(changed||wasUnloaded||editNoteRecord.unloaded){if($('#clip-list'))renderClipList();render();renderEntityNotes();markers();}
    current();
-  }catch(e){const status=$('#notes-status');if(status)status.textContent='Notes unavailable. '+e.message;}
+  }catch(e){
+   loadError=e.message||'Could not load notes.';
+   const status=$('#notes-status');if(status)status.textContent='Notes unavailable. '+e.message;
+   renderEntityNotes();
+  }
  }
  async function create(kind,target,body,rid=requestId(),player_id=currentClip()?.main_player?.id||null,context={source_id:source.id,publication:source.published_at}){
   if(kind==='highlight'||target.scope==='point'||target.scope==='interval')return api('/api/moments',{method:'POST',body:JSON.stringify({original_recording_id:context.source_id,publication:context.publication,type:kind==='note'?'comment':kind,start_ms:Math.round(target.start_seconds*1000),...(target.end_seconds===undefined?{}:{end_ms:Math.round(target.end_seconds*1000)}),payload:body,request_id:rid,player_id})});
@@ -138,7 +145,7 @@ const NoteUI=(()=>{
    try{
     if(b.dataset.noteAction==='jump')jump(a);
     if(b.dataset.noteAction==='edit')openEditor(a.kind,a);
-    if(b.dataset.noteAction==='archive'){await update(a,{status:a.status==='active'?'archived':'active'});await refresh(true);toast(a.status==='active'?'Archived.':'Restored.');}
+    if(b.dataset.noteAction==='archive'){if(box.id==='entity-notes-list')editNoteDirty=false;await update(a,{status:a.status==='active'?'archived':'active'});await refresh(true);toast(a.status==='active'?'Archived.':'Restored.');}
     if(b.dataset.noteAction==='history'){const h=$('.note-history',card);let after=0,versions=[];do{const r=await api('/api/annotations/'+a.id+'/revisions'+(after?'?after='+after:''));versions.push(...r.revisions);after=r.next_after;}while(after);h.textContent=versions.map(r=>'v'+r.version+' · '+(r.status||'')+' · '+(r.body?.text||r.content?.cue||'')).join('\n');h.hidden=!h.hidden;}
     if(b.dataset.noteAction==='coach'){
      const fragment=MomentPlayback.inScope([a],scopeOptions())[0]?.fragments[0];const clip=source.clips.find(c=>c.id===(model.mode==='clip'?model.current:fragment?.clip_id));if(!clip)throw new Error('No current clip contains this suggestion. Its history is retained in the export.');
@@ -147,17 +154,132 @@ const NoteUI=(()=>{
    }catch(e){toast(e.message);if(e.status===409)await refresh(true);}finally{b.disabled=false;}
   });
  }
+ function isMetadataLoadedFor(target=entityNotesTarget){
+  return Boolean(target&&itemsLoaded&&itemsLoadedSourceId===target.source_id&&itemsLoadedPub===target.publication);
+ }
+ function targetEntityNotesFor(target=entityNotesTarget,includeArchived=false){
+  if(!target||!source||!isMetadataLoadedFor(target))return [];
+  return items.filter(a=>a.record_class==='entity_metadata'&&a.kind==='note'&&a.relation!=='historical_run'&&(target.clip_id?a.target.scope==='clip'&&a.target.clip_id===target.clip_id:a.target.scope==='video')&&(includeArchived||active(a)));
+ }
+ function targetEntityNotes(includeArchived=false){
+  return targetEntityNotesFor(entityNotesTarget,includeArchived);
+ }
+ function syncEditNoteFromItems(preserveDraft=false){
+  const field=$('#edit-note');if(!field||!entityNotesTarget)return;
+  const loaded=isMetadataLoadedFor(entityNotesTarget);
+  const activeNotes=targetEntityNotes(false);
+  if(loaded&&activeNotes.length===1){
+   const a=activeNotes[0],text=(a.body?.text||'').trim();
+   editNoteRecord={id:a.id,version:a.version,initialText:text,mode:'single',player_id:a.player_id||null,unloaded:false};
+   field.placeholder='';
+   if(!preserveDraft||!editNoteDirty)field.value=a.body?.text||'';
+  }else if(!loaded||activeNotes.length===0){
+   editNoteRecord={id:null,version:0,initialText:'',mode:'new',player_id:null,unloaded:!loaded};
+   field.placeholder='Add a note…';
+   if(!preserveDraft||!editNoteDirty)field.value='';
+  }else{
+   editNoteRecord={id:null,version:0,initialText:'',mode:'additional',player_id:null,unloaded:false};
+   field.placeholder='Add another note…';
+   if(!preserveDraft||!editNoteDirty)field.value='';
+  }
+ }
  function renderEntityNotes(){
-  const box=$('#entity-notes-list');if(!box||!entityNotesTarget)return;
+  const box=$('#entity-notes-list');if(!box||!entityNotesTarget||!source)return;
   const target=entityNotesTarget;
-  if(target.source_id!==source.id||target.publication!==source.published_at){box.textContent='This video changed. Close and reopen Notes.';return;}
-  const rows=items.filter(a=>a.record_class==='entity_metadata'&&a.kind==='note'&&a.relation!=='historical_run'&&(target.clip_id?a.target.scope==='clip'&&a.target.clip_id===target.clip_id:a.target.scope==='video')&&($('#entity-notes-archived').checked||active(a)));
+  if(target.source_id!==source.id||target.publication!==source.published_at){box.textContent='This video changed. Close the editor and refresh.';return;}
+  if(!isMetadataLoadedFor(target)){
+   box.innerHTML=loadError?`<p class="note-empty error-message">Notes unavailable. ${esc(loadError)}</p>`:'<p class="note-empty">Loading notes…</p>';
+   return;
+  }
+  if(!editNoteDirty||editNoteRecord.unloaded)syncEditNoteFromItems(true);
+  const rows=targetEntityNotes($('#entity-notes-archived')?.checked);
   renderRows(box,rows);
  }
- function openEntityNotes(){
-  entityNotesTarget={source_id:source.id,publication:source.published_at,clip_id:model.mode==='clip'?model.current:null};
-  $('#entity-notes-title').textContent=entityNotesTarget.clip_id?'Clip notes':'Video notes';
-  $('#entity-notes-archived').checked=false;renderEntityNotes();$('#entity-notes').showModal();
+ function openEntityNotes(target=null){
+  const sourceId=target?.video_id||target?.source_id||source?.id;
+  const publication=target?.publication??source?.published_at;
+  const clipId=target?target.clip_id:(model.mode==='clip'?model.current:null);
+  entityNotesGen++;
+  entityNotesTarget={source_id:sourceId,publication,clip_id:clipId||null,gen:entityNotesGen};
+  editNoteDirty=false;editNoteSaveRequest=requestId();editNoteFingerprint=null;
+  if($('#entity-notes-archived'))$('#entity-notes-archived').checked=false;
+  if($('#edit-load-latest-note'))$('#edit-load-latest-note').hidden=true;
+  syncEditNoteFromItems(false);renderEntityNotes();
+  loadPromise=refresh(true);
+ }
+ function captureEditNote(target=null){
+  const field=$('#edit-note');
+  if(!field||!entityNotesTarget)return {changed:false};
+  const context={...entityNotesTarget};
+  if(target&&(context.source_id!==target.video_id||context.clip_id!==(target.clip_id||null)||context.publication!==target.publication)){
+   return {changed:false,mismatch:true};
+  }
+  const text=field.value.trim();
+  const record={...editNoteRecord};
+  const changed=record.unloaded?Boolean(text):text!==record.initialText;
+  const selected=context.clip_id?source?.clips.find(c=>c.id===context.clip_id):null;
+  const clipTargetData=context.clip_id?(selected?clipTarget(selected):null):{scope:'video'};
+  const player_id=selected?.main_player?.id||null;
+  const fingerprint=JSON.stringify([context.source_id,context.publication,context.clip_id,record.id,record.version,text,clipTargetData,player_id]);
+  if(fingerprint!==editNoteFingerprint){editNoteFingerprint=fingerprint;editNoteSaveRequest=requestId();}
+  return {changed,text,context,record,gen:context.gen,clipTargetData,player_id,saveRequest:editNoteSaveRequest};
+ }
+ function hasEditNoteChange(){
+  return captureEditNote().changed;
+ }
+ function loadLatestEditNote(){
+  editNoteDirty=false;
+  syncEditNoteFromItems(false);
+  if($('#edit-load-latest-note'))$('#edit-load-latest-note').hidden=true;
+  if($('#edit-error'))$('#edit-error').textContent='';
+ }
+ async function saveEditNote(snapshot=captureEditNote()){
+  if(!snapshot||snapshot.mismatch)throw new Error('This clip changed. Close the editor and refresh before saving.');
+  if(!snapshot.changed)return;
+  const context=snapshot.context;
+  if(!source||source.id!==context.source_id||source.published_at!==context.publication)throw new Error('This video changed. Close the editor and refresh before saving.');
+  if(!isMetadataLoadedFor(context)){
+   if(loadPromise)await loadPromise;
+   if(!isMetadataLoadedFor(context)){loadPromise=refresh(true);await loadPromise;}
+   if(!source||source.id!==context.source_id||source.published_at!==context.publication)throw new Error('This video changed. Close the editor and refresh before saving.');
+   if(!isMetadataLoadedFor(context))throw new Error('Notes unavailable. '+(loadError||'Try saving again once notes load.'));
+  }
+  let record=snapshot.record;
+  if(record.unloaded){
+   const activeNotes=targetEntityNotesFor(context,false);
+   if(activeNotes.length>0){
+    if(entityNotesGen===snapshot.gen){
+     syncEditNoteFromItems(true);
+     if($('#edit-load-latest-note'))$('#edit-load-latest-note').hidden=false;
+    }
+    throw new Error('Existing notes loaded. Load the latest saved note before saving.');
+   }
+   record={id:null,version:0,initialText:'',mode:'new',player_id:null,unloaded:false};
+   if(entityNotesGen===snapshot.gen)syncEditNoteFromItems(true);
+  }
+  const text=snapshot.text;
+  if(text===record.initialText)return;
+  try{
+   if(record.mode==='single'&&record.id){
+    const currentRecord={id:record.id,version:record.version,kind:'note',record_class:'entity_metadata'};
+    if(!text){
+     await update(currentRecord,{status:'archived'},context);
+    }else{
+     await update(currentRecord,{body:{text},player_id:record.player_id},context);
+    }
+   }else if(text){
+    if(context.clip_id&&!snapshot.clipTargetData)throw new Error('Choose a current clip for this target');
+    await create('note',snapshot.clipTargetData,{text},snapshot.saveRequest,snapshot.player_id,context);
+   }
+   if(entityNotesGen===snapshot.gen){
+    editNoteDirty=false;
+    if($('#edit-load-latest-note'))$('#edit-load-latest-note').hidden=true;
+   }
+   await refresh(true);
+  }catch(e){
+   if(e.status===409){await refresh(true);if(entityNotesGen===snapshot.gen&&$('#edit-load-latest-note'))$('#edit-load-latest-note').hidden=false;}
+   throw e;
+  }
  }
  function editorScope(){
   const scope=$('#note-scope').value,timed=scope==='point'||scope==='interval';
@@ -186,13 +308,17 @@ const NoteUI=(()=>{
   $('#note-cut-reasons').hidden=kind!=='cut_feedback';$$('#note-cut-reasons input').forEach(e=>e.checked=(a?.body.reasons||[]).includes(e.value));
   $('#note-retarget-row').hidden=!a||!timed;$('#note-retarget').checked=false;
   $('#note-editor-context').textContent=a?targetLabel(a)+(relationLabel(a)?' · '+relationLabel(a):''):'';
-  $('#note-player').innerHTML='<option value="">No player specified</option>'+model.players.map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join('');$('#note-player').value=a?.player_id||currentClip()?.main_player?.id||'';
-  $('#note-editor-error').textContent='';$('#note-load-latest').hidden=true;editorScope();$('#note-editor').showModal();
+  const targetClip=editorContext.clip_id?source.clips.find(c=>c.id===editorContext.clip_id):null;
+  $('#note-player').innerHTML='<option value="">No player specified</option>'+model.players.map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join('');$('#note-player').value=a?.player_id||(editorContext.clip_id?targetClip?.main_player?.id:currentClip()?.main_player?.id&&timed?currentClip()?.main_player?.id:'')||'';
+  $('#note-editor-error').textContent='';$('#note-load-latest').hidden=true;editorScope();if($('#edit-dialog')?.open)$('#edit-dialog').inert=true;$('#note-editor').showModal();
  }
  function init(){
   const node=document.createElement('div');node.innerHTML=`<dialog id="note-editor" aria-labelledby="note-editor-title"><form id="note-form" novalidate><div class="dialog-heading"><h2 id="note-editor-title">Add note</h2><button type="button" class="icon-button" id="note-close" aria-label="Close note editor">×</button></div><p id="note-editor-context"></p><label id="note-retarget-row" class="check-label"><input type="checkbox" id="note-retarget">Change timing or target</label><fieldset id="note-target-fields"><label id="note-scope-row">Applies to<select id="note-scope" aria-label="Note target"></select></label><label id="note-clip-row">Clip<select id="note-target-clip" aria-label="Note clip"></select></label><label id="note-start-row">Original start (seconds)<input type="number" id="note-start" min="0" step="0.001"></label><label class="check-label" id="note-optional-end-row"><input type="checkbox" id="note-optional-end">End time</label><label id="note-end-row">Original end (seconds)<input type="number" id="note-end" min="0" step="0.001"></label></fieldset><label><span id="note-text-label">Note</span><textarea id="note-text" rows="3" maxlength="2000"></textarea></label><label id="note-reason-row">Reason<select id="note-usefulness-reason" aria-label="Usefulness reason"><option value="">Not specified</option><option value="low_information">Low information</option><option value="repetitive">Repetitive</option><option value="poor_view">Poor view</option><option value="other">Other</option></select></label><fieldset id="note-cut-reasons"><legend>Cut issues</legend>${Object.entries(reasons).map(([k,v])=>`<label class="check-label"><input type="checkbox" value="${k}">${v}</label>`).join('')}</fieldset><label>Player (optional)<select id="note-player" aria-label="Note player"></select></label><p id="note-editor-error" class="error-message" role="alert"></p><button type="button" class="button" id="note-load-latest" hidden>Load latest saved version</button><button type="submit" class="button primary" id="note-save">Save note</button></form></dialog>`;document.body.append(node);
-  document.body.insertAdjacentHTML('beforeend',`<dialog id="entity-notes" aria-labelledby="entity-notes-title"><div class="dialog-heading"><h2 id="entity-notes-title">Notes</h2><button type="button" class="icon-button" id="entity-notes-close" aria-label="Close entity notes">×</button></div><div class="notes-toolbar"><button type="button" class="button small" id="entity-note-add">Add note</button><label class="check-label"><input type="checkbox" id="entity-notes-archived">Show archived notes</label></div><div id="entity-notes-list"></div></dialog>`);
-  $('#entity-notes-close').onclick=()=>$('#entity-notes').close();$('#entity-note-add').onclick=()=>openEditor();$('#entity-notes-archived').onchange=renderEntityNotes;
+  $('#note-editor').addEventListener('close',()=>{if($('#edit-dialog'))$('#edit-dialog').inert=false;});
+  if($('#entity-note-add'))$('#entity-note-add').onclick=()=>openEditor('note');
+  if($('#entity-notes-archived'))$('#entity-notes-archived').onchange=renderEntityNotes;
+  if($('#edit-note'))$('#edit-note').addEventListener('input',()=>{editNoteDirty=true;});
+  if($('#edit-load-latest-note'))$('#edit-load-latest-note').onclick=loadLatestEditNote;
   $('#note-load-latest').onclick=()=>{const latest=items.find(a=>a.id===editing?.id);if(latest)openEditor(latest.kind,latest);else location.reload();};
   $('#note-close').onclick=()=>$('#note-editor').close();$('#note-scope').onchange=editorScope;$('#note-retarget').onchange=()=>{editorScope();$('#note-optional-end').disabled=!$('#note-retarget').checked;};$('#note-optional-end').onchange=()=>{if($('#note-optional-end').checked){const s=msRound($('#note-start').value),e=Number($('#note-end').value);if(!Number.isFinite(e)||e<=s)$('#note-end').value=msRound(Math.min(msMaxEnd(source.source.duration_seconds),(Number.isFinite(s)?s:0)+1));else $('#note-end').value=msRound(e);}$('#note-scope').value=$('#note-optional-end').checked?'interval':'point';editorScope();};
   $('#note-form').onsubmit=async e=>{
@@ -207,6 +333,11 @@ const NoteUI=(()=>{
     const timing=target||editing?.target;
     const timed=timing&&['point','interval'].includes(timing.scope);
     if(editingKind==='note'&&!timed&&!body.text)throw new Error('Enter a note.');
+    if(editingKind==='note'&&!timed&&!editing&&!isMetadataLoadedFor(context)){
+     if(loadPromise)await loadPromise;
+     if(!isMetadataLoadedFor(context)){loadPromise=refresh(true);await loadPromise;}
+     if(!isMetadataLoadedFor(context))throw new Error('Notes unavailable. '+(loadError||'Try saving again once notes load.'));
+    }
     if(timed){
      const lo=timing.start_seconds,hi=timing.end_seconds;
      if(!Number.isFinite(lo)||lo<0||lo>=source.source.duration_seconds||hi!==undefined&&(!Number.isFinite(hi)||hi<=lo||hi>source.source.duration_seconds))throw new Error('Choose a start within the recording and an optional later end.');
@@ -217,6 +348,7 @@ const NoteUI=(()=>{
     const fingerprint=JSON.stringify([body,target,player_id]);if(fingerprint!==saveFingerprint){saveFingerprint=fingerprint;saveRequest=requestId();}
     if(editing)await update(editing,{body,player_id,...(target?{target}:{})},context);
     else await create(editingKind,target,body,saveRequest,player_id,context);
+    if(editingKind==='note'&&!timed)editNoteDirty=false;
     await refresh(true);$('#note-editor').close();
     if(editingKind==='comment'||editing?.record_class==='moment'){
      const savedType=editing?momentType(editing):editingKind==='highlight'?'highlight':'comment';
@@ -228,27 +360,34 @@ const NoteUI=(()=>{
   };
  }
  function setExpanded(open){
-  const toggle=$('#moment-toggle');if(!toggle)return;toggle.setAttribute('aria-expanded',String(open));$('#moment-panel-content').hidden=!open;if(open)render();
+  const toggle=$('#moment-toggle');if(!toggle)return;toggle.setAttribute('aria-expanded',String(open));$('#moment-panel-content').hidden=!open;
+  $('#notes-panel')?.classList.toggle('expanded',open);
+  if(open)render();
  }
  function mount(s){
-  source=s;items=[];markerKey='';lastCurrent=null;generation++;clearInterval(timer);clearTimeout(cueTimer);cueClock.reset();mediaKey='';cueKey='';
+  source=s;items=[];itemsLoaded=false;itemsLoadedSourceId=null;itemsLoadedPub=null;loadError='';markerKey='';lastCurrent=null;generation++;clearInterval(timer);clearTimeout(cueTimer);cueClock.reset();mediaKey='';cueKey='';
   const markers=document.createElement('div');markers.id='note-markers';markers.className='note-markers';markers.setAttribute('aria-label','Moments on playback timeline');$('#video-seek').after(markers);
   const player=$('#player');player.addEventListener('loadedmetadata',()=>current());player.addEventListener('timeupdate',()=>current());
   player.addEventListener('seeked',()=>cueTick(true));player.addEventListener('play',()=>cueTick());player.addEventListener('pause',()=>cueTick());player.addEventListener('ended',()=>cueTick());
   player.addEventListener('emptied',()=>{clearTimeout(cueTimer);cueClock.reset();cueKey='';$('#moment-cues')?.replaceChildren();});
   window.addEventListener('coach-notes-changed',refresh);document.addEventListener('visibilitychange',()=>cueTick(true));
-  $('.player-shell').insertAdjacentHTML('afterend',`<section id="moments-area" aria-label="Moment panel"><div id="moment-cues" class="moment-cues" role="status" aria-live="polite" aria-atomic="true"></div><div id="notes-panel" class="notes-panel"><div class="moment-bar"><button type="button" id="moment-toggle" aria-expanded="false" aria-controls="moment-panel-content">Moments <span aria-hidden="true">⌄</span></button><button type="button" class="button small" id="moment-jump" aria-label="Jump to next moment" hidden>Jump</button><button type="button" class="button small" id="note-highlight" aria-label="Highlight this moment">Highlight</button><button type="button" class="button small" id="add-moment" aria-label="Add moment">+ Moment</button></div><div id="moment-panel-content" hidden><div class="notes-toolbar moment-filters"><select id="moment-type" aria-label="Moment type"><option value="all">All types</option><option value="highlight">Highlight</option><option value="coaching">Coaching</option><option value="comment">Moment</option></select><label class="check-label"><input id="notes-archived" type="checkbox">Show archived</label></div><p id="notes-status" role="status"></p><div id="notes-list"></div></div></div></section>`);
+  $('.player-shell').insertAdjacentHTML('afterend',`<section id="moments-area" aria-label="Moment panel"><div id="notes-panel" class="notes-panel"><div class="moment-bar"><button type="button" id="moment-toggle" aria-expanded="false" aria-controls="moment-panel-content">Moments <span aria-hidden="true">⌄</span></button><button type="button" class="button small" id="moment-jump" aria-label="Jump to next moment" hidden>Jump</button><button type="button" class="button small" id="note-highlight" aria-label="Highlight this moment">Highlight</button><button type="button" class="button small" id="add-moment" aria-label="Add moment">+ Moment</button></div><div id="moment-cues" class="moment-cues" role="status" aria-live="polite" aria-atomic="true"></div><div id="moment-panel-content" hidden><div class="notes-toolbar moment-filters"><select id="moment-type" aria-label="Moment type"><option value="all">All types</option><option value="highlight">Highlight</option><option value="coaching">Coaching</option><option value="comment">Moment</option></select><label class="check-label"><input id="notes-archived" type="checkbox">Show archived</label></div><p id="notes-status" role="status"></p><div id="notes-list"></div></div></div></section>`);
   $('#note-highlight').onclick=highlight;$('#note-demote').onclick=demote;$('#moment-jump').onclick=nextMoment;$('#add-moment').onclick=()=>openEditor('comment');
-  $('#moment-toggle').onclick=()=>setExpanded($('#moment-toggle').getAttribute('aria-expanded')!=='true');$('#moment-type').onchange=render;$('#notes-archived').onchange=render;
-  const more=$('.player-more');more.classList.remove('hidden');$('.player-more-list').insertAdjacentHTML('beforeend',`<button type="button" id="entity-notes-open">Notes</button><a class="note-cut-link" href="/review/${s.id}/cuts">Review cuts</a>`);$('#entity-notes-open').onclick=()=>{more.open=false;openEntityNotes();};
+  $('#moment-toggle').onclick=()=>setExpanded($('#moment-toggle').getAttribute('aria-expanded')!=='true');
+  $('#notes-panel').addEventListener('click',e=>{
+   if(e.target.closest('button,select,input,label,a,summary,details,#moment-panel-content'))return;
+   if(e.target.closest('#moment-cues,.moment-cue')||$('#moment-toggle')?.getAttribute('aria-expanded')!=='true')setExpanded(true);
+  });
+  $('#moment-type').onchange=render;$('#notes-archived').onchange=render;
+  const more=$('.player-more');more.classList.remove('hidden');$('.player-more-list').insertAdjacentHTML('beforeend',`<a class="note-cut-link" href="/review/${s.id}/cuts">Review cuts</a>`);
   const toolbar=$('.clip-toolbar .toolbar');toolbar.insertAdjacentHTML('beforeend','<select id="note-clip-filter" aria-label="Clip focus"><option value="all">All clips</option><option value="recommended">Recommended</option><option value="liked">Liked only</option><option value="highlights">Highlights</option></select>');$('#note-clip-filter').value=model.noteFilter||'all';$('#note-clip-filter').onchange=e=>{model.noteFilter=e.target.value;renderClipList();};
-  refresh();timer=setInterval(refresh,10000);
+  loadPromise=refresh(true);timer=setInterval(refresh,10000);
  }
  function cuts(s){
-  source=s;model.session=s;items=[];generation++;clearInterval(timer);nav();
+  source=s;model.session=s;items=[];itemsLoaded=false;itemsLoadedSourceId=null;itemsLoadedPub=null;loadError='';generation++;clearInterval(timer);nav();
   $('#main').innerHTML=`<div class="review-breadcrumb"><a href="/review/${s.id}">Back to review</a><span>/</span>Review cuts</div><h1>Review cuts</h1><p>Reports refer to the processed version you reviewed. They do not change your videos.</p><label>Clip<select id="cut-clip" aria-label="Review clip">${s.clips.map(c=>`<option value="${c.id}">Clip ${c.index}</option>`).join('')}</select></label><video class="cut-review-player" id="cut-video" controls playsinline preload="metadata"></video><p id="cut-original"></p><button type="button" class="button primary" id="cut-report">Report this cut</button><section class="notes-panel"><h2>Cut reports</h2><label class="check-label"><input id="notes-archived" type="checkbox">Archived</label><p id="notes-status" role="status"></p><div id="cut-report-list"></div></section>`;
   const choose=()=>{const c=s.clips.find(c=>c.id===$('#cut-clip').value);model.current=c.id;$('#cut-video').src=mediaURL(s,c.file);$('#cut-original').textContent='Original '+preciseTime(c.original_start_seconds)+'–'+preciseTime(c.original_end_seconds);};
-  $('#cut-clip').onchange=choose;$('#cut-report').onclick=()=>{$('#cut-video').pause();openEditor('cut_feedback');};$('#notes-archived').onchange=render;choose();refresh();timer=setInterval(refresh,10000);
+  $('#cut-clip').onchange=choose;$('#cut-report').onclick=()=>{$('#cut-video').pause();openEditor('cut_feedback');};$('#notes-archived').onchange=render;choose();loadPromise=refresh(true);timer=setInterval(refresh,10000);
  }
- return {init,mount,cuts,current,clipBadge,filterClip,hasMoments,refresh};
+ return {init,mount,cuts,current,clipBadge,filterClip,hasMoments,refresh,openEntityNotes,captureEditNote,hasEditNoteChange,saveEditNote,loadLatestEditNote};
 })();

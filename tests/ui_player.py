@@ -340,6 +340,11 @@ def test_clip_study_action_precision_and_return(browser, ui_server):
     dialog = page.get_by_role('dialog', name='Clip study · 01', exact=True)
     expect(dialog).to_be_visible()
     expect(page.locator('#study-play')).to_be_enabled()
+    expect(page.locator('#study-mute,#study-reset')).to_have_count(0)
+    expect(page.locator('#study-back')).to_have_text('<')
+    expect(page.locator('#study-forward')).to_have_text('>')
+    expect(page.locator('#study-pin-start')).to_have_attribute('aria-valuenow', '0')
+    expect(page.locator('#study-pin-end')).to_have_attribute('aria-valuenow', '2')
     assert page.locator('#player').evaluate('v => v.paused')
     dialog.get_by_role('button', name='Step forward 0.1 seconds').click()
     assert page.locator('#study-video').evaluate('v => v.currentTime') == pytest.approx(.5, abs=.08)
@@ -350,8 +355,10 @@ def test_clip_study_action_precision_and_return(browser, ui_server):
     for _ in range(4):
         zoom.press('ArrowRight')
     expect(page.locator('#study-zoom-value')).to_have_text('2×')
-    dialog.get_by_role('checkbox', name='Loop clip', exact=True).check()
-    assert page.locator('#study-video').evaluate('v => v.loop')
+    loop_btn = dialog.get_by_role('button', name='Loop clip', exact=True)
+    expect(loop_btn).to_have_attribute('aria-pressed', 'false')
+    loop_btn.click()
+    expect(loop_btn).to_have_attribute('aria-pressed', 'true')
     dialog.get_by_role('button', name='← Back to review', exact=True).click()
     expect(dialog).not_to_be_visible()
     # The native dialog close event runs after its open attribute is removed.
@@ -373,6 +380,8 @@ def test_clip_study_frame_package_is_local_and_resets(browser, ui_server, tmp_pa
     page.goto(ui_server+f'/review/{ID}?clip={CLIP}')
     page.get_by_role('button', name='Study clip', exact=True).click()
     dialog = page.get_by_role('dialog', name='Clip study · 01', exact=True)
+    expect(dialog.locator('.study-extra-tools')).not_to_have_attribute('open', '')
+    dialog.get_by_text('Recording & frame tools', exact=True).click()
     expect(dialog.get_by_role('button', name='Sample 6 moments', exact=True)).to_be_enabled()
     dialog.get_by_role('button', name='Sample 6 moments', exact=True).click()
     expect(page.locator('.study-frame')).to_have_count(6, timeout=15000)
@@ -403,22 +412,33 @@ def test_coaching_selection_queues_export_without_ai_upload(browser, ui_server):
     page.goto(ui_server+f'/review/{ID}?clip={CLIP}')
     page.get_by_role('button',name='Study clip',exact=True).click()
     expect(page.locator('#study-play')).to_be_enabled()
-    expect(page.locator('#coach-prepare')).to_be_enabled()
-    page.get_by_role('textbox',name='What would you like help with?',exact=True).fill('Check my balance')
+    expect(page.locator('#coach-ask')).to_be_enabled()
+    page.locator('#study-pin-start').evaluate("el => { el.value = 0.2; el.dispatchEvent(new Event('input', {bubbles:true})); }")
+    page.locator('#study-pin-end').evaluate("el => { el.value = 1.4; el.dispatchEvent(new Event('input', {bubbles:true})); }")
+    page.get_by_label('Preset',exact=True).select_option('footwork')
+    expect(page.locator('#coach-question')).to_have_value(re.compile('footwork'))
+    page.get_by_role('textbox',name='Question for coach',exact=True).fill('Check my balance')
     zoom=page.get_by_role('slider',name='Video zoom',exact=True)
     zoom.press('Home')
     for _ in range(4):zoom.press('ArrowRight')
     with page.expect_response(lambda r:r.url.endswith('/api/coaching/exports') and r.request.method=='POST') as event:
-        page.get_by_role('button',name='Prepare coaching clip',exact=True).click()
+        page.get_by_role('button',name='Ask coach',exact=True).click()
     response=event.value
     assert response.status==201
     job=response.json()
     assert job['role']=='render' and job['state']=='queued'
     spec=job['body']
     assert spec['question']=='Check my balance' and spec['speed']==.5
+    assert spec['start']==pytest.approx(0.2,abs=0.01) and spec['end']==pytest.approx(1.4,abs=0.01)
     assert 0 < min(spec['crop'][2:]) < 1
     expect(page.locator('#coach-ask')).to_be_disabled()
-    expect(page.locator('#coach-status')).to_contain_text('queued',ignore_case=True)
+    expect(page.locator('#coach-status')).to_contain_text('Preparing your clip…')
+    with page.expect_response(lambda r:r.url.endswith('/api/coaching/exports') and r.request.method=='POST') as share_event:
+        page.get_by_role('button',name='Download interval',exact=True).click()
+    share_job=share_event.value.json()
+    assert share_job['body']['intent']=='share' and share_job['body']['quality']=='high'
+    assert share_job['body']['start']==pytest.approx(0.2,abs=0.01) and share_job['body']['end']==pytest.approx(1.4,abs=0.01)
+    expect(page.locator('#study-status')).to_contain_text('Preparing high-quality download…')
     page.get_by_role('button',name='← Back to review',exact=True).click()
     page.close()
 
@@ -539,10 +559,8 @@ def test_structured_coaching_evidence_review_and_draft(browser, ui_server, width
     page.goto(ui_server+f'/review/{ID}?clip={CLIP}')
     page.get_by_role('button',name='Study clip',exact=True).click()
     if width<761:page.get_by_role('button',name='Coach',exact=True).click()
-    question=page.get_by_role('textbox',name='What would you like help with?',exact=True)
-    if width<761:page.locator('#coach-question-options summary').click()
+    question=page.get_by_role('textbox',name='Question for coach',exact=True)
     question.fill('Keep my custom question')
-    page.locator('#coach-step-4').click()
     expect(page.get_by_role('heading',name='Balanced reset',exact=True)).to_be_visible()
     card=page.locator('.coach-suggestion')
     expect(card.get_by_text('Needs your review',exact=True)).to_be_visible()
@@ -550,27 +568,26 @@ def test_structured_coaching_evidence_review_and_draft(browser, ui_server, width
     expect(image).to_have_attribute('src','/api/coaching/evidence/job-test/f_test.jpg')
     card.get_by_role('button',name=re.compile('Frame 1')).click()
     assert page.locator('#study-video').evaluate('v=>v.currentTime')==pytest.approx(.5,abs=.08)
-    card.get_by_role('button',name='Accept suggestion',exact=True).click()
-    expect(page.locator('.coach-review-state')).to_have_text('Accepted')
+    card.get_by_role('button',name='Discard',exact=True).click()
+    expect(page.locator('.coach-review-state')).to_have_text('Discarded')
+    card.get_by_role('button',name='Save',exact=True).click()
+    expect(page.locator('.coach-review-state')).to_have_text('Saved')
     assert page.locator('#clip-study').evaluate('d=>d.scrollWidth<=d.clientWidth')
     page.get_by_role('button',name='← Back to review',exact=True).click()
     page.get_by_role('button',name='Study clip',exact=True).click()
-    expect(page.locator('#coach-step-4')).to_have_attribute('aria-current','step')
     if width<761:page.get_by_role('button',name='Coach',exact=True).click()
-    page.locator('#coach-step-1').click()
     expect(question).to_have_value('Keep my custom question')
-    page.locator('#coach-step-4').click()
-    page.get_by_role('button',name='Ask a follow-up',exact=True).click()
-    follow=page.get_by_role('textbox',name='Your question',exact=True)
-    expect(follow).to_be_visible()
-    follow.fill('Please reassess all snapshots, including footwork.')
+    page.get_by_role('button',name='Re-ask',exact=True).click()
+    expect(question).to_be_visible()
+    question.fill('Please reassess all snapshots, including footwork.')
     sent=[]
     def ask(route):
         sent.append(route.request.post_data_json)
         new=copy.deepcopy(job);new.update(id='follow-up-job',version=1,state='queued');new['body'].update(prompt=sent[-1]['prompt'],follow_up_of='job-test');state['jobs'].insert(0,new)
         route.fulfill(status=201,json=new)
     page.route('**/api/coaching/requests',ask)
-    page.get_by_role('button',name='Send follow-up · frames to OpenAI',exact=True).click()
+    page.get_by_role('button',name='Ask coach',exact=True).click()
+    expect(page.locator('#coach-status')).to_have_text('Getting response…')
     expect(page.locator('#coach-history')).to_contain_text('Queued')
     assert sent[0]['follow_up_of']=='job-test' and sent[0]['export_id']=='render-test'
     assert sent[0]['prompt']=='Please reassess all snapshots, including footwork.'
@@ -580,18 +597,37 @@ def test_structured_coaching_evidence_review_and_draft(browser, ui_server, width
 
 def test_normal_playback_ignores_coaching_end_until_play_selection(browser,ui_server):
     page=browser.new_page()
+    csp_errors=[]
+    page.add_init_script("window.cspViolations=[]; document.addEventListener('securitypolicyviolation', e => window.cspViolations.push(e.blockedURI + ':' + e.violatedDirective));")
     page.goto(ui_server+f'/review/{ID}?clip={CLIP}')
     page.get_by_role('button',name='Study clip',exact=True).click()
     expect(page.locator('#study-play')).to_be_enabled()
-    page.locator('#coach-out').evaluate("e=>{e.value=.3;e.dispatchEvent(new Event('input',{bubbles:true}));}")
+    bar_box=page.locator('#study-interval-bar').bounding_box()
+    pin_start=page.locator('#study-pin-start')
+    pin_end=page.locator('#study-pin-end')
+    # Drag start pin to ~10% (0.2s) and end pin to ~35% (0.7s) along the progress bar.
+    start_box=pin_start.bounding_box()
+    page.mouse.move(start_box['x']+start_box['width']/2,start_box['y']+start_box['height']/2)
+    page.mouse.down()
+    page.mouse.move(bar_box['x']+bar_box['width']*0.1,bar_box['y']+bar_box['height']/2)
+    page.mouse.up()
+    end_box=pin_end.bounding_box()
+    page.mouse.move(end_box['x']+end_box['width']/2,end_box['y']+end_box['height']/2)
+    page.mouse.down()
+    page.mouse.move(bar_box['x']+bar_box['width']*0.35,bar_box['y']+bar_box['height']/2)
+    page.mouse.up()
+    assert float(pin_start.get_attribute('aria-valuenow'))==pytest.approx(0.2,abs=0.05)
+    assert float(pin_end.get_attribute('aria-valuenow'))==pytest.approx(0.7,abs=0.05)
+    # Without loop, playing starts at intervalStart (0.2s) and pauses at intervalEnd (0.7s).
     page.get_by_role('button',name='Play',exact=True).click()
-    page.wait_for_function("()=>document.querySelector('#study-video').currentTime>.6&&!document.querySelector('#study-video').paused")
+    page.wait_for_function("()=>document.querySelector('#study-video').paused&&document.querySelector('#study-video').currentTime>=0.65")
+    assert page.locator('#study-video').evaluate('v=>v.currentTime')==pytest.approx(0.7,abs=0.06)
+    # With loop enabled, reaching intervalEnd wraps back to intervalStart and keeps playing.
+    page.get_by_role('button',name='Loop clip',exact=True).click()
+    page.get_by_role('button',name='Play',exact=True).click()
+    page.wait_for_function("()=>!document.querySelector('#study-video').paused&&document.querySelector('#study-video').currentTime>=0.18&&document.querySelector('#study-video').currentTime<=0.45")
     page.get_by_role('button',name='Pause',exact=True).click()
-    page.get_by_role('button',name='Play selection',exact=True).click()
-    page.wait_for_function("()=>document.querySelector('#study-video').paused&&document.querySelector('#study-video').currentTime>=.3")
-    assert page.locator('#study-video').evaluate('v=>v.currentTime')<.7
-    page.get_by_role('button',name='Play',exact=True).click()
-    page.wait_for_function("()=>document.querySelector('#study-video').currentTime>.8&&!document.querySelector('#study-video').paused")
+    assert page.evaluate('window.cspViolations')==[]
     page.close()
 
 
@@ -622,9 +658,8 @@ def test_player_profiles_assignments_and_filters(browser, ui_server):
     assert not page.evaluate('document.documentElement.scrollWidth > innerWidth')
     page.get_by_role('button',name='Study clip',exact=True).click()
     page.locator('#study-mode-coach').click()
-    page.locator('#coach-step-3').click()
     expect(page.locator('#coach-player-context')).to_contain_text(name)
-    expect(page.locator('#coach-send-question')).not_to_have_value(re.compile('I am a beginner'))
+    expect(page.locator('#coach-question')).not_to_have_value(re.compile('I am a beginner'))
     page.get_by_role('button',name='← Back to review',exact=True).click()
     page.goto(ui_server+'/')
     page.get_by_role('combobox',name='Filter by player',exact=True).select_option(label=name)
@@ -878,12 +913,14 @@ def test_session_metadata_and_entity_note_targets(browser,ui_server,width):
     expect(page.locator('.session-note').first).to_have_text('Recovery drills')
     page.goto(ui_server+f'/review/{ID}?clip={CLIP}')
     page.get_by_label('More video actions',exact=True).click()
-    page.get_by_role('button',name='Notes',exact=True).click()
-    expect(page.get_by_role('dialog',name='Clip notes',exact=True)).to_be_visible()
+    expect(page.locator('.player-more-list').get_by_role('button',name='Notes',exact=True)).to_have_count(0)
+    page.get_by_label('More video actions',exact=True).click()
+    page.get_by_role('button',name='Edit clip',exact=True).click()
+    expect(page.get_by_role('dialog',name='Clip details',exact=True)).to_be_visible()
     page.get_by_role('button',name='Add note',exact=True).click()
     assert page.locator('#note-scope option').evaluate_all('(items)=>items.map(i=>i.value)')==['clip']
     page.get_by_role('button',name='Close note editor',exact=True).click()
-    page.get_by_role('button',name='Close entity notes',exact=True).click()
+    page.get_by_role('button',name='Close',exact=True).click()
     assert not page.evaluate('document.documentElement.scrollWidth>innerWidth')
     page.goto(ui_server+'/')
     page.locator('.practice-options > summary').first.click()
@@ -939,6 +976,147 @@ def test_review_actions_follow_video_or_clip_and_editor_keeps_its_target(browser
     page.close()
 
 
+def test_edit_dialog_entity_notes_scope_history_and_conflicts(browser,ui_server):
+    page=browser.new_page(viewport={'width':1280,'height':900})
+    _archive_test_metadata(page,ui_server)
+    headers={'X-Tennis-Request':'1'}
+    initial=page.request.get(ui_server+f'/api/sessions/{ID}').json()
+    pub=initial['published_at']
+    page.goto(ui_server+f'/review/{ID}?clip={CLIP}')
+    expect(page.locator('#video-seek')).to_be_enabled()
+    # 1. Create a clip note directly in Edit clip even if playback switches clip while open.
+    page.get_by_role('button',name='Edit clip',exact=True).click()
+    expect(page.get_by_role('dialog',name='Clip details',exact=True)).to_be_visible()
+    page.get_by_role('textbox',name='Note',exact=True).fill('Clip 1 primary note')
+    page.evaluate("()=>{model.current='cccccccccccccccccccccccc';updatePlayerState();}")
+    page.get_by_role('button',name='Save details',exact=True).click()
+    expect(page.locator('#edit-dialog')).not_to_be_visible()
+    # Switch back to Clip 1 and verify existing note is retained and editable.
+    page.evaluate(f"()=>{{model.current='{CLIP}';updatePlayerState();}}")
+    page.get_by_role('button',name='Edit clip',exact=True).click()
+    expect(page.locator('#edit-note')).to_have_value('Clip 1 primary note')
+    expect(page.locator('#entity-notes-list')).to_contain_text('Clip 1 primary note')
+    # Concurrent update in another client triggers a conflict without losing the draft or misreporting partial save.
+    notes=[a for a in page.request.get(ui_server+f'/api/recordings/{ID}/metadata').json()['annotations'] if a['record_class']=='entity_metadata' and a['kind']=='note' and a['status']=='active']
+    assert len(notes)==1 and notes[0]['target']['clip_id']==CLIP
+    note_id=notes[0]['id']
+    r=page.request.put(ui_server+f'/api/metadata/{note_id}',headers=headers,data=dict(publication=pub,version=notes[0]['version'],body=dict(text='Concurrent remote clip note')))
+    assert r.ok
+    page.get_by_role('textbox',name='Title',exact=True).fill('Clip 01 retitled')
+    page.get_by_role('textbox',name='Note',exact=True).fill('Stale local clip note draft')
+    page.get_by_role('button',name='Save details',exact=True).click()
+    expect(page.locator('#edit-dialog')).to_be_visible()
+    expect(page.locator('#edit-error')).to_contain_text('Details saved, but note could not be saved')
+    expect(page.locator('#edit-note')).to_have_value('Stale local clip note draft')
+    expect(page.locator('#edit-load-latest-note')).to_be_visible()
+    page.locator('#edit-load-latest-note').click()
+    expect(page.locator('#edit-note')).to_have_value('Concurrent remote clip note')
+    page.get_by_role('textbox',name='Note',exact=True).fill('Merged clip note v3')
+    page.get_by_role('button',name='Save details',exact=True).click()
+    expect(page.locator('#edit-dialog')).not_to_be_visible()
+    # 2. Multiple existing notes on the same clip are preserved and history is retained.
+    r=page.request.post(ui_server+'/api/metadata',headers=headers,data=dict(source_id=ID,publication=pub,kind='note',target=dict(scope='clip',clip_id=CLIP,start_seconds=0,end_seconds=2),body=dict(text='Second independent clip note'),request_id=f'extra-clip-note-{browser.browser_type.name}'))
+    assert r.status==201
+    page.get_by_role('button',name='Edit clip',exact=True).click()
+    expect(page.locator('#entity-notes-list .note-item')).to_have_count(2)
+    expect(page.locator('#entity-notes-list')).to_contain_text('Merged clip note v3')
+    expect(page.locator('#entity-notes-list')).to_contain_text('Second independent clip note')
+    expect(page.locator('#edit-note')).to_have_value('')
+    first_item=page.locator('#entity-notes-list .note-item').filter(has_text='Merged clip note v3')
+    first_item.get_by_label('Note actions',exact=True).click()
+    first_item.get_by_role('button',name='History',exact=True).click()
+    expect(first_item.locator('.note-history')).to_contain_text('v1')
+    expect(first_item.locator('.note-history')).to_contain_text('v2')
+    expect(first_item.locator('.note-history')).to_contain_text('v3')
+    page.get_by_role('textbox',name='Title',exact=True).fill('Clip 01')
+    page.get_by_role('button',name='Save details',exact=True).click()
+    expect(page.locator('#edit-dialog')).not_to_be_visible()
+    # Both clip notes remain active after saving title details.
+    active_clip_notes=[a for a in page.request.get(ui_server+f'/api/recordings/{ID}/metadata').json()['annotations'] if a['record_class']=='entity_metadata' and a['kind']=='note' and a['status']=='active' and a['target'].get('clip_id')==CLIP]
+    assert len(active_clip_notes)==2
+    # 3. Video notes stay separate from Clip notes.
+    page.get_by_role('button',name='Full practice ↗',exact=True).click()
+    page.get_by_role('button',name='Edit video',exact=True).click()
+    expect(page.get_by_role('dialog',name='Video details',exact=True)).to_be_visible()
+    expect(page.locator('#entity-notes-list .note-item')).to_have_count(0)
+    page.get_by_role('textbox',name='Note',exact=True).fill('Whole video note')
+    page.get_by_role('button',name='Save details',exact=True).click()
+    expect(page.locator('#edit-dialog')).not_to_be_visible()
+    page.get_by_role('button',name='Edit video',exact=True).click()
+    expect(page.locator('#edit-note')).to_have_value('Whole video note')
+    expect(page.locator('#entity-notes-list')).to_contain_text('Whole video note')
+    page.get_by_role('button',name='Close',exact=True).click()
+    # 4. Delayed details save preserves captured entity, note ID/version, and draft even if globals mutate mid-save.
+    page.locator('#clip-list [data-play]').first.click()
+    page.get_by_role('button',name='Edit clip',exact=True).click()
+    expect(page.get_by_role('dialog',name='Clip details',exact=True)).to_be_visible()
+    # Archive the second clip note so Clip 1 has one active note to test single-note captured update across await.
+    second_item=page.locator('#entity-notes-list .note-item').filter(has_text='Second independent clip note')
+    second_item.get_by_label('Note actions',exact=True).click()
+    second_item.get_by_role('button',name='Archive',exact=True).click()
+    expect(page.locator('#edit-note')).to_have_value('Merged clip note v3')
+    page.evaluate("""()=>{
+        const orig=window.fetch;
+        window.fetch=async function(url,opts){
+            if(String(url).includes('/details')){
+                window.fetch=orig;
+                model.current='cccccccccccccccccccccccc';updatePlayerState();
+                NoteUI.openEntityNotes({video_id:model.session.id,clip_id:'cccccccccccccccccccccccc',publication:model.session.published_at});
+                document.querySelector('#edit-note').value='Mutated mid-await wrong clip draft';
+            }
+            return orig.apply(this,arguments);
+        };
+    }""")
+    page.get_by_role('textbox',name='Title',exact=True).fill('Clip 01 captured')
+    page.get_by_role('textbox',name='Note',exact=True).fill('Captured before await v4')
+    page.get_by_role('button',name='Save details',exact=True).click()
+    expect(page.locator('#edit-dialog')).not_to_be_visible()
+    all_notes=[a for a in page.request.get(ui_server+f'/api/recordings/{ID}/metadata').json()['annotations'] if a['record_class']=='entity_metadata' and a['kind']=='note' and a['status']=='active']
+    clip1_notes=[a for a in all_notes if a['target'].get('clip_id')==CLIP]
+    clip2_notes=[a for a in all_notes if a['target'].get('clip_id')=='cccccccccccccccccccccccc']
+    assert len(clip1_notes)==1 and clip1_notes[0]['id']==note_id and clip1_notes[0]['body']['text']=='Captured before await v4' and clip1_notes[0]['version']==4
+    assert len(clip2_notes)==0
+    r=page.request.put(ui_server+f'/api/videos/{ID}/clips/{CLIP}/details',data=dict(title='Clip 01',publication=pub,version=page.request.get(ui_server+f'/api/sessions/{ID}').json()['clips'][0]['details']['version']),headers=headers);assert r.ok
+    # 5. Failed initial metadata GET blocks note creation instead of duplicating an unknown existing note.
+    fail_meta={'active':True}
+    post_calls=[]
+    page.on('request',lambda req:post_calls.append(req.url) if req.method=='POST' and '/api/metadata' in req.url else None)
+    def handle_meta(route):
+        if fail_meta['active']:
+            route.fulfill(status=503,json={'error':'Metadata store offline'})
+        else:
+            route.continue_()
+    page.route(f'**/api/recordings/{ID}/metadata*',handle_meta)
+    page.goto(ui_server+f'/review/{ID}?clip={CLIP}')
+    expect(page.locator('#video-seek')).to_be_enabled()
+    page.get_by_role('button',name='Edit clip',exact=True).click()
+    expect(page.locator('#entity-notes-list')).to_contain_text('Notes unavailable')
+    page.get_by_role('textbox',name='Note',exact=True).fill('Draft while metadata offline')
+    page.get_by_role('button',name='Save details',exact=True).click()
+    expect(page.locator('#edit-dialog')).to_be_visible()
+    expect(page.locator('#edit-error')).to_contain_text('Notes unavailable')
+    expect(page.locator('#edit-note')).to_have_value('Draft while metadata offline')
+    assert not post_calls
+    # Once metadata recovers, saveEditNote sees the existing server note was unknown when typed and prompts to load it rather than duplicating.
+    fail_meta['active']=False
+    page.get_by_role('button',name='Save details',exact=True).click()
+    expect(page.locator('#edit-dialog')).to_be_visible()
+    expect(page.locator('#edit-error')).to_contain_text('Existing notes loaded')
+    expect(page.locator('#edit-load-latest-note')).to_be_visible()
+    assert not post_calls
+    page.locator('#edit-load-latest-note').click()
+    expect(page.locator('#edit-note')).to_have_value('Captured before await v4')
+    page.get_by_role('textbox',name='Note',exact=True).fill('Recovered clip note v5')
+    page.get_by_role('button',name='Save details',exact=True).click()
+    expect(page.locator('#edit-dialog')).not_to_be_visible()
+    assert not post_calls
+    final_clip1=[a for a in page.request.get(ui_server+f'/api/recordings/{ID}/metadata').json()['annotations'] if a['record_class']=='entity_metadata' and a['kind']=='note' and a['status']=='active' and a['target'].get('clip_id')==CLIP]
+    assert len(final_clip1)==1 and final_clip1[0]['id']==note_id and final_clip1[0]['body']['text']=='Recovered clip note v5' and final_clip1[0]['version']==5
+    page.unroute(f'**/api/recordings/{ID}/metadata*',handle_meta)
+    _archive_test_metadata(page,ui_server)
+    page.close()
+
+
 def _playback_moment(identity,kind,start,end=None,clip=CLIP,clip_start=0):
     local=start-clip_start
     return dict(id=identity,kind=kind,record_class='moment',status='active',version=1,
@@ -966,22 +1144,49 @@ def test_moment_cues_default_durations_ranges_and_collapsed_area(browser,ui_serv
     expect(page.get_by_role('button',name='Highlight this moment',exact=True)).to_be_visible()
     expect(page.locator('.note-marker')).to_have_count(3)
     assert page.locator('#note-markers').evaluate("e=>e.parentElement.classList.contains('video-seek-label')")
+    assert page.locator('#moment-cues').evaluate("e=>e.parentElement.id==='notes-panel'")
+    empty_panel=page.locator('#notes-panel').bounding_box()
+    bar_box=page.locator('.moment-bar').bounding_box()
+    assert empty_panel['height']<=bar_box['height']+16
     page.locator('#player').evaluate('v=>{v.pause();v.currentTime=.25;}')
     expect(page.locator('[data-active-moment="point"]')).to_have_count(0)
     expect(page.locator('[data-active-moment="range"]')).to_be_visible()
+    with_teaser=page.locator('#notes-panel').bounding_box()
+    cue_box=page.locator('[data-active-moment="range"]').bounding_box()
+    assert with_teaser['height']>empty_panel['height']+20
+    assert cue_box['y']>=with_teaser['y'] and cue_box['y']+cue_box['height']<=with_teaser['y']+with_teaser['height']+1
     expect(page.locator('[data-active-moment="point"]')).to_have_count(0,timeout=2500)
     # A point expiry does not repeatedly re-trigger at a paused playhead.
     expect(page.locator('[data-active-moment="range"]')).to_be_visible()
     page.locator('#player').evaluate('v=>{v.currentTime=.5;}')
     expect(page.locator('[data-active-moment="coach-point"]')).to_be_visible()
+    with_two_teasers=page.locator('#notes-panel').bounding_box()
+    assert with_two_teasers['height']>with_teaser['height']+20
     expect(page.locator('[data-active-moment="coach-point"]')).to_have_count(0,timeout=4500)
     expect(page.locator('[data-active-moment="range"]')).to_be_visible()
     page.locator('#player').evaluate('v=>{v.currentTime=1.75;}')
     expect(page.locator('[data-active-moment="range"]')).to_have_count(0)
+    page.locator('#player').evaluate('v=>{v.currentTime=.05;}')
+    expect(page.locator('#moment-cues .moment-cue')).to_have_count(0)
+    shrunk_panel=page.locator('#notes-panel').bounding_box()
+    assert abs(shrunk_panel['height']-empty_panel['height'])<=2
     page.locator('#player').evaluate('v=>{v.currentTime=.25;}')
     expect(page.locator('[data-active-moment="point"]')).to_have_count(0)
+    expect(page.locator('[data-active-moment="range"]')).to_be_visible()
     expect(page.locator('#player')).to_have_js_property('paused',True)
     expect(page.locator('#moment-toggle')).to_have_attribute('aria-expanded','false')
+    # Clicking an action button in the bar does not expand the panel.
+    page.get_by_role('button',name='Jump to next moment',exact=True).click()
+    expect(page.locator('#moment-toggle')).to_have_attribute('aria-expanded','false')
+    # Clicking the teaser inside the Moments panel expands the panel.
+    page.locator('[data-active-moment="range"]').click()
+    expect(page.locator('#moment-toggle')).to_have_attribute('aria-expanded','true')
+    expect(page.locator('#moment-panel-content')).to_be_visible()
+    page.locator('#moment-toggle').click()
+    expect(page.locator('#moment-toggle')).to_have_attribute('aria-expanded','false')
+    # Clicking the collapsed panel surface (outside action buttons) also expands it.
+    page.locator('#notes-panel').click(position={'x':4,'y':4})
+    expect(page.locator('#moment-toggle')).to_have_attribute('aria-expanded','true')
     assert not page.evaluate('document.documentElement.scrollWidth>innerWidth')
     assert not errors
     page.close()
@@ -1145,22 +1350,24 @@ def test_add_moment_optional_note_end_and_captured_scope(browser,ui_server,width
     rows=page.request.get(ui_server+f'/api/recordings/{ID}/moments').json()['moments']
     assert next(m for m in rows if m['payload']['text']=='Captured clip moment')['start_ms']==500
     expect(page.locator('#notes-list')).not_to_contain_text('Captured clip moment')
-    # Untimed notes have their own entity UI, outside Moments.
-    page.get_by_label('More video actions',exact=True).click()
-    page.get_by_role('button',name='Notes',exact=True).click()
+    # Untimed notes live in Edit clip / Edit video, outside Moments and the 3-dot menu.
+    page.get_by_role('button',name='Edit clip',exact=True).click()
+    expect(page.get_by_role('dialog',name='Clip details',exact=True)).to_be_visible()
     page.get_by_role('button',name='Add note',exact=True).click()
-    page.get_by_role('textbox',name='Note',exact=True).fill('Second clip metadata')
+    page.locator('#note-editor').get_by_role('textbox',name='Note',exact=True).fill('Second clip metadata')
     page.get_by_role('button',name='Save note',exact=True).click()
     expect(page.locator('#entity-notes-list')).to_contain_text('Second clip metadata')
+    expect(page.locator('#edit-note')).to_have_value('Second clip metadata')
     expect(clips.nth(1).locator('.note-moment')).to_have_count(0)
     expect(page.locator('#entity-notes-list').get_by_role('button',name='Jump to moment',exact=True)).to_have_count(0)
     note=page.locator('#entity-notes-list .note-item').filter(has_text='Second clip metadata')
     note.get_by_label('Note actions',exact=True).click()
     note.get_by_role('button',name='Edit',exact=True).click()
-    page.get_by_role('textbox',name='Note',exact=True).fill('Second clip metadata revised')
+    page.locator('#note-editor').get_by_role('textbox',name='Note',exact=True).fill('Second clip metadata revised')
     page.get_by_role('button',name='Save note',exact=True).click()
     expect(page.locator('#entity-notes-list')).to_contain_text('Second clip metadata revised')
-    page.get_by_role('button',name='Close entity notes',exact=True).click()
+    expect(page.locator('#edit-note')).to_have_value('Second clip metadata revised')
+    page.get_by_role('button',name='Close',exact=True).click()
     expect(page.locator('#notes-list')).not_to_contain_text('Second clip metadata')
     assert not page.evaluate('document.documentElement.scrollWidth>innerWidth')
     _archive_test_metadata(page,ui_server)
@@ -1303,6 +1510,10 @@ def test_desktop_autofocus_tracking_loss_and_cleanup(browser, ui_server):
     # Deterministic detections exercise framing/lifecycle independently of model
     # confidence or platform-specific rasterization of illustrated people.
     page.add_init_script("""(() => {
+      window.__cspViolations = [];
+      document.addEventListener('securitypolicyviolation', e => {
+        window.__cspViolations.push({directive: e.violatedDirective, blocked: e.blockedURI, sample: e.sample});
+      });
       window.__testCourtScene = 'two_players';
       window.Worker = class {
         constructor() { this.closed = false; }
@@ -1312,7 +1523,7 @@ def test_desktop_autofocus_tracking_loss_and_cleanup(browser, ui_server):
           } else if (data.type === 'detect') {
             const w=data.width,h=data.height;
             const person=(x,y,width,height)=>({boundingBox:{originX:x*w,originY:y*h,width:width*w,height:height*h},categories:[{categoryName:'person',score:.95}]});
-            const detections=window.__testCourtScene==='two_players'?[person(.25,.3,.08,.2),person(.6,.3,.16,.4)]:[];
+            const detections=window.__testCourtScene==='two_players'?[person(.25,.3,.08,.2),person(.6,.3,.16,.4)]:window.__testCourtScene==='close_player'?[person(.35,.1,.3,.72)]:[];
             setTimeout(() => {if (!this.closed) this.onmessage?.({data:{type:'result',epoch:data.epoch,seq:data.seq,detections}});}, 0);
           }
         }
@@ -1327,17 +1538,48 @@ def test_desktop_autofocus_tracking_loss_and_cleanup(browser, ui_server):
     expect(af_btn).to_have_attribute('data-autofocus-state', 'off')
     assert page.locator('#player').evaluate('v => v.style.transform') == ''
 
+    # Enable Dev mode from the 3-dot menu before Auto focus: shows video stats and truthful 'not measured' verdicts without starting inference.
+    expect(page.locator('#video-dev-layer')).to_be_hidden()
+    page.get_by_label('More video actions', exact=True).click()
+    dev_btn = page.get_by_role('button', name='Dev mode', exact=True)
+    expect(dev_btn).to_have_attribute('aria-pressed', 'false')
+    dev_btn.click()
+    expect(page.locator('#player-dev-mode')).to_have_attribute('aria-pressed', 'true')
+    expect(page.locator('#video-dev-layer')).to_be_visible()
+    expect(page.locator('#video-dev-stats')).to_contain_text('Video:')
+    expect(page.locator('#video-dev-stats')).to_contain_text('Auto focus: off')
+    expect(page.locator('#video-dev-stats')).to_contain_text('play not measured · swing not measured')
+    expect(page.locator('#video-dev-boxes .video-dev-box')).to_have_count(0)
+    assert int(page.locator('#player').get_attribute('data-autofocus-captures') or '0') == 0
+
     # Enable Auto focus while paused: exactly one forced capture runs on ready, and paused interval ticks do not re-capture.
     af_btn.click()
     expect(af_btn).to_have_attribute('aria-pressed', 'true')
     page.wait_for_function(
-        "() => document.querySelector('#video-autofocus')?.dataset.autofocusState === 'tracking' && Number(document.querySelector('#player')?.dataset.autofocusZoom || 1) > 1.15",
+        "() => document.querySelector('#video-autofocus')?.dataset.autofocusState === 'tracking' && Number(document.querySelector('#player')?.dataset.autofocusZoom || 1) >= 1.28",
         timeout=15000,
     )
     captures_while_paused = int(page.locator('#player').get_attribute('data-autofocus-captures') or '0')
     assert captures_while_paused == 1
     page.wait_for_timeout(420)
     assert int(page.locator('#player').get_attribute('data-autofocus-captures') or '0') == captures_while_paused
+
+    expect(page.locator('#video-dev-stats')).to_contain_text('Auto focus: tracking')
+    expect(page.locator('#video-dev-stats')).to_contain_text('Detector: captures 1 · results 1 · persons 2 · score 95%')
+    expect(page.locator('#video-dev-stats')).to_contain_text('Verdict: player tracked · steady · play not measured · swing not measured')
+    expect(page.locator('#video-dev-boxes [data-dev-box="primary"]')).to_be_visible()
+    expect(page.locator('#video-dev-boxes [data-dev-box="candidate"]')).to_be_visible()
+    stage_box = page.locator('#video-stage').bounding_box()
+    prim_box = page.locator('#video-dev-boxes [data-dev-box="primary"]').bounding_box()
+    cand_box = page.locator('#video-dev-boxes [data-dev-box="candidate"]').bounding_box()
+    assert prim_box['width'] > 80 and prim_box['height'] > 150
+    assert cand_box['width'] > 40 and cand_box['height'] > 70
+    assert prim_box['x'] > stage_box['x'] + 40 and prim_box['y'] > stage_box['y'] + 40
+    assert prim_box['x'] + prim_box['width'] <= stage_box['x'] + stage_box['width'] + 1
+    # Because the zoomed/panned video shifts the right-side player toward the center, the mapped dev box center is shifted left of unzoomed 0.68 * width.
+    prim_center_x = (prim_box['x'] - stage_box['x']) + prim_box['width'] / 2
+    assert prim_center_x < stage_box['width'] * 0.63 and prim_center_x > stage_box['width'] * 0.45
+    assert page.evaluate('() => window.__cspViolations') == []
 
     transform = page.locator('#player').evaluate('v => v.style.transform')
     m = re.match(r'translate\(([-\d.]+)px,\s*([-\d.]+)px\)\s*scale\(([\d.]+)\)', transform)
@@ -1360,11 +1602,36 @@ def test_desktop_autofocus_tracking_loss_and_cleanup(browser, ui_server):
         timeout=10000,
     )
     assert page.locator('#player').evaluate('v => v.style.transform') == ''
+    expect(page.locator('#video-dev-stats')).to_contain_text('player lost · searching')
+    expect(page.locator('#video-dev-boxes .video-dev-box')).to_have_count(0)
+
+    # Steady 1x close-player detection (no zoom animation after initial creation) still positions the box immediately via CSSOM under strict CSP.
+    page.evaluate("""() => {
+      window.__testCourtScene = 'close_player';
+      document.querySelector('#player').dispatchEvent(new Event('seeked'));
+    }""")
+    page.wait_for_function(
+        "() => document.querySelector('#video-autofocus')?.dataset.autofocusState === 'tracking' && document.querySelectorAll('#video-dev-boxes .video-dev-box').length === 1",
+        timeout=10000,
+    )
+    assert page.locator('#player').evaluate('v => v.style.transform') == ''
+    close_box = page.locator('#video-dev-boxes [data-dev-box="primary"]').bounding_box()
+    assert close_box['width'] > 200 and close_box['height'] > 300
+    assert close_box['x'] > stage_box['x'] + 200 and close_box['y'] > stage_box['y'] + 20
+    assert page.evaluate('() => window.__cspViolations') == []
+
+    # Toggling Dev mode off hides the overlay cleanly.
+    page.get_by_label('More video actions', exact=True).click()
+    dev_btn.click()
+    expect(page.locator('#player-dev-mode')).to_have_attribute('aria-pressed', 'false')
+    expect(page.locator('#video-dev-layer')).to_be_hidden()
 
     # Restore target on seeked, verify re-lock, then verify clip change resets and re-tracks cleanly.
     page.evaluate("""() => {
       window.__testCourtScene = 'two_players';
-      document.querySelector('#player').dispatchEvent(new Event('seeked'));
+      const v = document.querySelector('#player');
+      v.dispatchEvent(new Event('seeking'));
+      v.dispatchEvent(new Event('seeked'));
     }""")
     page.wait_for_function(
         "() => document.querySelector('#video-autofocus')?.dataset.autofocusState === 'tracking' && Number(document.querySelector('#player')?.dataset.autofocusZoom || 1) > 1.15",
@@ -1747,4 +2014,118 @@ def test_home_redesign_views_counts_deduplication_and_status_dot(browser, ui_ser
             assert not page.evaluate('document.documentElement.scrollWidth > innerWidth'), f'Overflow at {width}px on {view_btn}'
 
     assert not errors
+    page.close()
+
+
+@pytest.mark.parametrize('delayed', ['create', 'poll'])
+def test_share_download_ignores_old_selection_results(browser, ui_server, delayed):
+    from playwright.sync_api import Error as PlaywrightError
+    page = browser.new_page(accept_downloads=True)
+    page.set_default_timeout(6000)
+    exports, held = [], []
+    page.add_init_script("""(() => {
+      window.shareDownloads=[];
+      const click=HTMLAnchorElement.prototype.click;
+      HTMLAnchorElement.prototype.click=function(...args){
+        if(this.id==='study-download-ready'){window.shareDownloads.push(this.href);return;}
+        return click.apply(this,args);
+      };
+    })()""")
+
+    def create(route):
+        body = route.request.post_data_json
+        exports.append(body)
+        job = dict(id=f'share-{len(exports)}', role='render', state='queued', body=body, result={})
+        if len(exports) == 1 and delayed == 'create':
+            held.append((route, job))
+        else:
+            route.fulfill(status=201, json=job)
+
+    def poll(route):
+        identity = route.request.url.rsplit('/', 1)[-1]
+        job = dict(id=identity, role='render', state='completed', result={})
+        if identity == 'share-1':
+            held.append((route, job))
+        else:
+            route.fulfill(json=job)
+
+    page.route('**/api/coaching/exports', create)
+    page.route('**/api/coaching/jobs/share-*', poll)
+    page.goto(ui_server + f'/review/{ID}?clip={CLIP}')
+    page.get_by_role('button', name='Study clip', exact=True).click()
+    download = page.get_by_role('button', name='Download interval', exact=True)
+    expect(download).to_be_enabled()
+    expected = '/api/coaching/exports' if delayed == 'create' else '/api/coaching/jobs/share-1'
+    with page.expect_request(lambda r: r.url.endswith(expected)):
+        download.click()
+    expect(download).to_be_disabled()
+    page.locator('#study-pin-start').evaluate("el=>{el.value=.4;el.dispatchEvent(new Event('input',{bubbles:true}));}")
+    page.locator('#study-speed').select_option('0.25')
+    page.get_by_role('slider', name='Video zoom', exact=True).press('End')
+    expect(download).to_be_enabled()
+    download.click()
+    expect(page.locator('#study-download-ready')).to_have_attribute('href', re.compile('/share-2/'))
+    page.wait_for_function('window.shareDownloads.length===1')
+    assert len(exports) == 2
+    assert exports[0]['request_id'] != exports[1]['request_id']
+    assert exports[1]['start'] == pytest.approx(.4) and exports[1]['speed'] == .25
+    assert exports[1]['crop'] != exports[0]['crop']
+    assert held
+    for route, old_job in held:
+        try:
+            route.fulfill(status=201 if delayed == 'create' else 200, json=old_job)
+        except PlaywrightError:
+            pass  # The intentionally aborted request may no longer accept a response.
+    page.wait_for_timeout(100)
+    expect(page.locator('#study-download-ready')).to_have_attribute('href', re.compile('/share-2/'))
+    downloads = page.evaluate('window.shareDownloads')
+    assert len(downloads) == 1 and '/share-2/' in downloads[0]
+    page.close()
+
+
+def test_old_coach_failure_cannot_clear_reopened_clip_request(browser, ui_server):
+    page = browser.new_page()
+    page.set_default_timeout(6000)
+    state = dict(enabled=True, jobs=[], annotations=[], workers=[])
+    held, exported, asked = [], [], []
+    page.route('**/api/coaching/sessions/*', lambda route: route.fulfill(json=state))
+
+    def create(route):
+        body = route.request.post_data_json
+        exported.append(body)
+        if len(exported) == 1:
+            held.append(route)
+            return
+        start = 2 + body['start']
+        job = dict(id='new-clip-render', version=1, role='render', state='queued',
+                   body={**body, 'original_start': start, 'original_end': 2 + body['end']}, result={})
+        state['jobs'].append(job)
+        route.fulfill(status=201, json=job)
+
+    def ask(route):
+        body = route.request.post_data_json
+        asked.append(body)
+        job = dict(id='new-clip-answer', version=1, role='ai', state='queued',
+                   body={**state['jobs'][0]['body'], **body}, result={})
+        state['jobs'].append(job)
+        route.fulfill(status=201, json=job)
+
+    page.route('**/api/coaching/exports', create)
+    page.route('**/api/coaching/requests', ask)
+    page.goto(ui_server + f'/review/{ID}?clip={CLIP}')
+    page.get_by_role('button', name='Study clip', exact=True).click()
+    with page.expect_request(lambda r: r.url.endswith('/api/coaching/exports')):
+        page.get_by_role('button', name='Ask coach', exact=True).click()
+    page.get_by_role('button', name='← Back to review', exact=True).click()
+    page.get_by_role('button', name=re.compile(r'^Play clip 2,')).click()
+    page.get_by_role('button', name='Study clip', exact=True).click()
+    page.get_by_role('button', name='Ask coach', exact=True).click()
+    expect(page.locator('#coach-status')).to_contain_text('Preparing your clip')
+    assert len(exported) == 2 and exported[1]['clip_id'] != CLIP
+    assert held
+    held[0].fulfill(status=500, json={'error': 'Old request failed'})
+    page.wait_for_timeout(100)
+    with page.expect_response(lambda r: r.url.endswith('/api/coaching/requests'), timeout=10000):
+        state['jobs'][0].update(state='completed', version=2)
+    assert len(asked) == 1 and asked[0]['export_id'] == 'new-clip-render'
     page.close()

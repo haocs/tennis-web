@@ -26,6 +26,35 @@
     const fit = Math.min(stageWidth / videoWidth, stageHeight / videoHeight);
     return {x: Math.max(0, (videoWidth * fit * zoom - stageWidth) / 2), y: Math.max(0, (videoHeight * fit * zoom - stageHeight) / 2)};
   }
+  function clampInterval(start, end, duration, changed = 'end', minSpan = 0.1) {
+    if (!finite(duration) || duration <= 0) return {start: 0, end: 0};
+    const span = Math.min(Math.max(0.01, finite(minSpan) ? minSpan : 0.1), duration);
+    let s = clamp(finite(start) ? start : 0, 0, duration);
+    let e = clamp(finite(end) ? end : duration, 0, duration);
+    if (changed === 'start') {
+      s = clamp(s, 0, Math.max(0, e - span));
+      e = clamp(e, Math.min(duration, s + span), duration);
+    } else {
+      e = clamp(e, Math.min(duration, s + span), duration);
+      s = clamp(s, 0, Math.max(0, e - span));
+    }
+    return {
+      start: Math.round(s * 1000) / 1000,
+      end: Math.round(e * 1000) / 1000
+    };
+  }
+  function clampToInterval(time, intervalStart, intervalEnd, duration) {
+    const bounds = clampInterval(intervalStart, intervalEnd, duration);
+    return clamp(finite(time) ? time : bounds.start, bounds.start, bounds.end);
+  }
+  function resolveIntervalPlayback(currentTime, intervalStart, intervalEnd, loop = false) {
+    const start = finite(intervalStart) ? Math.max(0, intervalStart) : 0;
+    const end = finite(intervalEnd) ? Math.max(start, intervalEnd) : start;
+    const now = finite(currentTime) ? currentTime : start;
+    if (now < start - 0.005) return {action: 'seek', time: start};
+    if (now >= end - 0.01) return loop ? {action: 'loop', time: start} : {action: 'pause', time: end};
+    return {action: 'continue', time: now};
+  }
   function coachingPrompt(clip, frames = []) {
     const points = frames.length ? '\nSelected stills, in chronological order:\n' + [...frames].sort((a,b) => a.time-b.time).map((f,i) => `${i+1}. Clip ${clock(f.time)}; approximate original ${clock(sourceTime(clip, f.time))}`).join('\n') : '';
     const p=clip.main_player;const profile=p?'\nMain-player profile (anonymous, user supplied): '+JSON.stringify({height_cm:p.height_cm,level:p.level})+'. If the intended player is ambiguous in the images, state uncertainty.':'';
@@ -58,5 +87,5 @@
     e.setUint32(0,0x06054b50,true);e.setUint16(8,files.length,true);e.setUint16(10,files.length,true);e.setUint32(12,directorySize,true);e.setUint32(16,offset,true);
     return new Blob([...chunks,...directory,end],{type:'application/zip'});
   }
-  return {finite, clamp, clock, sampleTimes, sourceTime, panBounds, coachingPrompt, copyText, crc32, zipFiles};
+  return {finite, clamp, clock, sampleTimes, sourceTime, panBounds, clampInterval, clampToInterval, resolveIntervalPlayback, coachingPrompt, copyText, crc32, zipFiles};
 });

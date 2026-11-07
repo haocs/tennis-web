@@ -20,6 +20,7 @@ const ReviewPlayer = {
  },
  markup(){return `<div class="video-stage" id="video-stage" role="region" aria-label="Video player" tabindex="0">
  <video id="player" playsinline preload="metadata"></video>
+ <div class="video-dev-layer" id="video-dev-layer" hidden aria-label="Player developer diagnostics"><div class="video-dev-boxes" id="video-dev-boxes"></div><div class="video-dev-stats" id="video-dev-stats" role="status" aria-live="off"></div></div>
  <div class="video-overlay" aria-label="Playback controls">
  <div class="video-topbar"><span id="video-context" class="video-context"></span><label class="video-autoplay" title="Autoplay next clip"><span class="autoplay-text">Autoplay</span><input type="checkbox" id="autoplay-next" aria-label="Autoplay"><span class="autoplay-switch" aria-hidden="true"></span></label></div>
  <div class="video-transport">
@@ -33,8 +34,8 @@ const ReviewPlayer = {
  mount({time,onError}){
   this.controller?.destroy();
   const stage=document.querySelector('#video-stage'),video=document.querySelector('#player');
-  const find=id=>stage.querySelector('#'+id),seek=find('video-seek'),full=find('video-fullscreen'),overlay=stage.querySelector('.video-overlay'),rate=find('video-rate'),autofocus=find('video-autofocus');
-  let hideTimer,keyboardMode=false,mediaContext=null,suspended=false;
+  const find=id=>stage.querySelector('#'+id),seek=find('video-seek'),full=find('video-fullscreen'),overlay=stage.querySelector('.video-overlay'),rate=find('video-rate'),autofocus=find('video-autofocus'),devLayer=find('video-dev-layer'),devBoxes=find('video-dev-boxes'),devStats=find('video-dev-stats');
+  let hideTimer,keyboardMode=false,mediaContext=null,suspended=false,devMode=false,lastDevStatsKey='',lastDevBoxesKey='';
   const media=navigator.mediaSession,study=document.querySelector('#clip-study');
   const tracker=window.AutoFocusCore?new window.AutoFocusCore.AutoFocusTracker():null;
   const mobileQuery=window.matchMedia?window.matchMedia('(max-width: 650px), (pointer: coarse)'):null;
@@ -42,6 +43,89 @@ const ReviewPlayer = {
   let afEnabled=false,afUnavailable=false,afWorker=null,afReady=false,afInFlightSeq=0,afPendingForcedCapture=false,afEpoch=0,afSeq=0,afTimer=null,afRaf=0,afInitWatchdog=null,afDetectWatchdog=null,afLastStepMs=0,afCanvas=null,afCtx=null,afDetections=0,afCaptures=0;
   function clearInitWatchdog(){if(afInitWatchdog){clearTimeout(afInitWatchdog);afInitWatchdog=null;}}
   function clearDetectWatchdog(){if(afDetectWatchdog){clearTimeout(afDetectWatchdog);afDetectWatchdog=null;}}
+  function renderDevOverlay(){
+   if(!devLayer||!devStats||!devBoxes)return;
+   devLayer.hidden=!devMode;
+   video.dataset.devMode=devMode?'on':'off';
+   const devBtn=document.querySelector('#player-dev-mode');
+   if(devBtn)devBtn.setAttribute('aria-pressed',String(devMode));
+   if(!devMode){
+    if(lastDevBoxesKey){devBoxes.replaceChildren();lastDevBoxesKey='';}
+    if(lastDevStatsKey){devStats.textContent='';lastDevStatsKey='';}
+    return;
+   }
+   const rect=stage.getBoundingClientRect();
+   const sw=Math.round(rect.width||0),sh=Math.round(rect.height||0);
+   const vw=video.videoWidth||0,vh=video.videoHeight||0;
+   const cur=Number.isFinite(video.currentTime)?video.currentTime.toFixed(2):'0.00';
+   const dur=Number.isFinite(video.duration)?video.duration.toFixed(2):'0.00';
+   const rateVal=Number.isFinite(video.playbackRate)?video.playbackRate:1;
+   const quality=typeof video.getVideoPlaybackQuality==='function'?video.getVideoPlaybackQuality():null;
+   const framesText=quality&&Number.isFinite(quality.totalVideoFrames)?` · frames ${quality.totalVideoFrames} (${quality.droppedVideoFrames||0} dropped)`:'';
+   const afState=autofocus?.dataset.autofocusState||(afUnavailable?'unavailable':'off');
+   const verdict=window.AutoFocusCore?.diagnosticsVerdict?window.AutoFocusCore.diagnosticsVerdict(tracker,afEnabled,afState):{trackingState:afState,playerStatus:afEnabled?afState:'off',motion:'not active',playVerdict:'not measured',swingVerdict:'not measured'};
+   const curFraming=afEnabled&&tracker?tracker.current:{zoom:1,x:0,y:0};
+   const tgtFraming=afEnabled&&tracker?tracker.target:{zoom:1,x:0,y:0};
+   const candCount=afEnabled&&tracker?(tracker.lastCandidates?.length||0):0;
+   const topScore=afEnabled&&tracker?.trackedBox?`${Math.round(tracker.trackedBox.score*100)}%`:'—';
+   const lines=[
+    `Video: ${vw&&vh?`${vw}×${vh}`:'loading'} (stage ${sw}×${sh}) · ${cur}s / ${dur}s · ${video.paused?'paused':'playing'} · ${rateVal}×${framesText}`,
+    `Auto focus: ${verdict.trackingState} · zoom ${curFraming.zoom.toFixed(2)}× (target ${tgtFraming.zoom.toFixed(2)}×) · pan ${Math.round(curFraming.x)}px, ${Math.round(curFraming.y)}px`,
+    `Detector: captures ${afCaptures} · results ${afDetections} · persons ${candCount} · score ${topScore}`,
+    `Verdict: player ${verdict.playerStatus} · play ${verdict.playVerdict} · swing ${verdict.swingVerdict}`
+   ];
+   const statsKey=lines.join('\n');
+   if(statsKey!==lastDevStatsKey){
+    lastDevStatsKey=statsKey;
+    devStats.replaceChildren(...lines.map(t=>{const d=document.createElement('div');d.className='video-dev-line';d.textContent=t;return d;}));
+   }
+   if(!afEnabled||!tracker||!vw||!vh||!sw||!sh||!window.AutoFocusCore?.projectBoxToStage){
+    if(lastDevBoxesKey){devBoxes.replaceChildren();lastDevBoxesKey='';}
+    return;
+   }
+   const items=[];
+   if(tracker.state==='tracking'&&tracker.trackedBox){
+    items.push({role:'primary',box:tracker.trackedBox,label:`Player ${Math.round(tracker.trackedBox.score*100)}% · ${verdict.motion}`});
+    for(const c of tracker.lastCandidates||[]){
+     if(!c.primary)items.push({role:'candidate',box:c,label:`Person ${Math.round(c.score*100)}%`});
+    }
+   }else if(tracker.state==='holding'&&tracker.trackedBox){
+    items.push({role:'holding',box:tracker.trackedBox,label:`Hold ${Math.round(tracker.trackedBox.score*100)}%`});
+   }
+   const projected=items.map(item=>{
+    const proj=window.AutoFocusCore.projectBoxToStage(item.box,sw,sh,vw,vh,tracker.current);
+    return proj&&proj.visible?{...item,proj}:null;
+   }).filter(Boolean);
+   const boxesKey=JSON.stringify(projected.map(p=>[p.role,p.label,Math.round(p.proj.left),Math.round(p.proj.top),Math.round(p.proj.width),Math.round(p.proj.height)]));
+   if(boxesKey===lastDevBoxesKey)return;
+   lastDevBoxesKey=boxesKey;
+   const existing=[...devBoxes.children];
+   if(existing.length!==projected.length||existing.some((el,i)=>el.dataset.devBox!==projected[i].role)){
+    devBoxes.replaceChildren(...projected.map(item=>{
+     const el=document.createElement('div');
+     el.className=`video-dev-box ${item.role}`;
+     el.dataset.devBox=item.role;
+     const tag=document.createElement('span');
+     tag.className='video-dev-box-tag';
+     el.append(tag);
+     return el;
+    }));
+   }
+   [...devBoxes.children].forEach((el,i)=>{
+    const item=projected[i],{proj}=item;
+    el.style.left=`${proj.left}px`;
+    el.style.top=`${proj.top}px`;
+    el.style.width=`${proj.width}px`;
+    el.style.height=`${proj.height}px`;
+    const tag=el.querySelector('.video-dev-box-tag');
+    if(tag&&tag.textContent!==item.label)tag.textContent=item.label;
+   });
+  }
+  function toggleDevMode(force){
+   devMode=typeof force==='boolean'?force:!devMode;
+   renderDevOverlay();
+   return devMode;
+  }
   function canUseAutoFocus(){
    if(window.__TENNIS_AUTOFOCUS_FORCE_UNSUPPORTED)return false;
    if(!tracker||typeof Worker!=='function'||typeof WebAssembly!=='object')return false;
@@ -65,6 +149,7 @@ const ReviewPlayer = {
    autofocus.title=state==='unavailable'?(detail||'Auto focus is unavailable in this browser.'):(afEnabled?`Auto focus on (${state})`:'Auto focus main player');
    video.dataset.autofocusState=state;
    video.dataset.autofocusInflight=afInFlightSeq?'1':'0';
+   renderDevOverlay();
   }
   function stopAutoFocus(terminateWorker=false){
    afEpoch+=1;
@@ -87,6 +172,7 @@ const ReviewPlayer = {
     }
    }
    video.dataset.autofocusInflight=afInFlightSeq?'1':'0';
+   renderDevOverlay();
   }
   function disableAutoFocus(terminateWorker=true){
    afEnabled=false;
@@ -104,13 +190,16 @@ const ReviewPlayer = {
    if(!desktopEligible()&&(afEnabled||afWorker)){
     disableAutoFocus(true);
    }
+   renderDevOverlay();
   }
   function stepAutoFocus(nowMs=performance.now()){
    if(!afEnabled||!tracker)return;
    if(tracker.state==='holding'&&tracker.lastDetectedAt!==null&&nowMs-tracker.lastDetectedAt>tracker.holdMs){
     tracker.trackedBox=null;
+    tracker.lastRawBox=null;
     tracker.target={zoom:1,x:0,y:0};
     tracker.state='searching';
+    tracker.motion='lost';
     syncAutoFocusButton('searching');
    }
    const dt=afLastStepMs>0?Math.min(0.25,Math.max(0.004,(nowMs-afLastStepMs)/1000)):(1/30);
@@ -120,6 +209,7 @@ const ReviewPlayer = {
    const vh=video.videoHeight||rect.height||180;
    const next=tracker.step(dt,rect.width||vw,rect.height||vh,vw,vh);
    applyAutoFocusTransform(next);
+   renderDevOverlay();
   }
   function tickAutoFocusRaf(nowMs){
    if(!afEnabled)return;
@@ -373,6 +463,7 @@ const ReviewPlayer = {
    find('video-time').textContent=`${time(video.currentTime)} / ${time(duration)}`;
    const play=find('video-play'),label=video.paused?'Play video':'Pause video';
    play.innerHTML=ReviewPlayer.icon(video.paused?'play':'pause');play.setAttribute('aria-label',label);play.title=label;
+   renderDevOverlay();
   }
   function syncFullscreen(){
    const active=elementFullscreen()||nativeFullscreen(),label=active?'Exit fullscreen':'Enter fullscreen';
@@ -434,7 +525,7 @@ const ReviewPlayer = {
   ['fullscreenchange','webkitfullscreenchange'].forEach(event=>document.addEventListener(event,syncFullscreen));
   ['webkitbeginfullscreen','webkitendfullscreen'].forEach(event=>video.addEventListener(event,syncFullscreen));
   sync();syncFullscreen();
-  this.controller={sync,reveal,updateMediaSession:mediaActionsSync,destroy(){
+  this.controller={sync,reveal,toggleDevMode,isDevMode:()=>devMode,updateMediaSession:mediaActionsSync,destroy(){
    clearTimeout(hideTimer);suspended=true;clearMedia();disableAutoFocus(true);studyObserver?.disconnect();
    window.removeEventListener('pagehide',suspendMedia);window.removeEventListener('pageshow',resumeMedia);
    window.removeEventListener('resize',syncAutoFocusViewport);

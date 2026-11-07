@@ -56,6 +56,7 @@ def register_coaching(app,library,session):
         render=get(b.get('export_id',''))
         prompt=b.get('prompt')
         if render['role']!='render' or render['state']!='completed':abort(409,'Prepare an excerpt first')
+        if render['body'].get('intent')=='share':abort(400,'Share downloads cannot be used as coaching evidence')
         if not isinstance(prompt,str) or not 1<=len(prompt.strip())<=4000:abort(400,'Enter a question up to 4000 characters')
         if b.get('consent') is not True:abort(400,'Confirm sending selected frames and your question to OpenAI')
         spec=render['body'];data=session(spec['source_id'])
@@ -98,14 +99,17 @@ def register_coaching(app,library,session):
     @routes.get('/api/coaching/exports/<identity>/<name>')
     def artifact(identity,name):
         job=get(identity)
-        if job['role']!='render' or job['state']!='completed' or name not in ('excerpt.mp4','recipe.json','prompt.txt'):
+        is_share=job['body'].get('intent')=='share'
+        allowed=('excerpt.mp4','recipe.json') if is_share else ('excerpt.mp4','recipe.json','prompt.txt')
+        if job['role']!='render' or job['state']!='completed' or name not in allowed:
             abort(404,'Export unavailable')
         try:
             path=inside(root,identity+'/'+job['result']['artifact_directory']+'/'+name)
             if not path.is_file():abort(410,'Preview expired. Prepare it again; saved advice is retained')
             if name=='recipe.json':
                 return jsonify(recipe=job['body'],result=job['result'])
-            return send_file(path,conditional=True,as_attachment=request.args.get('download')=='1',download_name='coaching-'+name)
+            prefix=f"{job['body'].get('clip_id','clip')}-interval-" if is_share else 'coaching-'
+            return send_file(path,conditional=True,as_attachment=request.args.get('download')=='1',download_name=prefix+name)
         except ValueError:abort(404)
 
     @routes.post('/api/coaching/worker/<role>/claim')
@@ -140,12 +144,21 @@ def register_coaching(app,library,session):
                     if manifest.stat().st_size>65536:raise ValueError('Manifest too large')
                     saved=json.loads(manifest.read_text())
                     if saved.get('recipe')!=job['body'] or saved.get('lease_token')!=b.get('token'):raise ValueError('Artifact identity mismatch')
-                    names=['excerpt.mp4']+[f['file'] for f in saved['frames']]
-                    if not 1<=len(saved['frames'])<=48:raise ValueError('Invalid frame count')
+                    is_share=job['body'].get('intent')=='share'
+                    if is_share:
+                        if saved.get('frames')!=[]:raise ValueError('Share exports must not include coaching frames')
+                        names=['excerpt.mp4']
+                    else:
+                        names=['excerpt.mp4']+[f['file'] for f in saved['frames']]
+                        if not 1<=len(saved['frames'])<=48:raise ValueError('Invalid frame count')
                     for name in names:
                         if name!='excerpt.mp4' and not re.fullmatch('frame-[0-9]{3}.jpg',name):raise ValueError('Invalid artifact')
                         if not inside(root,identity+'/'+fence+'/'+name).is_file():raise ValueError('Missing artifact')
+                    if is_share and (inside(root,identity+'/'+fence+'/prompt.txt').exists() or any(inside(root,identity+'/'+fence).glob('frame-*.jpg'))):
+                        raise ValueError('Unexpected coaching artifacts in share export')
                     result={k:saved[k] for k in ('frames','bytes','output_seconds','sha256','render_seconds')}
+                    if 'audio_output' in saved:
+                        result['audio_output']=saved['audio_output']
                     result['artifact_directory']=fence
                 except (ValueError,OSError,KeyError,TypeError) as e:abort(400,str(e))
             elif not isinstance(result,dict) or not isinstance(result.get('answer'),str) or not 1<=len(result['answer'])<=64000 or result.get('analysis_mode')!='timestamped_frames':

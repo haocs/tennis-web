@@ -9,6 +9,8 @@ const {
   selectPrimaryPerson,
   panBounds,
   targetFraming,
+  projectBoxToStage,
+  diagnosticsVerdict,
   AutoFocusTracker,
 } = require('../../static/autofocus-core.js');
 
@@ -167,4 +169,77 @@ test('AutoFocusTracker smooths toward target, holds briefly on occlusion, and ea
   assert.equal(stepFrame.zoom, 1);
   assert.equal(stepFrame.x, 0);
   assert.equal(stepFrame.y, 0);
+});
+
+test('projectBoxToStage maps detection boxes through letterboxing and zoom/pan transforms', () => {
+  // 4:3 video (1440x1080) inside 16:9 stage (960x540) has 120px left/right pillarbox bars (rendered 720x540).
+  const fullBox = {x: 0, y: 0, width: 1, height: 1};
+  const letterboxed = projectBoxToStage(fullBox, 960, 540, 1440, 1080, {zoom: 1, x: 0, y: 0});
+  assert.deepEqual(letterboxed, {
+    left: 120,
+    top: 0,
+    width: 720,
+    height: 540,
+    rawLeft: 120,
+    rawTop: 0,
+    rawWidth: 720,
+    rawHeight: 540,
+    visible: true,
+  });
+
+  // When zoomed and panned toward a player within panBounds, the focus point lands at the stage center (480, 270).
+  const playerBox = {
+    x: 0.45,
+    y: 0.34,
+    width: 0.14,
+    height: 0.32,
+    cx: 0.52,
+    cy: 0.5,
+    bottom: 0.66,
+    area: 0.0448,
+    score: 0.84,
+  };
+  const framing = targetFraming(playerBox, 960, 540, 1440, 1080);
+  const projected = projectBoxToStage(playerBox, 960, 540, 1440, 1080, framing);
+  assert.ok(projected && projected.visible);
+  const focusStageX = projected.rawLeft + 0.5 * projected.rawWidth;
+  const focusStageY = projected.rawTop + 0.48 * projected.rawHeight;
+  assert.ok(Math.abs(focusStageX - 480) < 0.5);
+  assert.ok(Math.abs(focusStageY - 270) < 0.5);
+
+  // When pan is clamped by letterbox panBounds, the zoomed video's right edge stays flush with stageWidth (960).
+  const edgeBox = {...playerBox, x: 0.78, cx: 0.85};
+  const clampedFraming = targetFraming(edgeBox, 960, 540, 1440, 1080);
+  const zoomedVideo = projectBoxToStage(fullBox, 960, 540, 1440, 1080, clampedFraming);
+  assert.ok(Math.abs(zoomedVideo.rawLeft + zoomedVideo.rawWidth - 960) < 0.5);
+});
+
+test('diagnosticsVerdict reports motion and loss truthfully while keeping play and swing not measured', () => {
+  const tracker = new AutoFocusTracker({holdMs: 700});
+  assert.deepEqual(diagnosticsVerdict(tracker, false, 'off'), {
+    trackingState: 'off',
+    playerStatus: 'off',
+    motion: 'not active',
+    playVerdict: 'not measured',
+    swingVerdict: 'not measured',
+  });
+
+  const detA = [{boundingBox: {originX: 140, originY: 80, width: 32, height: 60}, categories: [{categoryName: 'person', score: 0.8}]}];
+  tracker.updateDetection(detA, 320, 180, 960, 540, 1920, 1080, 1000);
+  const steady = diagnosticsVerdict(tracker, true, 'tracking');
+  assert.equal(steady.playerStatus, 'tracked · steady');
+  assert.equal(steady.playVerdict, 'not measured');
+  assert.equal(steady.swingVerdict, 'not measured');
+
+  const detB = [{boundingBox: {originX: 185, originY: 82, width: 32, height: 60}, categories: [{categoryName: 'person', score: 0.82}]}];
+  tracker.updateDetection(detB, 320, 180, 960, 540, 1920, 1080, 1180);
+  const moving = diagnosticsVerdict(tracker, true, 'tracking');
+  assert.equal(moving.playerStatus, 'tracked · moving');
+  assert.equal(moving.motion, 'moving');
+
+  tracker.updateDetection([], 320, 180, 960, 540, 1920, 1080, 1400);
+  assert.equal(diagnosticsVerdict(tracker, true, 'holding').playerStatus, 'lost briefly · holding');
+
+  tracker.updateDetection([], 320, 180, 960, 540, 1920, 1080, 2000);
+  assert.equal(diagnosticsVerdict(tracker, true, 'searching').playerStatus, 'player lost · searching');
 });

@@ -163,3 +163,99 @@ def test_worker_server_error_is_actionable_and_redacted(tmp_path,monkeypatch):
     monkeypatch.setattr('urllib.request.urlopen',rejected)
     with pytest.raises(ValueError,match='HTTP 400: Denied') as error:worker.api('worker/ai/claim',{'worker_id':'test'})
     assert 'private-test-token' not in str(error.value) and '[redacted]' in str(error.value)
+
+
+def test_share_export_capability_gating_and_profile_isolation(setup):
+    import hashlib
+    from worker.tennis_coach.annotations import RENDER_SHARE_CAPABILITY
+    app,root,data=enabled(setup);c=app.test_client()
+    body=dict(selection(data),intent='share',quality='high',request_id='share-request-001')
+    created=post(c,'exports',body)
+    assert created.status_code==201
+    spec=created.json['body']
+    assert spec['intent']=='share' and spec['quality']=='high'
+    assert spec['required_capability']==RENDER_SHARE_CAPABILITY
+    assert spec['audio']=='retime_if_present' and spec['analysis_mode']=='none'
+    # Legacy render worker without share-export-v1 capability must not claim share jobs.
+    assert post(c,'worker/render/claim',{'worker_id':'old-render','capabilities':[]},'test-worker-secret').json['job'] is None
+    claim=post(c,'worker/render/claim',{'worker_id':'new-render','capabilities':[RENDER_SHARE_CAPABILITY]},'test-worker-secret').json['job']
+    assert claim['id']==created.json['id']
+    fence=hashlib.sha256(claim['token'].encode()).hexdigest()[:24]
+    folder=Path(app.config['COACH_MEDIA_ROOT'])/claim['id']/fence;folder.mkdir(parents=True)
+    (folder/'excerpt.mp4').write_bytes(b'high-quality-video')
+    payload=dict(recipe=claim['body'],lease_token=claim['token'],frames=[],bytes=18,output_seconds=4,sha256='b'*64,render_seconds=0.8,audio_output='retimed')
+    (folder/'recipe.json').write_text(json.dumps(payload))
+    # Unexpected coaching prompt file in share export directory is rejected.
+    (folder/'prompt.txt').write_text('should-not-exist')
+    assert post(c,'worker/jobs/'+claim['id']+'/complete',{'token':claim['token']},'test-worker-secret').status_code==400
+    (folder/'prompt.txt').unlink()
+    done=post(c,'worker/jobs/'+claim['id']+'/complete',{'token':claim['token']},'test-worker-secret')
+    assert done.status_code==200 and done.json['result']['audio_output']=='retimed'
+    # Share exports cannot be used as coaching evidence.
+    rejected_ai=post(c,'requests',{'export_id':claim['id'],'prompt':'coach','consent':True,'request_id':'ask-from-share'})
+    assert rejected_ai.status_code==400 and 'Share downloads cannot be used as coaching evidence' in rejected_ai.json['error']
+    assert c.get('/api/coaching/exports/'+claim['id']+'/prompt.txt').status_code==404
+    dl=c.get('/api/coaching/exports/'+claim['id']+'/excerpt.mp4?download=1')
+    assert dl.status_code==200 and f'{CLIP}-interval-excerpt.mp4' in dl.headers.get('Content-Disposition','')
+
+
+@pytest.mark.parametrize('hdr', [False, True])
+def test_share_export_ffmpeg_synthetic_video_audio_and_hdr(setup, tmp_path, hdr):
+    import hashlib, os, re, shutil, subprocess
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'worker'))
+    from tennis_coach.worker import atempo_chain, render
+    from worker.tennis_coach.annotations import RENDER_SHARE_CAPABILITY
+    assert atempo_chain(1.0) == []
+    assert atempo_chain(0.25) == ['atempo=0.5', 'atempo=0.500000']
+    assert atempo_chain(0.1) == ['atempo=0.5', 'atempo=0.5', 'atempo=0.5', 'atempo=0.800000']
+    ff = os.environ.get('TENNIS_FFMPEG') or shutil.which('ffmpeg')
+    if not ff:
+        pytest.skip('FFmpeg required for real media integration checks')
+    app, root, data = enabled(setup)
+    c = app.test_client()
+    clip_rel = data.get('media_directory', data['id']) + '/' + data['clips'][0]['file']
+    src_path = Path(app.config['LIBRARY_ROOT']) / 'media' / clip_rel
+    # Encoder VUI tags are a precondition, not a mocked tone-map command.
+    if hdr:
+        encoding = ['-c:v', 'libx265', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p10le',
+                    '-x265-params', 'colorprim=bt2020:transfer=arib-std-b67:colormatrix=bt2020nc:log-level=error:pools=1:frame-threads=1', '-tag:v', 'hvc1']
+    else:
+        encoding = ['-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-crf', '18',
+                    '-x264-params', 'colorprim=bt709:transfer=bt709:colormatrix=bt709']
+    subprocess.run([ff, '-hide_banner', '-loglevel', 'error', '-y',
+                    '-f', 'lavfi', '-i', 'testsrc2=size=1280x720:rate=30:duration=3',
+                    '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000:duration=3',
+                    *encoding, '-c:a', 'aac', '-b:a', '128k', str(src_path)],
+                   check=True, capture_output=True, timeout=30)
+    if hdr:
+        input_probe = subprocess.run([ff, '-hide_banner', '-i', str(src_path)],
+                                     capture_output=True, text=True, timeout=15).stderr
+        assert 'yuv420p10le' in input_probe and 'bt2020nc/bt2020/arib-std-b67' in input_probe
+    data['video']['hdr'] = hdr
+    data.setdefault('media_checksums', {})[data['clips'][0]['file']] = hashlib.sha256(src_path.read_bytes()).hexdigest()
+    (Path(app.config['LIBRARY_ROOT']) / 'metadata/sessions' / f'{ID}.json').write_text(json.dumps(data))
+    body = dict(source_id=ID, clip_id=CLIP, publication=data['published_at'], start=0.5,
+                end=1.5, speed=0.25, crop=[0.25, 0.25, 0.5, 0.5], intent='share',
+                quality='high', request_id='share-ffmpeg-001')
+    assert post(c, 'exports', body).status_code == 201
+    job = post(c, 'worker/render/claim', {'worker_id': 'render-worker',
+               'capabilities': [RENDER_SHARE_CAPABILITY]}, 'test-worker-secret').json['job']
+    local = tmp_path / 'local'
+    local.mkdir()
+    cfg = dict(library_media_root=str(Path(app.config['LIBRARY_ROOT']) / 'media'),
+               artifact_root=str(app.config['COACH_MEDIA_ROOT']), ffmpeg=ff)
+    info = render(cfg, job, local)
+    assert info['frames'] == [] and info['audio_output'] == 'retimed'
+    fence = hashlib.sha256(job['token'].encode()).hexdigest()[:24]
+    dest = Path(app.config['COACH_MEDIA_ROOT']) / job['id'] / fence
+    assert sorted(p.name for p in dest.iterdir()) == ['excerpt.mp4', 'recipe.json']
+    probe = subprocess.run([ff, '-hide_banner', '-i', str(dest / 'excerpt.mp4')],
+                           capture_output=True, text=True, timeout=15).stderr
+    assert 'Video: h264' in probe and '640x360' in probe and 'bt709' in probe
+    assert 'Audio: aac' in probe
+    measured = re.search(r'Duration: (\d+):(\d+):(\d+\.\d+)', probe)
+    assert measured, probe
+    h, m, sec = map(float, measured.groups())
+    assert h * 3600 + m * 60 + sec == pytest.approx(4.0, abs=0.1)
+    assert post(c, 'worker/jobs/' + job['id'] + '/complete',
+                {'token': job['token']}, 'test-worker-secret').status_code == 200
