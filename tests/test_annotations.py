@@ -136,3 +136,223 @@ def test_unstructured_response_is_selection_context_not_invented_precise_timing(
     assert not a['body']['timing_verified'] and not a['playback_eligible']
     history=c.get('/api/annotations/'+a['id']+'/revisions').json['revisions']
     assert not history[0]['history_complete']
+
+
+def test_cut_review_verdicts_legacy_null_boundary_suggestions_and_gap_intervals(setup):
+    from entity_model import output_version
+    app,root,data=setup;c=app.test_client()
+    data['published_at']+=1
+    data['processing']=dict(run_id='run-101',algorithm_version='v2.1',task_id='t'*32,attempt_id='a'*32,source_id='s'*32,private_path='/secret/raw.mov')
+    (root/'metadata/sessions'/f'{ID}.json').write_text(json.dumps(data))
+    clip_target=dict(scope='clip',clip_id=CLIP,start_seconds=5,end_seconds=15)
+
+    # 1. Legacy cut_feedback without verdict keeps verdict: None (never coerced to poor_cut).
+    legacy=c.post('/api/processing-annotations',json=dict(
+        source_id=ID,publication=data['published_at'],kind='cut_feedback',
+        target=clip_target,body=dict(reasons=['end_late','lost_player'],text='Walked away'),
+        request_id='cut-legacy-null-001'
+    ),headers=H)
+    assert legacy.status_code==201
+    assert legacy.json['body']['verdict'] is None
+    assert legacy.json['body']['reasons']==['end_late','lost_player']
+    assert legacy.json['context']['video_version_id']==output_version(ID,data['published_at'])
+    assert legacy.json['context']['processing_ref']==dict(run_id='run-101',algorithm_version='v2.1',task_id='t'*32,attempt_id='a'*32,source_id='s'*32)
+    assert 'private_path' not in legacy.json['context']['processing_ref']
+
+    # 2. Good cut verdict alone (without issue reasons) is valid evidence.
+    good=c.post('/api/processing-annotations',json=dict(
+        source_id=ID,publication=data['published_at'],kind='cut_feedback',
+        target=clip_target,body=dict(verdict='good_cut',text='Clean rally bounds'),
+        request_id='cut-good-verdict-001'
+    ),headers=H)
+    assert good.status_code==201
+    assert good.json['body']['verdict']=='good_cut' and good.json['body']['reasons']==[]
+
+    # 3. Boundary suggestions: can extend earlier/later within source [0, 20000ms] or trim,
+    #    and omitted side defaults to original clip bound [5000, 15000).
+    extended=c.post('/api/processing-annotations',json=dict(
+        source_id=ID,publication=data['published_at'],kind='cut_feedback',
+        target=clip_target,
+        body=dict(verdict='needs_adjustment',reasons=['start_late','end_late'],suggested_start_ms=3500,suggested_end_ms=12500,heuristic_ref='h_clip01_tail'),
+        request_id='cut-bounds-valid-001'
+    ),headers=H)
+    assert extended.status_code==201
+    assert extended.json['body']['suggested_start_ms']==3500
+    assert extended.json['body']['suggested_end_ms']==12500
+    assert extended.json['body']['heuristic_ref']=='h_clip01_tail'
+
+    # Omitted start defaults to 5000ms -> suggested_end_ms=4000 is invalid (5000 >= 4000).
+    assert c.post('/api/processing-annotations',json=dict(
+        source_id=ID,publication=data['published_at'],kind='cut_feedback',
+        target=clip_target,body=dict(verdict='needs_adjustment',suggested_end_ms=4000),
+        request_id='cut-bounds-bad-end-001'
+    ),headers=H).status_code==400
+    # Omitted end defaults to 15000ms -> suggested_start_ms=16000 is invalid (16000 >= 15000).
+    assert c.post('/api/processing-annotations',json=dict(
+        source_id=ID,publication=data['published_at'],kind='cut_feedback',
+        target=clip_target,body=dict(verdict='needs_adjustment',suggested_start_ms=16000),
+        request_id='cut-bounds-bad-start-001'
+    ),headers=H).status_code==400
+    # Outside source duration (20000ms) or boolean/float is rejected.
+    for bad_body in (
+        dict(verdict='needs_adjustment',suggested_end_ms=25000),
+        dict(verdict='needs_adjustment',suggested_start_ms=True),
+        dict(verdict='missed_play',reasons=['missed_play']),
+        dict(reasons=[]),
+    ):
+        assert c.post('/api/processing-annotations',json=dict(
+            source_id=ID,publication=data['published_at'],kind='cut_feedback',
+            target=clip_target,body=bad_body,request_id='cut-bounds-invalid'
+        ),headers=H).status_code==400
+
+    # 4. Missed-play interval reports inside removed gaps ([0, 5) and [15, 20)):
+    gap_report=c.post('/api/processing-annotations',json=dict(
+        source_id=ID,publication=data['published_at'],kind='cut_feedback',
+        target=dict(scope='interval',start_seconds=15.5,end_seconds=19.0),
+        body=dict(verdict='missed_play',reasons=['missed_play'],text='Missed serve and return in trailing gap'),
+        request_id='cut-gap-missed-play-001'
+    ),headers=H)
+    assert gap_report.status_code==201
+    assert gap_report.json['record_class']=='processing_annotation'
+    assert gap_report.json['relation']=='removed_gap'
+    assert gap_report.json['subject']['type']=='video_version'
+    # Never leaks into serving Moments:
+    assert c.get(f'/api/recordings/{ID}/moments').json['moments']==[]
+
+    # Rejects interval overlapping retained clip [5, 15) or spanning across clip from [2, 18):
+    for bad_span in ((4.0, 6.0), (14.5, 16.0), (2.0, 18.0)):
+        assert c.post('/api/processing-annotations',json=dict(
+            source_id=ID,publication=data['published_at'],kind='cut_feedback',
+            target=dict(scope='interval',start_seconds=bad_span[0],end_seconds=bad_span[1]),
+            body=dict(verdict='missed_play',reasons=['missed_play']),
+            request_id='cut-gap-overlap-invalid'
+        ),headers=H).status_code==400
+
+
+def test_cut_review_version_scoping_rejects_arbitrary_ids_and_guards_historical_writes(setup):
+    from entity_model import output_version
+    app,root,data=setup;c=app.test_client()
+    v1_pub=data['published_at']
+    v1_id=output_version(ID,v1_pub)
+    clip_v1=dict(scope='clip',clip_id=CLIP,start_seconds=5,end_seconds=15)
+
+    # Create review on v1 while v1 is current serving
+    r1=c.post('/api/processing-annotations',json=dict(
+        source_id=ID,publication=v1_pub,reviewed_video_version_id=v1_id,
+        kind='cut_feedback',target=clip_v1,body=dict(verdict='needs_adjustment',reasons=['end_late']),
+        request_id='v1-cut-review-001'
+    ),headers=H)
+    assert r1.status_code==201
+
+    # Publish v2
+    v2_data=copy.deepcopy(data)
+    v2_data['published_at']=v1_pub+100
+    v2_data['clips'][0].update(id='b'*24,original_start_seconds=4,original_end_seconds=14,duration_seconds=10,playback_end_seconds=10)
+    (root/'metadata/sessions'/f'{ID}.json').write_text(json.dumps(v2_data))
+    v2_id=output_version(ID,v2_data['published_at'])
+
+    versions_resp=c.get(f'/api/processing/videos/{ID}/versions').json
+    assert versions_resp['current_version_id']==v2_id
+    assert [v['id'] for v in versions_resp['versions']]==[v1_id,v2_id]
+
+    # Writing to v1 without explicit allow_historical=True returns 409 Conflict
+    stale=c.post('/api/processing-annotations',json=dict(
+        source_id=ID,publication=v1_pub,reviewed_video_version_id=v1_id,
+        kind='cut_feedback',target=clip_v1,body=dict(verdict='poor_cut',reasons=['poor_cut']),
+        request_id='v1-stale-attempt-001'
+    ),headers=H)
+    assert stale.status_code==409
+
+    # Editing r1 (from v1) without explicit historical scoping returns 409 Conflict
+    assert put(c,f'/api/processing-annotations/{r1.json["id"]}',dict(
+        publication=v2_data['published_at'],version=1,body=dict(verdict='poor_cut',reasons=['poor_cut'])
+    )).status_code==409
+    assert put(c,f'/api/processing-annotations/{r1.json["id"]}',dict(
+        publication=v1_pub,reviewed_video_version_id=v1_id,version=1,body=dict(verdict='poor_cut',reasons=['poor_cut'])
+    )).status_code==409
+
+    # Rejects arbitrary/unvalidated historical or candidate version IDs even with allow_historical=True
+    fake_vid=output_version(ID,v1_pub-999)
+    for bad_vid in ('candidate-123','v_'+'f'*32,fake_vid):
+        assert c.post('/api/processing-annotations',json=dict(
+            source_id=ID,publication=v1_pub-999,reviewed_video_version_id=bad_vid,allow_historical=True,
+            kind='cut_feedback',target=clip_v1,body=dict(verdict='poor_cut',reasons=['poor_cut']),
+            request_id='arbitrary-vid-reject'
+        ),headers=H).status_code==400
+
+    # Explicitly scoped historical write to validated retained v1 succeeds and keeps v1 context
+    scoped_create=c.post('/api/processing-annotations',json=dict(
+        source_id=ID,publication=v1_pub,reviewed_video_version_id=v1_id,allow_historical=True,
+        kind='cut_feedback',target=clip_v1,body=dict(verdict='poor_cut',reasons=['poor_cut'],text='Historical v1 note'),
+        request_id='v1-explicit-scoped-001'
+    ),headers=H)
+    assert scoped_create.status_code==201
+    assert scoped_create.json['context']['publication']==v1_pub
+    assert scoped_create.json['context']['video_version_id']==v1_id
+
+    scoped_edit=put(c,f'/api/processing-annotations/{r1.json["id"]}',dict(
+        publication=v1_pub,reviewed_video_version_id=v1_id,allow_historical=True,
+        version=1,body=dict(verdict='needs_adjustment',reasons=['end_late'],suggested_end_ms=13000,text='Updated on v1')
+    ))
+    assert scoped_edit.status_code==200
+    assert scoped_edit.json['body']['suggested_end_ms']==13000
+    assert scoped_edit.json['context']['video_version_id']==v1_id
+
+    # Querying processing annotations scoped to v1 projects against v1 manifest
+    v1_list=c.get(f'/api/processing-annotations/sources/{ID}?video_version_id={v1_id}').json
+    assert v1_list['video_version_id']==v1_id and v1_list['current_version_id']==v2_id
+    assert all(a['relation']=='exact' for a in v1_list['annotations'])
+    assert c.get(f'/api/processing-annotations/sources/{ID}?video_version_id={fake_vid}').status_code==404
+
+    # Create review on v2 and verify ?video_version_id filters before pagination
+    r2=c.post('/api/processing-annotations',json=dict(
+        source_id=ID,publication=v2_data['published_at'],reviewed_video_version_id=v2_id,
+        kind='cut_feedback',target=dict(scope='clip',clip_id='b'*24,start_seconds=4,end_seconds=14),
+        body=dict(verdict='good_cut',text='Current v2 cut'),request_id='v2-cut-review-001'
+    ),headers=H)
+    assert r2.status_code==201
+    cursor='';paged_v2=[]
+    while True:
+        page_resp=c.get(f'/api/processing-annotations/sources/{ID}?video_version_id={v2_id}&limit=1&after={cursor}').json
+        paged_v2.extend(page_resp['annotations'])
+        cursor=page_resp['next_after']
+        if not cursor:break
+    assert [x['id'] for x in paged_v2]==[r2.json['id']]
+    assert all(x['context']['publication']==v2_data['published_at'] for x in paged_v2)
+
+
+def test_missed_play_gap_report_resize_archive_and_conflict(setup):
+    app,root,data=setup;c=app.test_client()
+    gap1=dict(scope='interval',start_seconds=0.5,end_seconds=2.5)
+    created=c.post('/api/processing-annotations',json=dict(
+        source_id=ID,publication=data['published_at'],kind='cut_feedback',
+        target=gap1,body=dict(verdict='missed_play',reasons=['missed_play'],text='Rally in opening gap'),
+        request_id='gap-resize-001'
+    ),headers=H)
+    assert created.status_code==201
+    url=f'/api/processing-annotations/{created.json["id"]}'
+
+    # Resizing within the same removed gap [0, 5) succeeds and preserves revision history
+    resized_target=dict(scope='interval',start_seconds=1.0,end_seconds=4.0)
+    resized=put(c,url,dict(publication=data['published_at'],version=1,target=resized_target,body=dict(verdict='missed_play',reasons=['missed_play'],text='Expanded gap range')))
+    assert resized.status_code==200
+    assert resized.json['target']==resized_target
+    assert resized.json['version']==2
+
+    # Stale CAS version fails with 409
+    assert put(c,url,dict(publication=data['published_at'],version=1,status='archived')).status_code==409
+
+    # Moving a gap report across a retained clip into another gap [15, 20) or overlapping clip [5, 15) is rejected
+    for bad_target in (
+        dict(scope='interval',start_seconds=16.0,end_seconds=18.0),
+        dict(scope='interval',start_seconds=2.0,end_seconds=6.0),
+        dict(scope='clip',clip_id=CLIP,start_seconds=5,end_seconds=15),
+    ):
+        assert put(c,url,dict(publication=data['published_at'],version=2,target=bad_target)).status_code==400
+
+    # Archiving and checking revisions
+    archived=put(c,url,dict(publication=data['published_at'],version=2,status='archived'))
+    assert archived.status_code==200 and archived.json['status']=='archived'
+    revs=c.get(f'/api/annotations/{created.json["id"]}/revisions').json['revisions']
+    assert len(revs)==3
+    assert revs[0]['target']==gap1 and revs[1]['target']==resized_target and revs[2]['status']=='archived'

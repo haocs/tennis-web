@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import re
 from flask import abort, jsonify, request
-from annotations import finite, AnnotationStore, AnnotationConflict, KINDS, SOURCE_ID, canonical, project, validate_body, validate_target
+from annotations import finite, AnnotationStore, AnnotationConflict, KINDS, SOURCE_ID, VERSION_ID, canonical, project, removed_gaps_ms, validate_body, validate_target
 from players import decorate_players
 from entity_model import classify, moment_view, subject, output_version
 
@@ -30,8 +30,54 @@ def register_annotations(app, library, session):
 
     def context(data):
         processing = data.get('processing') or {}
-        return dict(publication=data['published_at'], source_duration=data['source']['duration_seconds'],
-                    processing_ref={k:v for k,v in processing.items() if k in ('run_id','algorithm_version') and isinstance(v,str) and len(v)<=120} if isinstance(processing,dict) else {})
+        allowed_ref = ('run_id', 'algorithm_version', 'task_id', 'attempt_id', 'source_id')
+        return dict(publication=data['published_at'],
+                    video_version_id=output_version(data['id'], data['published_at']),
+                    source_duration=data['source']['duration_seconds'],
+                    processing_ref={k:v for k,v in processing.items() if k in allowed_ref and isinstance(v,str) and len(v)<=120} if isinstance(processing,dict) else {})
+
+    def resolve_processing_version(source, body, active_data, current_record=None):
+        catalog = app.extensions['entity_catalog']
+        try:
+            catalog.sync_serving_video(active_data)
+        except ValueError as error:
+            abort(409, str(error))
+        current_vid = output_version(source, active_data['published_at'])
+        if ('reviewed_video_version_id' in body and 'video_version_id' in body
+                and body['reviewed_video_version_id'] != body['video_version_id']):
+            abort(400, 'Conflicting video version IDs')
+        requested_vid = body.get('reviewed_video_version_id') if 'reviewed_video_version_id' in body else body.get('video_version_id')
+        if 'allow_historical' in body and type(body['allow_historical']) is not bool:
+            abort(400, 'Invalid historical version flag')
+        if 'require_current_serving' in body and type(body['require_current_serving']) is not bool:
+            abort(400, 'Invalid serving version requirement')
+        allow_historical = body.get('allow_historical') is True
+        require_current = body.get('require_current_serving')
+        if allow_historical and require_current is True:
+            abort(400, 'Conflicting version scope flags')
+        if requested_vid is not None:
+            if not isinstance(requested_vid, str) or not VERSION_ID.fullmatch(requested_vid):
+                abort(400, 'Choose a validated retained video version')
+            manifest = catalog.version_manifest(source, requested_vid)
+            if manifest is None:
+                abort(400, 'Choose a validated retained video version')
+            if not finite(body.get('publication')) or body.get('publication') != manifest['published_at']:
+                abort(409, 'Publication does not match the selected video version.')
+            if requested_vid != current_vid:
+                if not allow_historical or require_current is True:
+                    abort(409, 'This recording was reprocessed. Switch to the current serving version or explicitly scope this review to the historical version.')
+                if current_record and current_record['context']['publication'] != manifest['published_at']:
+                    abort(409, 'Create a new report to review another cut or processed version')
+                return manifest
+            if current_record and current_record['context']['publication'] != active_data['published_at']:
+                abort(409, 'This review belongs to an earlier processed version. Scope to that historical version before editing.')
+            return active_data
+        if allow_historical:
+            abort(400, 'Historical review requires an explicit retained video_version_id')
+        check_publication(body, active_data)
+        if current_record and current_record['context']['publication'] != active_data['published_at']:
+            abort(409, 'This review belongs to an earlier processed version. Scope to that historical version before editing.')
+        return active_data
 
     def coaches(source, data, after=''):
         # Keep one authoritative coaching record. No duplicate writes/migration.
@@ -112,8 +158,42 @@ def register_annotations(app, library, session):
     @app.get('/api/processing-annotations/sources/<source>')
     def processing_annotations(source):
         check_source(source)
-        items,after=page(listing(source,optional_source(source),category='processing_annotation'))
-        return jsonify(schema_version=2,annotations=items,next_after=after,training_label_status='not_released')
+        active_data = optional_source(source)
+        if active_data:
+            try:
+                app.extensions['entity_catalog'].sync_serving_video(active_data)
+            except ValueError as error:
+                abort(409, str(error))
+        requested_vid = request.args.get('video_version_id')
+        data = active_data
+        if requested_vid:
+            if not VERSION_ID.fullmatch(requested_vid):
+                abort(400, 'Invalid video version')
+            manifest = app.extensions['entity_catalog'].version_manifest(source, requested_vid)
+            if manifest is None:
+                abort(404, 'Video version not found')
+            data = manifest
+            raw_rows = []
+            cursor = request.args.get('after', '')
+            if len(cursor) > 100:
+                abort(400, 'Invalid cursor')
+            while True:
+                batch = store.listing(source, after=cursor, limit=200, category='processing_annotation')
+                for a in batch:
+                    pub = (a.get('context') or {}).get('publication')
+                    if pub == manifest['published_at'] and output_version(source, pub) == requested_vid:
+                        raw_rows.append(project(a, data))
+                if len(batch) < 200:
+                    break
+                cursor = batch[-1]['id']
+            items, after = page(sorted(raw_rows, key=lambda a: a['id']))
+        else:
+            items, after = page(listing(source, data, category='processing_annotation'))
+        return jsonify(schema_version=2,annotations=items,next_after=after,
+                       video_version_id=output_version(source,data['published_at']) if data else None,
+                       current_version_id=output_version(source,active_data['published_at']) if active_data else None,
+                       publication=data['published_at'] if data else None,
+                       training_label_status='not_released')
 
     @app.get('/api/entities/videos/<source>/metadata')
     def entity_metadata(source):
@@ -246,21 +326,29 @@ def register_annotations(app, library, session):
         return jsonify(create_record(request.get_json())),201
 
     def create_record(body):
-        if not isinstance(body,dict) or set(body)-{'source_id','publication','kind','target','body','player_id','request_id'}:
+        version_keys = {'video_version_id', 'reviewed_video_version_id', 'allow_historical', 'require_current_serving'}
+        if not isinstance(body,dict) or set(body)-({'source_id','publication','kind','target','body','player_id','request_id'} | version_keys):
             abort(400,'Invalid metadata request')
         source=body.get('source_id')
         if not isinstance(source,str):abort(400,'Choose a recording')
-        data=session(source);check_publication(body,data)
+        active_data=session(source)
         kind=body.get('kind')
         if not isinstance(kind,str) or kind not in KINDS or KINDS[kind].get('read_only'):
             abort(400,'Choose a supported note type')
+        if kind in ('cut_feedback', 'processing_label'):
+            data = resolve_processing_version(source, body, active_data)
+        else:
+            if set(body) & version_keys:
+                abort(400, 'Invalid metadata request')
+            check_publication(body, active_data)
+            data = active_data
         rid=body.get('request_id')
         if not isinstance(rid,str) or not re.fullmatch(r'[a-zA-Z0-9_-]{8,100}',rid):
             abort(400,'A unique request ID is required')
         try:
             target=validate_target(kind,body.get('target'),data)
             value=dict(schema_version=1,source_id=source,kind=kind,target=target,
-                       body=validate_body(kind,body.get('body'),allow_empty=target['scope'] in ('point','interval')),player_id=player_id(body),context=context(data),
+                       body=validate_body(kind,body.get('body'),allow_empty=target['scope'] in ('point','interval'),target=target,data=data),player_id=player_id(body),context=context(data),
                        origin=dict(type='human'),status='active',training_label_status='not_released')
             return project(store.write(value,request_id=rid),data)
         except ValueError as error:
@@ -277,17 +365,44 @@ def register_annotations(app, library, session):
             abort(400,'Use the coaching review editor to edit this suggestion')
         try:current=store.get(identity)
         except KeyError:abort(404,'Note not found')
-        if not isinstance(body,dict) or set(body)-{'publication','version','body','target','status','player_id'}:
+        version_keys = {'video_version_id', 'reviewed_video_version_id', 'allow_historical', 'require_current_serving'}
+        if not isinstance(body,dict) or set(body)-({'publication','version','body','target','status','player_id'} | version_keys):
             abort(400,'Invalid metadata edit')
-        data=session(current['source_id']);check_publication(body,data)
+        active_data=session(current['source_id'])
+        if current['kind'] in ('cut_feedback', 'processing_label'):
+            data = resolve_processing_version(current['source_id'], body, active_data, current_record=current)
+        else:
+            if set(body) & version_keys:
+                abort(400, 'Invalid metadata edit')
+            check_publication(body, active_data)
+            data = active_data
         if type(body.get('version')) is not int or body['version']<1:abort(400,'The current note version is required')
         value=copy.deepcopy(current)
         try:
-            if current['kind'] in ('cut_feedback','processing_label') and 'target' in body:
-                raise ValueError('Create a new report to review another cut or processed version')
-            if 'target' in body:
+            if current['kind'] == 'cut_feedback' and 'target' in body:
+                if (current['target'].get('scope') == 'interval'
+                        and isinstance(body['target'], dict)
+                        and body['target'].get('scope') == 'interval'):
+                    new_target = validate_target('cut_feedback', body['target'], data)
+                    old_start_ms = round(float(current['target']['start_seconds']) * 1000)
+                    old_end_ms = round(float(current['target']['end_seconds']) * 1000)
+                    new_start_ms = round(float(new_target['start_seconds']) * 1000)
+                    new_end_ms = round(float(new_target['end_seconds']) * 1000)
+                    same_gap = any(
+                        g_start <= old_start_ms < old_end_ms <= g_end and g_start <= new_start_ms < new_end_ms <= g_end
+                        for g_start, g_end in removed_gaps_ms(data)
+                    )
+                    if not same_gap:
+                        raise ValueError('Create a new report to review another cut or processed version')
+                    value['target'] = new_target
+                elif body['target'] != current['target']:
+                    raise ValueError('Create a new report to review another cut or processed version')
+            elif current['kind'] == 'processing_label' and 'target' in body:
+                if body['target'] != current['target']:
+                    raise ValueError('Create a new report to review another cut or processed version')
+            elif 'target' in body:
                 value['target']=validate_target(value['kind'],body['target'],data);value['context']=context(data)
-            value['body']=validate_body(value['kind'],body.get('body',value['body']),allow_empty=value['target']['scope'] in ('point','interval'))
+            value['body']=validate_body(value['kind'],body.get('body',value['body']),allow_empty=value['target']['scope'] in ('point','interval'),target=value['target'],data=data)
             if 'status' in body:
                 if body['status'] not in ('active','archived'):raise ValueError('Invalid note status')
                 value['status']=body['status']

@@ -18,7 +18,7 @@ from storage import Library, smb_root, nas_media_address
 from thumbnails import ClipPosters, PosterUnavailable
 from practices import recording_time, group_recordings
 from state import State, Conflict
-from entity_model import EntityCatalog, clip_identity
+from entity_model import EntityCatalog, clip_identity, output_version
 from clip_study import public_clip_study, number as finite_number
 from coaching_routes import register_coaching
 from annotation_routes import register_annotations
@@ -35,6 +35,7 @@ def create_app(config=None):
                       MEDIA_ROOT=os.environ.get("TENNIS_MEDIA_ROOT"),
                       DATA_ROOT=os.environ.get("TENNIS_DATA_ROOT", "/data"),
                       STATUS_FILE=os.environ.get("TENNIS_STATUS_FILE"),
+                      PROCESSING_API_URL=os.environ.get("TENNIS_PROCESSING_API_URL", ""),
                       PROCESSING_ROOM_URL=os.environ.get("TENNIS_PROCESSING_ROOM_URL", "/processing"),
                       SESSION_GAP_MINUTES=os.environ.get("TENNIS_SESSION_GAP_MINUTES", "30"),
                       LIBRARY_SMB_URL=os.environ.get("TENNIS_LIBRARY_SMB_URL"),
@@ -81,6 +82,10 @@ def create_app(config=None):
     register_players(app, library, session, gap_minutes)
     register_coaching(app, library, lambda identity: decorate_players(copy.deepcopy(session(identity)), state.all()))
     register_annotations(app, library, session)
+    from cut_reprocess import register as register_reprocess
+    register_reprocess(app, session)
+    from cut_comparisons import register as register_comparisons
+    register_comparisons(app, session)
 
     def require_publication(data, parameter):
         expected = request.args.get(parameter)
@@ -152,7 +157,9 @@ def create_app(config=None):
     @app.get('/processing')
     @app.get('/learning')
     @app.get('/review/<identity>')
+    @app.get('/review/<identity>/compare')
     @app.get('/review/<identity>/cuts')
+    @app.get('/processing/cuts/<identity>')
     def index(identity=None):
         if identity:
             session(identity)
@@ -224,6 +231,81 @@ def create_app(config=None):
         return jsonify(entity_type='video',id=identity,original_recording_id=identity,
                        title=data['title'],location=data['location_label'],metadata=data['overrides'],
                        current_version_id=data['video_version_id'],clips=data['clips'],versions=catalog.versions(identity))
+
+    @app.get('/api/processing/videos/<identity>/versions')
+    def processing_video_versions(identity):
+        data = session(identity)
+        try:
+            catalog.sync_serving_video(data)
+        except ValueError as error:
+            abort(409, str(error))
+        current_vid = output_version(identity, data['published_at'])
+        retained = catalog.versions(identity)
+        items = []
+        for entry in retained:
+            manifest = entry['manifest']
+            is_serving = entry['id'] == current_vid
+            kept_sec = sum(max(0.0, float(c['original_end_seconds']) - float(c['original_start_seconds'])) for c in manifest.get('clips', []))
+            source_sec = float((manifest.get('source') or {}).get('duration_seconds', 0))
+            processing = manifest.get('processing') if isinstance(manifest.get('processing'), dict) else {}
+            items.append(dict(
+                id=entry['id'],
+                video_id=identity,
+                published_at=manifest.get('published_at'),
+                is_current_serving=is_serving,
+                media_state='available' if is_serving else 'historical_manifest',
+                clip_count=len(manifest.get('clips', [])),
+                kept_seconds=round(kept_sec, 3),
+                removed_seconds=round(max(0.0, source_sec - kept_sec), 3),
+                source_duration_seconds=source_sec,
+                processing_ref={k: v for k, v in processing.items() if k in ('run_id', 'algorithm_version', 'task_id', 'attempt_id', 'source_id') and isinstance(v, str) and len(v) <= 120},
+                manifest=manifest,
+            ))
+        return jsonify(
+            video_id=identity,
+            current_version_id=current_vid,
+            current_publication=data['published_at'],
+            versions=items,
+        )
+
+    @app.get('/api/processing/videos/<identity>/heuristics')
+    def processing_heuristics(identity):
+        import hashlib
+        from cut_diagnostics import validate, MAX_BYTES
+        data=session(identity)
+        try:catalog.sync_serving_video(data)
+        except ValueError as error:abort(409,str(error))
+        version=request.args.get('version') or output_version(identity,data['published_at'])
+        manifest=catalog.version_manifest(identity,version)
+        if manifest is None:abort(404,'Video version not found')
+        if version!=output_version(identity,data['published_at']):
+            if not app.config.get('PROCESSING_API_URL'):
+                return jsonify(video_version_id=version,available=False,reason='Historical diagnostics are unavailable',items=[],next_after=None)
+            from entity_model import canonical_manifest
+            entries=app.extensions['processing_client'].call('/videos/'+identity+'/versions')['items']
+            verified=next((v for v in entries if v.get('id')==version),None)
+            if not verified or canonical_manifest(verified['manifest'])!=canonical_manifest(manifest):
+                return jsonify(video_version_id=version,available=False,reason='Historical diagnostics are unavailable',items=[],next_after=None)
+            data=verified['manifest']
+        if 'heuristic-diagnostics.json' not in data.get('artifacts',[]):
+            return jsonify(video_version_id=version,available=False,reason='No worker diagnostics for this version',items=[],next_after=None)
+        try:
+            after=int(request.args.get('after','0'));limit=int(request.args.get('limit','50'))
+        except ValueError:abort(400,'Invalid diagnostics page')
+        if after<0 or not 1<=limit<=50:abort(400,'Invalid diagnostics page')
+        try:
+            directory=data.get('artifact_directory')
+            relative=f"runs/{directory}/heuristic-diagnostics.json" if directory else f"sessions/{identity}/heuristic-diagnostics.json"
+            from storage import inside
+            path=inside(library.metadata,relative)
+            with path.open('rb') as stream:raw=stream.read(MAX_BYTES+1)
+            expected=data.get('metadata_checksums',{}).get('heuristic-diagnostics.json')
+            if not expected or hashlib.sha256(raw).hexdigest()!=expected:raise ValueError('Diagnostics checksum mismatch')
+            payload,entries=validate(raw,data)
+        except (OSError,ValueError,KeyError,TypeError):abort(503,'Worker diagnostics are unavailable or invalid')
+        return jsonify(video_version_id=version,available=True,truth_status=payload['truth_status'],training_label_status='not_released',
+                       extraction_cache_key=payload['extraction_cache_key'],provenance=payload['provenance'],items=entries[after:after+limit],
+                       next_after=str(after+limit) if len(entries)>after+limit else None)
 
     @app.get('/api/entities/original-recordings/<identity>')
     def original_entity(identity):

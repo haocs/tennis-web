@@ -17,6 +17,7 @@ from test_app import setup, ID, CLIP
 @pytest.fixture(scope='module')
 def ui_server(tmp_path_factory):
     app, root, data = setup.__wrapped__(tmp_path_factory.mktemp('player-ui'))
+    data['published_at'] += 1  # New cut generation, not an in-place manifest mutation.
     data['source']['location'] = {'latitude':12,'longitude':34}
     data['video']['duration_seconds'] = 6
     data['source']['duration_seconds'] = 6
@@ -824,11 +825,10 @@ def test_watch_metadata_and_cut_reports(browser,ui_server,width):
     assert not page.evaluate('document.documentElement.scrollWidth>innerWidth')
     # Processing feedback stays on its own page, with explicit original bounds.
     page.get_by_label('More video actions',exact=True).click()
-    page.get_by_role('link',name='Review cuts',exact=True).click()
-    page.get_by_role('button',name='Report this cut',exact=True).click()
+    page.get_by_role('link',name='Review cut',exact=True).click()
     page.get_by_role('checkbox',name='Too much downtime',exact=True).check()
-    page.get_by_role('textbox',name='Comment',exact=True).fill('Waiting before the shot '+text)
-    page.get_by_role('button',name='Save report',exact=True).click()
+    page.locator('#cut-comment').fill('Waiting before the shot '+text)
+    page.locator('#cut-save').click()
     report=page.locator('.note-item').filter(has_text='Waiting before the shot '+text)
     expect(report).to_be_visible();expect(report).to_contain_text('Too much downtime')
     report.get_by_role('button',name='Jump to moment',exact=True).click()
@@ -2129,3 +2129,263 @@ def test_old_coach_failure_cannot_clear_reopened_clip_request(browser, ui_server
         state['jobs'][0].update(state='completed', version=2)
     assert len(asked) == 1 and asked[0]['export_id'] == 'new-clip-render'
     page.close()
+
+
+def test_cut_review_timeline_versions_gaps_and_portal_handoff(browser, tmp_path):
+    from app import create_app
+    from entity_model import output_version
+    app, root, data = setup.__wrapped__(tmp_path / 'cut-review-ui')
+    fixtures = Path(__file__).parent / 'fixtures'
+    shutil.copyfile(fixtures / 'practice.mp4', root / 'media' / ID / 'Practice.mp4')
+    shutil.copyfile(fixtures / 'clip.mp4', root / 'media' / ID / 'Clips/clip-001.mp4')
+
+    # Historical v1 has 1 clip [5, 15) on a 20s recording (gaps [0, 5) and [15, 20))
+    v1_pub = data['published_at']
+    v1_id = output_version(ID, v1_pub)
+
+    # Publish v2 as current serving with 2 clips: [2, 4) and [8, 10) on a 12s source (gaps [0, 2), [4, 8), [10, 12))
+    v2_data = copy.deepcopy(data)
+    v2_data['published_at'] = v1_pub + 100
+    v2_data['source']['duration_seconds'] = 12
+    v2_data['video']['duration_seconds'] = 4
+    v2_data['kept_seconds'] = 4
+    v2_data['removed_seconds'] = 8
+    clip2_id = 'c' * 24
+    shutil.copyfile(fixtures / 'clip.mp4', root / 'media' / ID / 'Clips/clip-002.mp4')
+    v2_data['clips'] = [
+        dict(data['clips'][0], id=CLIP, index=1, file='Clips/clip-001.mp4', duration_seconds=2,
+             original_start_seconds=2, original_end_seconds=4, playback_start_seconds=0, playback_end_seconds=2),
+        dict(data['clips'][0], id=clip2_id, index=2, file='Clips/clip-002.mp4', duration_seconds=2,
+             original_start_seconds=8, original_end_seconds=10, playback_start_seconds=2, playback_end_seconds=4),
+    ]
+    (root / 'metadata/sessions' / f'{ID}.json').write_text(json.dumps(v2_data))
+    v2_id = output_version(ID, v2_data['published_at'])
+
+    app = create_app({
+        'TESTING': True,
+        'LIBRARY_ROOT': str(root),
+        'DATA_ROOT': app.config['DATA_ROOT'],
+        'PROCESSING_ROOM_URL': 'http://processor.example:8089/',
+    })
+    server = make_server('127.0.0.1', 0, app, threaded=True)
+    worker = threading.Thread(target=server.serve_forever, daemon=True)
+    worker.start()
+    base_url = f'http://127.0.0.1:{server.server_port}'
+    try:
+        page = browser.new_page(viewport={'width': 1280, 'height': 900})
+        errors = []
+        page.on('pageerror', lambda err: errors.append(str(err)))
+
+        # 1. Local /processing route preserves status, shows external portal handoff, and launches Review cut
+        page.goto(base_url + '/processing')
+        expect(page.get_by_role('heading', name='Processing Room', exact=True)).to_be_visible()
+        expect(page.locator('#processing-portal-link')).to_have_attribute('href', 'http://processor.example:8089/')
+        expect(page.locator('#processing-cut-reviews')).to_be_visible()
+        page.locator('#processing-cut-reviews').get_by_role('link', name='Review cut', exact=True).click()
+
+        # 2. Defaults to current serving version v2, renders kept clips and removed gaps on timeline
+        expect(page.get_by_role('heading', name='Review cut', exact=True).first).to_be_visible()
+        expect(page.locator('#cut-version')).to_have_value(v2_id)
+        expect(page.locator('#cut-timeline-bar [data-seg-kind="kept_clip"]')).to_have_count(2)
+        expect(page.locator('#cut-timeline-bar [data-seg-kind="removed_gap"]')).to_have_count(3)
+        expect(page.locator('#cut-portal-handoff')).to_have_attribute('href', 'http://processor.example:8089/')
+
+        # 3. Step playhead, capture suggested start from playhead, nudge end, and save clip cut review
+        page.wait_for_function("() => document.querySelector('#cut-video')?.readyState >= 1")
+        page.locator('#cut-step-forward').click()
+        page.locator('#cut-set-start').click()
+        expect(page.locator('#cut-suggested-start')).to_have_value('2.5')
+        page.locator('#cut-nudge-end-plus').click()
+        expect(page.locator('#cut-suggested-end')).to_have_value('4.5')
+        page.locator('#cut-form-reasons').get_by_role('checkbox', name='End too early', exact=True).check()
+        page.locator('#cut-comment').fill('Extend rally finish')
+        page.locator('#cut-save').click()
+
+        clip_review = page.locator('#cut-report-list .note-item').filter(has_text='Extend rally finish')
+        expect(clip_review).to_be_visible()
+        expect(clip_review).to_contain_text('Needs adjustment')
+        expect(clip_review).to_contain_text('Suggested 0:02.5–0:04.5')
+
+        # 4. Select middle removed gap [4, 8) on timeline, verify no gap video, file missed-play report, then resize it
+        page.locator('#cut-timeline-bar [data-seg-kind="removed_gap"]').nth(1).click()
+        expect(page.locator('#cut-gap-slate')).to_be_visible()
+        expect(page.locator('#cut-clip-stage')).to_be_hidden()
+        expect(page.locator('#cut-gap-summary')).to_contain_text('Original 0:04–0:08')
+        page.locator('#cut-gap-start').fill('4.5')
+        page.locator('#cut-gap-end').fill('7.5')
+        page.locator('#cut-comment').fill('Missed point in middle gap')
+        page.locator('#cut-save').click()
+
+        gap_review = page.locator('#cut-report-list .note-item').filter(has_text='Missed point in middle gap')
+        expect(gap_review).to_be_visible()
+        expect(gap_review).to_contain_text('Removed gap · Original 0:04.5–0:07.5')
+        gap_review.get_by_role('button', name='Edit', exact=True).click()
+        expect(page.locator('#note-scope')).to_be_disabled()
+        expect(page.locator('#note-start')).to_be_enabled()
+        expect(page.locator('#note-end')).to_be_enabled()
+        page.locator('#note-start').fill('5')
+        page.locator('#note-end').fill('7')
+        page.locator('#note-save').click()
+        expect(gap_review).to_contain_text('Removed gap · Original 0:05–0:07')
+
+        # 5. Switch to historical version v1: read-only by default until explicitly scoped
+        page.locator('#cut-version').select_option(v1_id)
+        expect(page.locator('#cut-version-banner')).to_be_visible()
+        expect(page.locator('#cut-version-banner')).to_contain_text('read-only')
+        expect(page.locator('#cut-save')).to_be_disabled()
+        expect(page.locator('#cut-report-list .note-item')).to_have_count(0)
+        page.locator('#cut-scope-historical').click()
+        expect(page.locator('#cut-save')).to_be_enabled()
+        page.locator('#cut-verdict').select_option('good_cut')
+        page.locator('#cut-comment').fill('Scoped v1 review')
+        page.locator('#cut-save').click()
+        expect(page.locator('#cut-report-list .note-item').filter(has_text='Scoped v1 review')).to_be_visible()
+
+        # 6. Verify /processing/cuts/<id> alias and responsive layout across mobile & desktop
+        page.goto(base_url + f'/processing/cuts/{ID}')
+        expect(page.get_by_role('heading', name='Review cut', exact=True).first).to_be_visible()
+        for width, height in ((320, 568), (390, 844), (1280, 900)):
+            page.set_viewport_size({'width': width, 'height': height})
+            assert not page.evaluate('document.documentElement.scrollWidth > innerWidth'), f'Horizontal overflow at {width}x{height}'
+        assert not errors
+        page.close()
+    finally:
+        server.shutdown()
+        worker.join()
+
+
+
+@pytest.fixture
+def cut_review_scope_server(tmp_path):
+    app,root,data=setup.__wrapped__(tmp_path)
+    data['source']['duration_seconds']=30;data['published_at']+=1;data['video']['duration_seconds']=6;data['kept_seconds']=6;data['removed_seconds']=24
+    data['clips']=[dict(id=letter*24,index=i+1,file=f'Clips/clip-{i+1:03}.mp4',duration_seconds=2,original_start_seconds=start,original_end_seconds=start+2,playback_start_seconds=i*2,playback_end_seconds=(i+1)*2) for i,(letter,start) in enumerate(zip('bcd',[5,10,20]))]
+    (root/'metadata/sessions'/f'{ID}.json').write_text(json.dumps(data))
+    fixtures=Path(__file__).parent/'fixtures';shutil.copyfile(fixtures/'practice.mp4',root/'media'/ID/'Practice.mp4')
+    for c in data['clips']:shutil.copyfile(fixtures/'clip.mp4',root/'media'/ID/c['file'])
+    server=make_server('127.0.0.1',0,app,threaded=True);thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+    yield 'http://127.0.0.1:'+str(server.server_port),data
+    server.shutdown();thread.join()
+
+
+def open_cut_scope_review(browser,server,width=390):
+    base,data=server;page=browser.new_page(viewport={'width':width,'height':844});csp=[]
+    page.on('console',lambda m:csp.append(m.text) if 'Content Security Policy' in m.text or 'Refused to' in m.text else None)
+    page.goto(base+f'/review/{ID}/cuts?clip={CLIP}');expect(page.get_by_role('heading',name='Review cut',exact=True,level=1)).to_be_visible();expect(page.locator('#cut-timeline-bar button').first).to_be_visible()
+    return page,csp
+
+def test_timeline_kept_gap_contract_and_strict_csp(browser,cut_review_scope_server):
+    page,csp=open_cut_scope_review(browser,cut_review_scope_server)
+    expect(page.locator('[data-seg-kind="kept_clip"]')).to_have_count(3)
+    expect(page.locator('[data-seg-kind="removed_gap"]')).to_have_count(4)
+    assert 'undefined' not in page.locator('#cut-timeline-bar').inner_text()
+    assert not csp
+    for width in (320,390,1280):
+        page.set_viewport_size({'width':width,'height':844})
+        assert not page.evaluate('document.documentElement.scrollWidth>innerWidth'),f'Horizontal overflow at {width}'
+    page.close()
+
+def test_unsaved_review_cannot_follow_a_different_clip(browser,cut_review_scope_server):
+    base,data=cut_review_scope_server;page,csp=open_cut_scope_review(browser,cut_review_scope_server)
+    page.locator('#cut-verdict').select_option('needs_adjustment');page.locator('#cut-comment').fill('First clip draft');page.locator('#cut-suggested-end').fill('6.2')
+    page.locator('#cut-clip').select_option('c'*24)
+    selected=page.locator('#cut-clip').input_value()
+    if selected!=CLIP:
+        assert page.locator('#cut-comment').input_value()!='First clip draft','Unsaved fields were retargeted to another clip'
+        page.locator('#cut-clip').select_option(CLIP)
+    expect(page.locator('#cut-comment')).to_have_value('First clip draft')
+    expect(page.locator('#cut-suggested-end')).to_have_value('6.2')
+    page.locator('#cut-save').click();expect(page.locator('#cut-report-list')).to_contain_text('First clip draft')
+    records=page.request.get(base+f'/api/processing-annotations/sources/{ID}').json()['annotations']
+    saved=next(a for a in records if a['body'].get('text')=='First clip draft')
+    assert saved['target']['clip_id']==CLIP and saved['body']['suggested_end_ms']==6200
+    page.close()
+
+
+def test_cut_review_worker_hints_prefill_without_auto_save(browser,tmp_path):
+    from test_cut_diagnostics import diagnostics_for
+    import hashlib
+    app,root,data=setup.__wrapped__(tmp_path/'hints-ui')
+    raw=json.dumps(diagnostics_for(data)).encode()
+    (root/'metadata/sessions'/ID/'heuristic-diagnostics.json').write_bytes(raw)
+    data['artifacts']=['heuristic-diagnostics.json']
+    data['metadata_checksums']={'heuristic-diagnostics.json':hashlib.sha256(raw).hexdigest()}
+    (root/'metadata/sessions'/f'{ID}.json').write_text(json.dumps(data))
+    shutil.copyfile(Path(__file__).parent/'fixtures/clip.mp4',root/'media'/ID/'Clips/clip-001.mp4')
+    server=make_server('127.0.0.1',0,app,threaded=True);thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+    base=f'http://127.0.0.1:{server.server_port}'
+    try:
+        page=browser.new_page(viewport={'width':390,'height':844})
+        page.goto(base+f'/review/{ID}/cuts');page.locator('#cut-hints-panel summary').click()
+        expect(page.locator('#cut-hints')).to_contain_text('Person track disappeared')
+        page.get_by_role('button',name='Prefill review',exact=True).click()
+        expect(page.locator('#cut-suggested-end')).to_have_value('12')
+        expect(page.locator('#cut-verdict')).to_have_value('')
+        assert page.request.get(base+f'/api/processing-annotations/sources/{ID}').json()['annotations']==[]
+        page.locator('#cut-save').click()
+        expect(page.locator('#cut-report-list')).to_contain_text('End too late')
+        saved=page.request.get(base+f'/api/processing-annotations/sources/{ID}').json()['annotations'][0]
+        assert saved['body']['heuristic_ref']=='tail' and saved['origin']['type']=='human' and saved['training_label_status']=='not_released'
+        page.close()
+    finally:server.shutdown();thread.join()
+
+
+@pytest.mark.parametrize('width',[390,1280])
+def test_two_version_comparison_mobile_deck_and_preference(browser,tmp_path,width):
+    from test_cut_comparisons import Server
+    from entity_model import output_version
+    app,root,data=setup.__wrapped__(tmp_path/'comparison-ui')
+    data['published_at']+=1;data['video']['duration_seconds']=2;data['clips'][0].update(duration_seconds=2,original_start_seconds=5,original_end_seconds=7,playback_start_seconds=0,playback_end_seconds=2)
+    data['kept_seconds']=2;data['removed_seconds']=18
+    (root/'metadata/sessions'/f'{ID}.json').write_text(json.dumps(data))
+    candidate=copy.deepcopy(data);candidate['published_at']+=1;candidate['media_directory']='d'*32;candidate['artifact_directory']='d'*32;candidate['processing']={'task_id':'c'*32,'attempt_id':'d'*32};candidate['clips'][0].update(original_start_seconds=6,original_end_seconds=8)
+    candidate_id=output_version(ID,candidate['published_at']);serving_id=output_version(ID,data['published_at'])
+    server_api=Server(candidate);app.extensions['processing_client']=server_api
+    fixtures=Path(__file__).parent/'fixtures';shutil.copyfile(fixtures/'clip.mp4',root/'media'/ID/'Clips/clip-001.mp4')
+    destination=root/'media'/('d'*32)/'Clips';destination.mkdir(parents=True);shutil.copyfile(fixtures/'clip.mp4',destination/'clip-001.mp4')
+    server=make_server('127.0.0.1',0,app,threaded=True);thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start();base=f'http://127.0.0.1:{server.server_port}'
+    try:
+        page=browser.new_page(viewport={'width':width,'height':844});errors=[];page.on('pageerror',lambda e:errors.append(str(e)))
+        page.goto(base+f'/review/{ID}/compare');expect(page.get_by_role('heading',name='Compare versions',exact=True)).to_be_visible()
+        page.locator('#compare-refresh').click();expect(page.locator(f'#compare-b option[value="{candidate_id}"]')).to_have_count(1)
+        page.locator('#compare-a').select_option(serving_id);page.locator('#compare-b').select_option(candidate_id)
+        expect(page.locator('#compare-workspace video')).to_have_count(1 if width<650 else 2)
+        page.get_by_role('button',name='0:06–0:07 · Both kept',exact=True).click()
+        expect(page.locator('#compare-status')).to_have_text('',timeout=15000)
+        expect(page.locator('#compare-workspace video:visible')).to_have_count(1 if width<650 else 2)
+        if width<650:
+            page.locator('#compare-deck-b').click();expect(page.locator('#compare-label-mobile')).to_contain_text('B')
+            expect(page.locator('#compare-status')).to_have_text('',timeout=15000)
+            page.get_by_role('button',name='0:05–0:06 · Only A kept',exact=True).click()
+            expect(page.locator('#compare-slate-mobile')).to_have_text('Removed in B')
+        page.locator('#compare-note').fill('Prefer the longer ending');page.locator('#compare-preferred').select_option('b');page.locator('#compare-save').click()
+        expect(page.locator('#compare-save-status')).to_contain_text('Comparison saved')
+        record=page.request.get(base+f'/api/processing/videos/{ID}/comparisons').json()['items'][0];assert record['preferred_version_id']==candidate_id
+        assert page.request.get(base+f'/api/processing/videos/{ID}/versions').json()['current_version_id']==serving_id
+        for viewport_width in (320,width):
+            page.set_viewport_size({'width':viewport_width,'height':844});assert not page.evaluate('document.documentElement.scrollWidth>innerWidth')
+        assert not errors
+        page.close()
+    finally:server.shutdown();thread.join()
+
+
+def test_cut_rerun_requires_selected_revision_and_confirmed_command(browser,tmp_path):
+    from test_cut_reprocess import Server,review_setup
+    app,root,data=setup.__wrapped__(tmp_path/'rerun-ui')
+    app,client,data,record,body=review_setup((app,root,data));server_api=Server(data);app.extensions['processing_client']=server_api;app.config['PROCESSING_API_URL']='http://processor.example'
+    shutil.copyfile(Path(__file__).parent/'fixtures/clip.mp4',root/'media'/ID/'Clips/clip-001.mp4')
+    server=make_server('127.0.0.1',0,app,threaded=True);thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start();base=f'http://127.0.0.1:{server.server_port}'
+    try:
+        page=browser.new_page(viewport={'width':390,'height':844});page.goto(base+f'/review/{ID}/cuts');page.locator('#cut-rerun-panel summary').click()
+        page.locator('#cut-rerun-evidence input').check();page.locator('#cut-rerun-preview').click()
+        expect(page.locator('#cut-rerun-commands')).to_contain_text('Confirm commands')
+        expect(page.get_by_label('Confirm command 1',exact=True)).not_to_be_checked()
+        page.locator('#cut-rerun-submit').click();expect(page.locator('#cut-rerun-status')).to_have_text('Confirm at least one exact command.')
+        assert not server_api.calls
+        page.get_by_label('Confirm command 1',exact=True).check();page.locator('#cut-rerun-submit').click()
+        expect(page.locator('#cut-rerun-status')).to_contain_text('Candidate task created')
+        snapshot=server_api.calls[1][1];assert snapshot['confirmed_commands']['override_clip_bounds_ms'][0]['original_end_ms']==16000
+        assert server_api.calls[-1][1]['publication_policy']=='never'
+        assert not page.evaluate('document.documentElement.scrollWidth>innerWidth')
+        page.close()
+    finally:server.shutdown();thread.join()
