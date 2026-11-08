@@ -5,6 +5,7 @@ import time
 import uuid
 from flask import abort,jsonify,request,send_file
 from entity_model import output_version,canonical_manifest
+from processing_bridge import version_catalog
 
 OPAQUE=re.compile(r'[a-f0-9]{32}')
 
@@ -18,12 +19,9 @@ def register(app,session):
         result=catalog.version_manifest(source,version)
         if not result:abort(404,'Processed version not found')
         return result
-    def server_versions(source):
-        result=client().call('/videos/'+source+'/versions')
-        if not isinstance(result,dict) or not isinstance(result.get('items'),list):abort(503,'Invalid processing catalog')
-        return result['items']
+    def server_versions(source,version=None):return version_catalog(client(),source,version)
     def verified_version(source,version):
-        value=next((v for v in server_versions(source) if v.get('id')==version),None)
+        value=next((v for v in server_versions(source,version) if v.get('id')==version),None)
         if not value or canonical_manifest(value.get('manifest',{}))!=canonical_manifest(manifest(source,version)):abort(409,'Version has no verified processing history')
         return value
     def pin(source,version,holder,kind,ttl=None):

@@ -19,7 +19,7 @@ class Server:
     def __init__(self,data):self.data,self.calls=data,[]
     def call(self,path,body=None,**kwargs):
         self.calls.append((path,body,kwargs))
-        if path.endswith('/versions'):return {'items':[dict(id=output_version(ID,self.data['published_at']),attempt_id='d'*32,task_id='c'*32,source_id='e'*32,manifest=self.data)]}
+        if path.split('?')[0].endswith('/versions'):return {'items':[dict(id=output_version(ID,self.data['published_at']),attempt_id='d'*32,task_id='c'*32,source_id='e'*32,manifest=self.data)]}
         if path=='/feedback-snapshots':return {'snapshot_id':'snapshot-one'}
         return {'task_id':'candidate-task','status':'queued'}
 
@@ -57,3 +57,18 @@ def test_offline_server_returns_error_without_background_submission(setup):
     app.extensions['processing_client']=Offline()
     response=c.post(f'/api/processing/videos/{ID}/reprocess',json=body,headers={'X-Tennis-Request':'1'})
     assert response.status_code==503
+
+
+def test_catalog_metadata_pages_follow_cursor_and_scope_exact_version():
+    from processing_bridge import version_catalog,ProcessingUnavailable
+    class Paged:
+        def __init__(self):self.paths=[]
+        def call(self,path):
+            self.paths.append(path)
+            return {'items':[{'id':'second'}],'next_cursor':None} if 'cursor=1' in path else {'items':[{'id':'first'}],'next_cursor':1}
+    server=Paged();assert [r['id'] for r in version_catalog(server,ID,'v_'+'1'*32)]==['first','second']
+    assert all('video_version_id=v_' in path for path in server.paths)
+    class Loop:
+        def call(self,path):return {'items':[],'next_cursor':1}
+    import pytest
+    with pytest.raises(ProcessingUnavailable):version_catalog(Loop(),ID)

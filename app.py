@@ -282,7 +282,8 @@ def create_app(config=None):
             if not app.config.get('PROCESSING_API_URL'):
                 return jsonify(video_version_id=version,available=False,reason='Historical diagnostics are unavailable',items=[],next_after=None)
             from entity_model import canonical_manifest
-            entries=app.extensions['processing_client'].call('/videos/'+identity+'/versions')['items']
+            from processing_bridge import version_catalog
+            entries=version_catalog(app.extensions['processing_client'],identity,version)
             verified=next((v for v in entries if v.get('id')==version),None)
             if not verified or canonical_manifest(verified['manifest'])!=canonical_manifest(manifest):
                 return jsonify(video_version_id=version,available=False,reason='Historical diagnostics are unavailable',items=[],next_after=None)

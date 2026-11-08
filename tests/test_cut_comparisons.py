@@ -16,7 +16,7 @@ class Server:
     def __init__(self,data):self.data,self.calls,self.evicted=data,[],False
     def call(self,path,body=None,**kwargs):
         self.calls.append((path,body,kwargs))
-        if path.endswith('/versions'):return {'items':[dict(id=output_version(ID,self.data['published_at']),source_sha256=ID,attempt_id='d'*32,task_id='c'*32,source_id='e'*32,manifest=self.data,media_state='staged_candidate')]}
+        if path.split('?')[0].endswith('/versions'):return {'items':[dict(id=output_version(ID,self.data['published_at']),source_sha256=ID,attempt_id='d'*32,task_id='c'*32,source_id='e'*32,manifest=self.data,media_state='staged_candidate')]}
         if self.evicted:raise ProcessingRejected(409,{'error':'media_already_evicted'})
         return {'media_state':'staged_candidate','acknowledged':True}
 

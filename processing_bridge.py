@@ -31,3 +31,20 @@ class ProcessingClient:
             except (ValueError,OSError):body={'error':'Processing server rejected the request'}
             raise ProcessingRejected(error.code,body) from error
         except (OSError,ValueError) as error:raise ProcessingUnavailable('Processing server is unavailable; retry this request when it returns') from error
+
+
+def version_catalog(client,source,version=None):
+    """Follow bounded metadata pages; scope lookups to one version where possible."""
+    from urllib.parse import urlencode
+    items=[];cursor=None;seen=set()
+    while True:
+        query={}
+        if version:query['video_version_id']=version
+        if cursor is not None:query['cursor']=cursor
+        path='/videos/'+source+'/versions'+('?' + urlencode(query) if query else '')
+        page=client.call(path)
+        if not isinstance(page,dict) or not isinstance(page.get('items'),list):raise ProcessingUnavailable('Invalid processing catalog')
+        items.extend(page['items']);cursor=page.get('next_cursor')
+        if cursor is None:return items
+        if type(cursor) is not int or cursor<0 or cursor in seen:raise ProcessingUnavailable('Invalid processing catalog cursor')
+        seen.add(cursor)

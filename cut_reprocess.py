@@ -3,7 +3,7 @@ import re
 import json
 from flask import abort,jsonify,request
 from entity_model import output_version,canonical_manifest
-from processing_bridge import ProcessingClient,ProcessingUnavailable,ProcessingRejected
+from processing_bridge import ProcessingClient,ProcessingUnavailable,ProcessingRejected,version_catalog
 
 
 def register(app,session):
@@ -56,7 +56,7 @@ def register(app,session):
         processing=manifest.get('processing',{})
         if not processing.get('attempt_id'):abort(409,'This output has no verified processing attempt. Import its history in the processing portal first.')
         client=app.extensions['processing_client']
-        versions=client.call('/videos/'+source+'/versions')['items']
+        versions=version_catalog(client,source,body['video_version_id'])
         verified=next((v for v in versions if v.get('id')==body['video_version_id'] and v.get('attempt_id')==processing['attempt_id']),None)
         if not verified or canonical_manifest(verified['manifest'])!=canonical_manifest(manifest):abort(409,'Processing history does not match this version')
         snapshot=dict(schema_version=1,source_sha256=source,base_attempt_id=processing['attempt_id'],base_video_version_id=body['video_version_id'],
