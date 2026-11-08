@@ -27,6 +27,7 @@ const CutConstraints=(()=>{
     const range={start_ms:start,end_ms:end};
     if(type==='override_clip_bounds_ms'){
      if(!clips.has(row.clip_id))errors.push('Override refers to another output');
+     else{const c=clips.get(row.clip_id),base={start_ms:Math.round(c.original_start_seconds*1000),end_ms:Math.round(c.original_end_seconds*1000)};if(!overlap(range,base)||[...clips.values()].some(other=>other.id!==row.clip_id&&overlap(range,{start_ms:Math.round(other.original_start_seconds*1000),end_ms:Math.round(other.original_end_seconds*1000)})))errors.push('Boundary overrides must stay with their base clip; use keep/exclude commands across clips');}
      if(overrides.some(x=>x.clip_id===row.clip_id||overlap(x,range)))errors.push('Conflicting clip overrides');
      overrides.push({...range,clip_id:row.clip_id});
     }

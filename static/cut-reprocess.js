@@ -5,8 +5,8 @@ const CutReprocess=(()=>{
  function update(context){
   const host=document.querySelector('#cut-rerun-panel');if(!host)return;
   const key=context.sourceId+':'+context.version;
-  if(!state||state.key!==key){
-   state={...context,key,preview:null,rows:[],requestId:null,busy:false};
+  if(!state||state.key!==key||state.host!==host){
+   state={...context,key,host,preview:null,rows:[],requestId:null,busy:false};
    host.innerHTML='<summary>Prepare reprocess task</summary><div id="cut-rerun-evidence"></div><button type="button" class="button small" id="cut-rerun-preview">Preview commands</button><div id="cut-rerun-commands"></div><p id="cut-rerun-status" role="status"></p>';
    host.querySelector('#cut-rerun-preview').onclick=prepare;
   }
@@ -38,11 +38,12 @@ const CutReprocess=(()=>{
    const override=row.type==='override_clip_bounds_ms',a=override?row.original_start_ms:row.start_ms,b=override?row.original_end_ms:row.end_ms;
    return `<div class="cut-command-row" data-command="${i}"><label class="check-label"><input type="checkbox" aria-label="Confirm command ${i+1}">Confirm</label><select aria-label="Command ${i+1} action">${override?'<option value="override_clip_bounds_ms">Replace clip bounds</option>':'<option value="keep_intervals_ms">Keep interval</option><option value="exclude_intervals_ms">Exclude interval</option>'}</select><label>Start (s)<input type="number" step="0.001" min="0" data-start value="${a/1000}"></label><label>End (s)<input type="number" step="0.001" min="0" data-end value="${b/1000}"></label></div>`;
   }).join('')+(advisory.length?'<p class="cut-hint">Advisory only: '+advisory.map(a=>esc(a.text||a.verdict||(a.reasons||[]).join(', '))).join(' · ')+'</p>':'')+
+  `<label>Use review<select id="cut-command-evidence">${owner.preview.evidence.map((e,i)=>`<option value="${i}">${esc(e.body.text?.slice(0,60)||((e.body.reasons||[]).join(', ')||'Review'))} · ${time(e.target.start_seconds)}–${time(e.target.end_seconds)}</option>`).join('')}</select></label>`+
   '<button type="button" class="button small" id="cut-command-add">Add interval</button> <button type="button" class="button small" id="cut-rerun-back">Change selection</button> <button type="button" class="button primary" id="cut-rerun-submit">Create candidate task</button>';
   host.querySelector('#cut-rerun-submit').disabled=!owner.preview.server_configured;
-  host.querySelector('#cut-rerun-back').onclick=()=>{if(owner.busy)return;owner.preview=null;owner.requestId=null;host.innerHTML='';update(owner.context);};
+  host.querySelector('#cut-rerun-back').onclick=()=>{if(owner.busy)return;owner.preview=null;owner.submitted=false;owner.requestId=null;host.innerHTML='';document.querySelector('#cut-rerun-status').textContent='';update(owner.context);};
   host.querySelector('#cut-command-add').onclick=()=>{
-   if(owner.busy)return;capture();const e=owner.preview.evidence[0],t=e.target;
+   if(owner.busy)return;capture();owner.requestId=null;const e=owner.preview.evidence[Number(host.querySelector('#cut-command-evidence').value)],t=e.target;
    owner.rows.push({type:'keep_intervals_ms',confirmed:false,start_ms:Math.round(t.start_seconds*1000),end_ms:Math.round(t.end_seconds*1000),source_annotation_id:e.annotation_id,source_revision:e.version});renderPreview(advisory);
   };
   host.querySelectorAll('[data-command]').forEach((node,i)=>{node.querySelector('input[type=checkbox]').checked=owner.rows[i].confirmed;node.querySelector('select').value=owner.rows[i].type;});
@@ -67,7 +68,7 @@ const CutReprocess=(()=>{
    if(state!==owner)return;
    owner.submitted=true;status.textContent='Candidate task created · '+result.task.task_id;
   }catch(e){if(state===owner)status.textContent=e.message+' Retry uses the same request ID.';}
-  finally{if(state===owner){owner.busy=false;if(!owner.submitted)document.querySelectorAll('#cut-rerun-panel button,#cut-rerun-panel input,#cut-rerun-panel select').forEach(e=>e.disabled=false);}}
+  finally{if(state===owner){owner.busy=false;if(owner.submitted){document.querySelector('#cut-rerun-back').disabled=false;document.querySelector('#cut-rerun-back').textContent='Prepare another task';}if(!owner.submitted)document.querySelectorAll('#cut-rerun-panel button,#cut-rerun-panel input,#cut-rerun-panel select').forEach(e=>e.disabled=false);}}
  }
  return {update};
 })();

@@ -37,3 +37,7 @@ Media lifecycle remains server-owned. Automatic cleanup is disabled by default; 
 ## Deployment compatibility
 
 Upgrade the server and standalone worker before enabling the website bridge. The website itself still runs with an empty API setting; serving playback and ordinary cut review remain available. New constraint jobs require `cut-constraints-v1`; an old `process-v2`-only worker cannot claim them. The worker refreshes capabilities through the authenticated profile endpoint without creating a new installed identity. No migration here launches a container, installs a worker, changes NAS permissions or activates a candidate automatically.
+
+Review actions in the All versions list require opening that exact reviewed version and explicitly scoping historical edits. Cross-version records do not mark the selected timeline or change its form. Historical preview lease renewal preserves playback position; version changes release only that view's own reference.
+
+Comparison tabs acquire references for both selected versions immediately, even at a removed gap or while the other mobile deck is inactive. Changing selection releases only the retired reference; rapid re-selection uses a fresh holder ID. Playback pauses and prepares the next original-time range at elementary boundaries. Metadata-only iOS decoders are primed silently by the Play gesture before synchronized playback.

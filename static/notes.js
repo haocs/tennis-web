@@ -54,7 +54,7 @@ const NoteUI=(()=>{
     if(owner!==source||rev!==generation||seq!==refreshSequence)return;
     if($('#notes-status'))$('#notes-status').textContent='';
     loadError='';items=all;itemsLoaded=true;itemsLoadedSourceId=owner.id;itemsLoadedPub=cutState.manifest?.published_at??owner.published_at;
-    if(cutState.previewLeaseRenewed&&Date.now()-cutState.previewLeaseRenewed>300000&&cutState.mode==='clip'&&cutState.versionId!==cutState.currentVersionId){const clip=cutState.manifest.clips.find(c=>c.id===cutState.clipId);if(clip)loadHistoricalCutPreview(cutState.historicalMediaKey,clip);}
+    if(cutState.versionId!==cutState.currentVersionId)ensureHistoricalCutLease(cutState);
     render();renderCutTimeline();loadCutHints();CutReprocess.update({sourceId:source.id,version:cutState.versionId,manifest:cutState.manifest,reviews:items});
     return;
    }
@@ -113,6 +113,7 @@ const NoteUI=(()=>{
   const scopeKey=model.mode+':'+model.current;if(lastCurrent!==scopeKey){lastCurrent=scopeKey;render();}markers();cueTick();
  }
  function jump(a,selectedFragment=null,preservePlayback=false){
+  if(cutState.active&&a.kind==='cut_feedback'&&!sameCutVersion(a)){toast('Open the reviewed version first.');return;}
   if(cutState.active&&($('#cut-video')||$('#cut-gap-slate'))){
    if(a.kind==='cut_feedback'&&a.target.scope==='interval'){
     const startMs=Math.round(a.target.start_seconds*1000),endMs=Math.round(a.target.end_seconds*1000);
@@ -180,8 +181,11 @@ const NoteUI=(()=>{
   return 'Original '+preciseTime(t.start_seconds)+(t.scope==='point'?'':'–'+preciseTime(t.end_seconds));
  }
  function relationLabel(a){if(a.archive_reason==='duplicate_highlight'&&a.status==='archived')return 'Duplicate highlight · history retained';return ({needs_review:'Cut changed · review target',unavailable:'Outside current cuts',partly_retained:'Partly outside current cuts',historical_run:'Earlier processed version',removed_gap:'Removed gap'})[a.relation]||'';}
+ function cutItemVersion(a){return a?.subject?.video_version_id||a?.context?.video_version_id||cutState.versions.find(v=>v.manifest.published_at===a?.context?.publication)?.id;}
+ function sameCutVersion(a){return a?.context?.publication===cutState.manifest?.published_at&&(!cutItemVersion(a)||cutItemVersion(a)===cutState.versionId);}
+ function cutRecordManifest(a){return cutState.versions.find(v=>v.id===cutItemVersion(a))?.manifest||null;}
  function canJumpCutItem(a){
-  if(a.status!=='active')return false;
+  if(a.status!=='active'||(cutState.active&&!sameCutVersion(a)))return false;
   if(a.kind==='cut_feedback'&&a.target.scope==='interval'&&cutState.active){
    const sMs=Math.round(a.target.start_seconds*1000),eMs=Math.round(a.target.end_seconds*1000);
    return Boolean((cutState.timeline?.gaps||[]).some(g=>g.startMs<=sMs&&eMs<=g.endMs));
@@ -192,8 +196,9 @@ const NoteUI=(()=>{
   return MomentPlayback.canPlay(a,items)&&a.visible_intervals.length>0;
  }
  function itemActions(a,cuts){
+  if(cuts&&!sameCutVersion(a)){const version=cutItemVersion(a);return (version?'<button class="button small" type="button" data-note-action="select-version">Open reviewed version</button>':'')+'<button class="button small" type="button" data-note-action="history">History</button>';}
   const jumpButton=(cuts||a.record_class==='moment')&&(cuts?canJumpCutItem(a):(a.status==='active'&&MomentPlayback.canPlay(a,items)&&a.visible_intervals.length))?'<button class="button small" type="button" data-note-action="jump" aria-label="Jump to moment">Jump</button>':'';
-  const editButtons=a.read_only?'':'<button type="button" data-note-action="edit">Edit</button><button type="button" data-note-action="archive">'+(a.status==='active'?'Archive':'Restore')+'</button>';
+  const editButtons=(a.read_only||(cuts&&cutState.versionId!==cutState.currentVersionId&&!cutState.allowHistorical))?'':'<button type="button" data-note-action="edit">Edit</button><button type="button" data-note-action="archive">'+(a.status==='active'?'Archive':'Restore')+'</button>';
   const history='<button type="button" data-note-action="history">History</button>';
   if(cuts)return jumpButton+(editButtons+history).replaceAll('<button type=','<button class="button small" type=');
   const coach=a.read_only?'<button class="button small" type="button" data-note-action="coach" aria-label="Review coaching">Review</button>':'';
@@ -217,12 +222,14 @@ const NoteUI=(()=>{
   if(!cutState.active)return {source_id:source.id,publication:source.published_at};
   const recVid=a?.subject?.video_version_id||a?.context?.video_version_id||cutState.versionId;
   const recPub=a?.context?.publication??cutState.manifest?.published_at??source.published_at;
+  if(a&&!sameCutVersion(a))throw new Error('Open the reviewed version before changing this review.');
   const isHist=recVid!==cutState.currentVersionId;
   return {
    source_id:source.id,
    publication:recPub,
    reviewed_video_version_id:recVid,
-   ...(isHist&&cutState.allowHistorical?{allow_historical:true}:{})
+   require_current_serving:!isHist,
+   ...(isHist&&recVid===cutState.versionId&&cutState.allowHistorical?{allow_historical:true}:{})
   };
  }
  function render(){
@@ -241,6 +248,7 @@ const NoteUI=(()=>{
   $$('[data-note-action]',box).forEach(b=>b.onclick=async()=>{
    const card=b.closest('[data-note]'),a=items.find(a=>a.id===card.dataset.note);if(b.closest('.note-actions-menu'))b.closest('.note-actions-menu').open=false;b.disabled=true;
    try{
+    if(b.dataset.noteAction==='select-version')await selectCutVersion(cutItemVersion(a));
     if(b.dataset.noteAction==='jump')jump(a);
     if(b.dataset.noteAction==='edit')openEditor(a.kind,a);
     if(b.dataset.noteAction==='archive'){if(box.id==='entity-notes-list')editNoteDirty=false;await update(a,{status:a.status==='active'?'archived':'active'},cuts?cutContextForRecord(a):{publication:source.published_at});await refresh(true);toast(a.status==='active'?'Archived.':'Restored.');}
@@ -394,7 +402,8 @@ const NoteUI=(()=>{
  }
  function openEditor(kind='note',a=null){
   editing=a;editingKind=kind;
-  const activeManifest=cutState.active&&cutState.manifest?cutState.manifest:source;
+  if(kind==='cut_feedback'&&a&&cutState.active&&!sameCutVersion(a))throw new Error('Open the reviewed version first.');
+  const activeManifest=kind==='cut_feedback'&&a&&cutState.active?cutRecordManifest(a):(cutState.active&&cutState.manifest?cutState.manifest:source);
   const activeClips=activeManifest?.clips||source?.clips||[];
   editorContext=kind==='cut_feedback'&&cutState.active?{...cutContextForRecord(a),mode:'clip',clip_id:a?.target?.clip_id||cutState.clipId||model.current}:{source_id:source.id,publication:source.published_at,mode:kind==='cut_feedback'?'clip':model.mode,clip_id:model.mode==='clip'||kind==='cut_feedback'?model.current:null};
   if(kind==='note'&&a?.record_class!=='moment'&&entityNotesTarget)editorContext={...entityNotesTarget,mode:entityNotesTarget.clip_id?'clip':'full'};saveRequest=requestId();saveFingerprint=null;$('#note-editor-title').textContent=(a?'Edit ':'Add ')+(kind==='cut_feedback'?'cut review':kind==='note'&&a?.record_class!=='moment'?'note':kind==='highlight'?'highlight':'moment');
@@ -449,7 +458,8 @@ const NoteUI=(()=>{
       if(sEndRaw!==''){const n=Number(sEndRaw);if(!Number.isFinite(n)||n<=0)throw new Error('Suggested end must be a positive number of seconds.');body.suggested_end_ms=Math.round(n*1000);}
      }
     }
-    const activeManifest=cutState.active&&cutState.manifest?cutState.manifest:source;
+    const activeManifest=editingKind==='cut_feedback'&&cutState.active?cutState.versions.find(v=>v.id===context.reviewed_video_version_id)?.manifest:source;
+    if(!activeManifest)throw new Error('Reviewed version is unavailable.');
     const activeClips=activeManifest?.clips||source?.clips||[];
     const isGapCutEdit=editingKind==='cut_feedback'&&editing&&editing.target?.scope==='interval';
     let target;if(!editing||$('#note-retarget').checked||isGapCutEdit){const scope=$('#note-scope').value;target={scope};if(scope==='clip'){const selected=activeClips.find(c=>c.id===(editingKind==='note'?context.clip_id:$('#note-target-clip').value));if(!selected)throw new Error('Choose a current clip for this target');target=clipTarget(selected);}else if(scope!=='video'){target.start_seconds=parseSec($('#note-start'));if(scope==='interval')target.end_seconds=parseSec($('#note-end'));}}
@@ -488,7 +498,7 @@ const NoteUI=(()=>{
   if(open)render();
  }
  function mount(s){
-  cutState.active=false;
+  releaseCutPreviewLease(cutState);cutState.active=false;
   source=s;items=[];itemsLoaded=false;itemsLoadedSourceId=null;itemsLoadedPub=null;loadError='';markerKey='';lastCurrent=null;generation++;clearInterval(timer);clearTimeout(cueTimer);cueClock.reset();mediaKey='';cueKey='';
   const markers=document.createElement('div');markers.id='note-markers';markers.className='note-markers';markers.setAttribute('aria-label','Moments on playback timeline');$('#video-seek').after(markers);
   const player=$('#player');player.addEventListener('loadedmetadata',()=>current());player.addEventListener('timeupdate',()=>current());
@@ -523,15 +533,15 @@ const NoteUI=(()=>{
    updateCutFormLock();
    return;
   }
-  banner.hidden=false;
+  banner.hidden=false;ensureHistoricalCutLease(cutState);
   const staleNotice=cutState.staleServingVersionId&&cutState.staleServingVersionId===cutState.currentVersionId?'Recording was reprocessed to a newer serving version. ':'';
   if(cutState.allowHistorical){
-   banner.innerHTML=`<div class="cut-banner-copy"><strong>Scoped to historical version ${esc(cutState.versionId.slice(0,10))}</strong><span>${esc(staleNotice)}New reviews will be recorded against this historical version.</span></div><div class="cut-banner-actions"><button type="button" class="button small" id="cut-switch-serving">Switch to current serving version</button></div>`;
+   banner.innerHTML=`<div class="cut-banner-copy"><strong>Scoped to historical version ${esc(cutState.versionId.slice(0,10))}</strong><span>${esc(staleNotice)}Reviews will be recorded against this historical version.</span></div><div class="cut-banner-actions"><button type="button" class="button small" id="cut-switch-serving">Switch to current serving version</button></div>`;
   }else{
-   banner.innerHTML=`<div class="cut-banner-copy"><strong>Historical version ${esc(cutState.versionId.slice(0,10))} (read-only)</strong><span>${esc(staleNotice)}Switch to the current serving version or explicitly scope your review to this historical version.</span></div><div class="cut-banner-actions"><button type="button" class="button small primary" id="cut-scope-historical">Scope new review to this version</button><button type="button" class="button small" id="cut-switch-serving">Switch to current serving version</button></div>`;
+   banner.innerHTML=`<div class="cut-banner-copy"><strong>Historical version ${esc(cutState.versionId.slice(0,10))} (read-only)</strong><span>${esc(staleNotice)}Switch to the current serving version or explicitly scope your review to this historical version.</span></div><div class="cut-banner-actions"><button type="button" class="button small primary" id="cut-scope-historical">Scope reviews to this version</button><button type="button" class="button small" id="cut-switch-serving">Switch to current serving version</button></div>`;
   }
   const scopeBtn=$('#cut-scope-historical');
-  if(scopeBtn)scopeBtn.onclick=()=>{cutState.allowHistorical=true;if($('#cut-form-error'))$('#cut-form-error').textContent='';if($('#cut-conflict-actions'))$('#cut-conflict-actions').hidden=true;updateCutVersionBanner();};
+  if(scopeBtn)scopeBtn.onclick=()=>{cutState.allowHistorical=true;if($('#cut-form-error'))$('#cut-form-error').textContent='';if($('#cut-conflict-actions'))$('#cut-conflict-actions').hidden=true;updateCutVersionBanner();render();};
   const switchBtn=$('#cut-switch-serving');
   if(switchBtn)switchBtn.onclick=()=>selectCutVersion(cutState.currentVersionId,true);
   updateCutFormLock();
@@ -590,11 +600,11 @@ const NoteUI=(()=>{
    const pct=100*(seg.endMs-seg.startMs)/total;
    if(seg.kind==='clip'){
     const isSelected=cutState.mode==='clip'&&cutState.clipId===seg.clipId;
-    const hasReview=items.some(a=>active(a)&&a.kind==='cut_feedback'&&a.target.scope==='clip'&&a.target.clip_id===seg.clipId);
+    const hasReview=items.some(a=>active(a)&&sameCutVersion(a)&&a.kind==='cut_feedback'&&a.target.scope==='clip'&&a.target.clip_id===seg.clipId);
     return `<button type="button" class="cut-seg cut-seg-clip${isSelected?' active':''}${hasReview?' reviewed':''}" data-seg-kind="kept_clip" data-clip-id="${esc(seg.clipId)}" data-start-percent="${100*seg.startMs/total}" data-width-percent="${pct}" aria-pressed="${isSelected}" aria-label="Kept clip ${seg.clipIndex}, Original ${preciseTime(seg.startSeconds)} to ${preciseTime(seg.endSeconds)}" title="Clip ${String(seg.clipIndex).padStart(2,'0')} · Original ${preciseTime(seg.startSeconds)}–${preciseTime(seg.endSeconds)}"><span>C${seg.clipIndex}</span></button>`;
    }
    const isSelected=cutState.mode==='gap'&&cutState.gapId===seg.id;
-   const hasReview=items.some(a=>active(a)&&a.kind==='cut_feedback'&&a.target.scope==='interval'&&Math.round(a.target.start_seconds*1000)>=seg.startMs&&Math.round(a.target.end_seconds*1000)<=seg.endMs);
+   const hasReview=items.some(a=>active(a)&&sameCutVersion(a)&&a.kind==='cut_feedback'&&a.target.scope==='interval'&&Math.round(a.target.start_seconds*1000)>=seg.startMs&&Math.round(a.target.end_seconds*1000)<=seg.endMs);
    return `<button type="button" class="cut-seg cut-seg-gap${isSelected?' active':''}${hasReview?' reviewed':''}" data-seg-kind="removed_gap" data-gap-id="${esc(seg.id)}" data-start-percent="${100*seg.startMs/total}" data-width-percent="${pct}" aria-pressed="${isSelected}" aria-label="Removed gap ${seg.gapIndex}, Original ${preciseTime(seg.startSeconds)} to ${preciseTime(seg.endSeconds)}" title="Removed gap ${seg.gapIndex} · Original ${preciseTime(seg.startSeconds)}–${preciseTime(seg.endSeconds)}"><span>Gap ${seg.gapIndex}</span></button>`;
   }).join('');
   $$('[data-seg-kind]',bar).forEach(b=>{
@@ -725,16 +735,29 @@ const NoteUI=(()=>{
   renderCutTimeline();
   updateCutFormLock();renderCutHints();
  }
+ function releaseCutPreviewLease(owner){
+  const ref=owner.previewLeaseRef;if(!ref)return;owner.previewLeaseRef=null;
+  fetch(`/api/processing/videos/${ref.sourceId}/comparison-lease`,{method:'DELETE',headers:{'Content-Type':'application/json','X-Tennis-Request':'1'},body:JSON.stringify({video_version_id:ref.version,holder_id:ref.holder}),keepalive:true}).catch(()=>{});
+ }
+ async function ensureHistoricalCutLease(owner){
+  if(!owner.active||owner.versionId===owner.currentVersionId)return null;
+  if(owner.previewLeaseRef?.version!==owner.versionId){releaseCutPreviewLease(owner);owner.previewLeaseRef={sourceId:source.id,version:owner.versionId,holder:Array.from({length:32},()=>Math.floor(Math.random()*16).toString(16)).join(''),renewed:0,promise:null};}
+  const ref=owner.previewLeaseRef;if(ref.promise)return ref.promise;
+  if(Date.now()-ref.renewed<300000)return ref;
+  ref.promise=(async()=>{
+   try{
+    const ack=await api(`/api/processing/videos/${ref.sourceId}/comparison-lease`,{method:'POST',body:JSON.stringify({video_version_id:ref.version,holder_id:ref.holder})});
+    if(cutState!==owner||!owner.active||owner.previewLeaseRef!==ref){fetch(`/api/processing/videos/${ref.sourceId}/comparison-lease`,{method:'DELETE',headers:{'Content-Type':'application/json','X-Tennis-Request':'1'},body:JSON.stringify({video_version_id:ref.version,holder_id:ref.holder}),keepalive:true}).catch(()=>{});return null;}
+    if(!ack.acknowledged)return null;ref.renewed=Date.now();return ref;
+   }catch(e){return null;}
+  })();try{return await ref.promise;}finally{ref.promise=null;}
+ }
  async function loadHistoricalCutPreview(key,clip){
-  const owner=cutState,version=owner.versionId;
-  owner.previewLease??=Array.from({length:32},()=>Math.floor(Math.random()*16).toString(16)).join('');
-  try{
-   const ack=await api(`/api/processing/videos/${source.id}/comparison-lease`,{method:'POST',body:JSON.stringify({video_version_id:version,holder_id:owner.previewLease})});
-   if(cutState!==owner||owner.historicalMediaKey!==key||owner.mode!=='clip'||owner.clipId!==clip.id)return;
-   if(!ack.acknowledged)return;
-   const video=$('#cut-video');video.src=`/media/versions/${version}/${clip.file}?lease_id=${owner.previewLease}`;video.hidden=false;
-   $('#cut-historical-media-note').hidden=true;owner.previewLeaseRenewed=Date.now();
-  }catch(e){/* Retained descriptors remain reviewable when media cannot be pinned. */}
+  const owner=cutState,version=owner.versionId,ref=await ensureHistoricalCutLease(owner);
+  if(!ref||cutState!==owner||owner.versionId!==version||owner.historicalMediaKey!==key||owner.mode!=='clip'||owner.clipId!==clip.id)return;
+  const video=$('#cut-video'),desired=`/media/versions/${version}/${clip.file}?lease_id=${ref.holder}`;
+  if(video.getAttribute('src')!==desired)video.src=desired;
+  video.hidden=false;$('#cut-historical-media-note').hidden=true;
  }
  function canChangeCutTarget(){
   if(!saving&&!cutState.draftDirty)return true;
@@ -775,6 +798,7 @@ const NoteUI=(()=>{
   if(entry.id===cutState.versionId)return true;
   if(entry.id!==cutState.versionId&&!canChangeCutTarget())return false;
   generation++;
+  releaseCutPreviewLease(cutState);
   cutState.historicalMediaKey=null;
   cutState.versionId=entry.id;
   cutState.manifest=entry.manifest;
@@ -803,6 +827,7 @@ const NoteUI=(()=>{
   await refresh(true);
  }
  async function cuts(s){
+  releaseCutPreviewLease(cutState);
   source=s;model.session=s;items=[];itemsLoaded=false;itemsLoadedSourceId=null;itemsLoadedPub=null;loadError='';generation++;clearInterval(timer);nav();
   const vData=await api(`/api/processing/videos/${s.id}/versions`);
   const query=new URLSearchParams(location.search);
@@ -826,6 +851,7 @@ const NoteUI=(()=>{
    saveRequest:requestId(),
    saveFingerprint:null
   };
+  const leaseOwner=cutState;window.addEventListener('pagehide',()=>releaseCutPreviewLease(leaseOwner),{once:true});
   cutState.gapId=cutState.timeline.gaps[0]?.id||null;
   if(!cutState.clipId&&cutState.gapId)cutState.mode='gap';
   const reqClip=query.get('clip'),reqGap=query.get('gap');
@@ -1000,7 +1026,7 @@ const NoteUI=(()=>{
      const clip=(cutState.manifest?.clips||[]).find(c=>c.id===cutState.clipId);
      if(!clip)throw new Error('Choose a kept clip to review.');
      target=clipTarget(clip);
-     player_id=clip.main_player?.id||null;
+     player_id=clip.main_player?.id||(cutState.manifest.published_at===source.published_at?source.clips.find(c=>c.id===clip.id)?.main_player?.id:null)||null;
      const sRaw=$('#cut-suggested-start').value.trim(),eRaw=$('#cut-suggested-end').value.trim();
      const sMs=sRaw!==''?Math.round(Number(sRaw)*1000):null;
      const eMs=eRaw!==''?Math.round(Number(eRaw)*1000):null;

@@ -15,3 +15,8 @@ test('bound validation rejects NaN, fractional milliseconds, unknown clips and o
  for(const row of [{start_ms:NaN,end_ms:1000},{start_ms:0.5,end_ms:1000},{start_ms:0,end_ms:31000}]){const c=base();c.keep_intervals_ms.push(row);assert.ok(C.validate(c,manifest).length);}
  const c=base();c.override_clip_bounds_ms.push({clip_id:'elsewhere',original_start_ms:0,original_end_ms:1000});assert.ok(C.validate(c,manifest).length);
 });
+test('an override stays local to its base clip and cannot erase another cut',()=>{
+ const m={source:{duration_seconds:30},clips:[...manifest.clips,{id:'two',original_start_seconds:15,original_end_seconds:20}]};
+ const cmd={keep_intervals_ms:[],exclude_intervals_ms:[],override_clip_bounds_ms:[{clip_id:'one',original_start_ms:6000,original_end_ms:18000}]};
+ assert.ok(C.validate(cmd,m).length);cmd.override_clip_bounds_ms[0].original_start_ms=11000;cmd.override_clip_bounds_ms[0].original_end_ms=12000;assert.ok(C.validate(cmd,m).length);
+});

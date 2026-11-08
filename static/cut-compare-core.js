@@ -21,12 +21,15 @@
     const onEvent=()=>finish(true),onError=()=>finish(false);
     for(const e of events)video.addEventListener(e,onEvent);video.addEventListener('error',onError);timer=setTimeout(()=>finish(false),8000);this.disposers.push(()=>finish(false));
    });
-   video.pause();
+   video.pause();video.preload='auto';
    if(video.getAttribute('src')!==url){const loaded=wait(['loadedmetadata']);video.src=url;video.load();if(!await loaded)return false;}
    else if(video.readyState<1&&!await wait(['loadedmetadata']))return false;
    if(epoch!==this.epoch||!Number.isFinite(video.duration))return false;
    const target=Math.max(0,Math.min(time,video.duration));
    if(Math.abs(video.currentTime-target)>0.025){const sought=wait(['seeked']);video.currentTime=target;if(!await sought)return false;}
+   // Some iOS decoders remain metadata-only at t=0 until the Play gesture.
+   // The caller primes them silently under that gesture before synchronized playback.
+   if(video.readyState<2&&target<=0.025)return epoch===this.epoch;
    if(video.readyState<2&&!await wait(['loadeddata','canplay']))return false;
    return epoch===this.epoch;
   }

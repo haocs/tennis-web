@@ -2241,6 +2241,26 @@ def test_cut_review_timeline_versions_gaps_and_portal_handoff(browser, tmp_path)
         page.locator('#cut-save').click()
         expect(page.locator('#cut-report-list .note-item').filter(has_text='Scoped v1 review')).to_be_visible()
 
+        # All-version rows never borrow the selected version's editing scope or markers.
+        page.locator('#cut-version').select_option(v2_id)
+        expect(page.locator('#cut-report-list .note-item').filter(has_text='Extend rally finish')).to_be_visible()
+        reviewed_count=page.locator('#cut-timeline-bar .reviewed').count()
+        page.locator('#cut-all-versions').check()
+        old_review=page.locator('#cut-report-list .note-item').filter(has_text='Scoped v1 review')
+        expect(old_review.get_by_role('button',name='Open reviewed version',exact=True)).to_be_visible()
+        expect(old_review.get_by_role('button',name='Edit',exact=True)).to_have_count(0)
+        expect(old_review.get_by_role('button',name='Jump to moment',exact=True)).to_have_count(0)
+        assert page.locator('#cut-timeline-bar .reviewed').count()==reviewed_count
+        old_review.get_by_role('button',name='Open reviewed version',exact=True).click()
+        expect(page.locator('#cut-version')).to_have_value(v1_id)
+        expect(old_review.get_by_role('button',name='Edit',exact=True)).to_have_count(0)
+        page.locator('#cut-scope-historical').click()
+        old_review.get_by_role('button',name='Edit',exact=True).click()
+        page.locator('#note-text').fill('Scoped v1 revised')
+        page.locator('#note-suggested-end').fill('14')
+        page.locator('#note-save').click()
+        expect(page.locator('#cut-report-list')).to_contain_text('Scoped v1 revised')
+
         # 6. Verify /processing/cuts/<id> alias and responsive layout across mobile & desktop
         page.goto(base_url + f'/processing/cuts/{ID}')
         expect(page.get_by_role('heading', name='Review cut', exact=True).first).to_be_visible()
@@ -2348,8 +2368,17 @@ def test_two_version_comparison_mobile_deck_and_preference(browser,tmp_path,widt
         page=browser.new_page(viewport={'width':width,'height':844});errors=[];page.on('pageerror',lambda e:errors.append(str(e)))
         page.goto(base+f'/review/{ID}/compare');expect(page.get_by_role('heading',name='Compare versions',exact=True)).to_be_visible()
         page.locator('#compare-refresh').click();expect(page.locator(f'#compare-b option[value="{candidate_id}"]')).to_have_count(1)
-        page.locator('#compare-a').select_option(serving_id);page.locator('#compare-b').select_option(candidate_id)
+        page.locator('#compare-a').select_option(serving_id)
+        with page.expect_response(lambda r:r.url.endswith('/comparison-lease') and r.status==200):page.locator('#compare-b').select_option(candidate_id)
+        assert any(call[0].endswith('/pins') and call[1].get('holder_kind')=='comparison_session' and call[2].get('method')!='DELETE' for call in server_api.calls)
+        # Opening at a removed gap still pins the inactive mobile candidate immediately.
         expect(page.locator('#compare-workspace video')).to_have_count(1 if width<650 else 2)
+        page.get_by_role('button',name='0:05–0:06 · Only A kept',exact=True).click()
+        expect(page.locator('#compare-status')).to_have_text('',timeout=15000)
+        page.locator('#compare-play').click()
+        expect(page.locator('#compare-status')).to_have_text('Range boundary reached. Tap Play to continue.',timeout=15000)
+        assert abs(float(page.locator('#compare-scrub').input_value())-6000)<2
+        if width>=650:expect(page.locator('#compare-workspace video:visible')).to_have_count(2)
         page.get_by_role('button',name='0:06–0:07 · Both kept',exact=True).click()
         expect(page.locator('#compare-status')).to_have_text('',timeout=15000)
         expect(page.locator('#compare-workspace video:visible')).to_have_count(1 if width<650 else 2)
@@ -2386,6 +2415,49 @@ def test_cut_rerun_requires_selected_revision_and_confirmed_command(browser,tmp_
         expect(page.locator('#cut-rerun-status')).to_contain_text('Candidate task created')
         snapshot=server_api.calls[1][1];assert snapshot['confirmed_commands']['override_clip_bounds_ms'][0]['original_end_ms']==16000
         assert server_api.calls[-1][1]['publication_policy']=='never'
+        page.get_by_role('button',name='Prepare another task',exact=True).click()
+        expect(page.locator('#cut-rerun-preview')).to_be_enabled()
+        page.evaluate("async () => await NoteUI.cuts(await api('/api/sessions/"+ID+"'))")
+        expect(page.locator('#cut-rerun-panel summary')).to_have_text('Prepare reprocess task')
+        page.locator('#cut-rerun-panel summary').click()
+        expect(page.locator('#cut-rerun-evidence input')).to_have_count(1)
+        gap=page.request.post(base+'/api/processing-annotations',headers={'X-Tennis-Request':'1'},data=dict(source_id=ID,publication=data['published_at'],kind='cut_feedback',target=dict(scope='interval',start_seconds=0,end_seconds=4),body=dict(text='Gap review',reasons=['missed_play']),request_id='second-gap-review'))
+        assert gap.status==201
+        page.evaluate('async () => await NoteUI.refresh(true)')
+        for checkbox in page.locator('#cut-rerun-evidence input').all():checkbox.check()
+        with page.expect_response(lambda r:'/reprocess-preview' in r.url) as response:page.locator('#cut-rerun-preview').click()
+        chosen=response.value.json()['evidence'][1]
+        page.locator('#cut-command-evidence').select_option('1');page.locator('#cut-command-add').click()
+        row=page.locator('#cut-rerun-commands [data-command]').last
+        expect(row.locator('[data-start]')).to_have_value(str(int(chosen['target']['start_seconds'])))
+        expect(row.locator('[data-end]')).to_have_value(str(int(chosen['target']['end_seconds'])))
+        row.locator('input[type=checkbox]').check();page.locator('#cut-rerun-submit').click()
+        expect(page.locator('#cut-rerun-status')).to_contain_text('Candidate task created')
+        assert server_api.calls[-2][1]['confirmed_commands']['keep_intervals_ms'][0]['source_annotation_id']==chosen['annotation_id']
         assert not page.evaluate('document.documentElement.scrollWidth>innerWidth')
+        page.close()
+    finally:server.shutdown();thread.join()
+
+
+def test_historical_preview_renewal_preserves_playhead_and_releases_on_switch(browser,tmp_path):
+    from test_cut_comparisons import Server
+    from entity_model import output_version
+    app,root,data=setup.__wrapped__(tmp_path/'historical-preview-ui')
+    candidate=copy.deepcopy(data);candidate['published_at']+=1;candidate['media_directory']='d'*32;candidate['artifact_directory']='d'*32;candidate['processing']={'task_id':'c'*32,'attempt_id':'d'*32}
+    candidate['video']['duration_seconds']=2;candidate['clips'][0].update(duration_seconds=2,original_start_seconds=6,original_end_seconds=8,playback_start_seconds=0,playback_end_seconds=2)
+    server_api=Server(candidate);app.extensions['processing_client']=server_api
+    assert app.test_client().post(f'/api/processing/videos/{ID}/versions/import',json={},headers={'X-Tennis-Request':'1'}).status_code==200
+    candidate_id=output_version(ID,candidate['published_at']);serving_id=output_version(ID,data['published_at'])
+    destination=root/'media'/('d'*32)/'Clips';destination.mkdir(parents=True);shutil.copyfile(Path(__file__).parent/'fixtures/clip.mp4',destination/'clip-001.mp4')
+    server=make_server('127.0.0.1',0,app,threaded=True);thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start();base=f'http://127.0.0.1:{server.server_port}'
+    try:
+        page=browser.new_page(viewport={'width':390,'height':844});page.goto(base+f'/review/{ID}/cuts?version={candidate_id}')
+        expect(page.locator('#cut-video')).to_be_visible();page.wait_for_function("() => document.querySelector('#cut-video').readyState>=1")
+        page.evaluate("() => {const v=document.querySelector('#cut-video');v.currentTime=.5;v.pause();window.previewLoads=0;v.addEventListener('loadedmetadata',()=>window.previewLoads++);const originalNow=Date.now;Date.now=()=>originalNow()+360000;}")
+        page.wait_for_function("() => Math.abs(document.querySelector('#cut-video').currentTime-.5)<.05")
+        page.evaluate('async () => await NoteUI.refresh(true)')
+        assert abs(page.locator('#cut-video').evaluate('(v)=>v.currentTime')-.5)<.05 and page.evaluate('window.previewLoads')==0
+        with page.expect_response(lambda r:r.url.endswith('/comparison-lease') and r.request.method=='DELETE' and r.status==200):page.locator('#cut-version').select_option(serving_id)
+        assert any(call[2].get('method')=='DELETE' for call in server_api.calls)
         page.close()
     finally:server.shutdown();thread.join()

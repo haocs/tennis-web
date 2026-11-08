@@ -11,3 +11,9 @@ test('seek gate cancels stale metadata waits before a newer seek can play',async
  class Video extends EventTarget{constructor(){super();this.readyState=0;this.duration=20;this.currentTime=0;this.src='';}pause(){}load(){}getAttribute(){return this.src;}}
  const video=new Video(),gate=new C.SeekGate(),epoch=gate.cancel(),old=gate.ready(video,'old.mp4',5,epoch);gate.cancel();assert.equal(await old,false);assert.equal(await gate.ready(video,'obsolete.mp4',0,epoch),false);assert.equal(video.src,'old.mp4');
 });
+test('metadata-only decoder at clip start stays playable until the Play gesture',async()=>{
+ class Video extends EventTarget{constructor(){super();this.readyState=0;this.duration=2;this.currentTime=0;this.src='';}pause(){}getAttribute(){return this.src;}load(){queueMicrotask(()=>{this.readyState=1;this.dispatchEvent(new Event('loadedmetadata'));});}}
+ const video=new Video(),gate=new C.SeekGate(),epoch=gate.cancel();
+ assert.equal(await Promise.race([gate.ready(video,'zero.mp4',0,epoch),new Promise(resolve=>setTimeout(()=>resolve('stalled'),100))]),true);
+ assert.equal(video.preload,'auto');
+});
