@@ -14,6 +14,7 @@ from worker.tennis_coach.annotations import CAPABILITY, PROMPT_VERSION, expected
 def register_coaching(app,library,session):
     routes=Blueprint('coaching',__name__)
     queue=Coaching(Path(app.config['DATA_ROOT'])/'coaching.sqlite3')
+    queue.player_exists=lambda pid:isinstance(pid,str) and ('player:'+pid) in app.extensions['state'].all()
     app.extensions['coaching']=queue
     root=Path(app.config['COACH_MEDIA_ROOT']).resolve()
 
@@ -128,6 +129,7 @@ def register_coaching(app,library,session):
         if action=='complete' and job['state']=='completed':
             return jsonify(queue.worker_update(identity,b.get('token'),action,result))
         if action=='evidence':
+            if job['body'].get('purpose')=='learning_plan':abort(400,'Learning plan requests do not use frame evidence manifests')
             try:
                 if result!=evidence_manifest(job):raise ValueError('Evidence manifest mismatch')
                 for frame in result['frames']:
@@ -162,7 +164,12 @@ def register_coaching(app,library,session):
                             result[optional]=saved[optional]
                     result['artifact_directory']=fence
                 except (ValueError,OSError,KeyError,TypeError) as e:abort(400,str(e))
-            elif not isinstance(result,dict) or not isinstance(result.get('answer'),str) or not 1<=len(result['answer'])<=64000 or result.get('analysis_mode')!='timestamped_frames':
+            elif (
+                not isinstance(result,dict)
+                or not isinstance(result.get('answer'),str)
+                or not 1<=len(result['answer'])<=64000
+                or result.get('analysis_mode')!=('learning_plan' if job['body'].get('purpose')=='learning_plan' else 'timestamped_frames')
+            ):
                 abort(400,'Invalid coaching response')
             else:
                 # Explicitly whitelist public result fields; no paths/tokens/provider logs.
@@ -209,6 +216,8 @@ def register_coaching(app,library,session):
         b=request.get_json()
         if not isinstance(b,dict):abort(400,'Expected an object')
         job=get(b.get('job_id',''))
+        if job['body'].get('purpose')=='learning_plan' or not job['body'].get('source_id'):
+            abort(400,'A completed response with retained evidence is required')
         data=session(job['body']['source_id'])
         if b.get('publication')!=data['published_at']:abort(409,'Recording changed. Reload before saving')
         try:

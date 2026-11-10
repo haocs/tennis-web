@@ -162,10 +162,11 @@ class Coaching(Annotations):
                 state='calling'
             elif action=='complete':
                 if row['role']=='ai' and state!='calling':raise QueueConflict('Provider call not started')
-                if row['role']=='ai':result=self.save_annotations(db,row,result)
+                if row['role']=='ai':
+                    result=self.save_learning_plan(db,row,result) if body.get('purpose')=='learning_plan' else self.save_annotations(db,row,result)
                 state='completed'
             elif action=='evidence':
-                if row['role']!='ai' or state!='leased':raise QueueConflict('Evidence can only be registered before the provider call')
+                if row['role']!='ai' or state!='leased' or body.get('purpose')=='learning_plan':raise QueueConflict('Evidence can only be registered before the provider call')
                 self.pin_evidence(db,self.decode(row),result)
                 result=None
             elif action=='fail':state='failed'
@@ -180,12 +181,12 @@ class Coaching(Annotations):
             db.execute('BEGIN IMMEDIATE');row=db.execute('SELECT * FROM jobs WHERE id=?',(identity,)).fetchone()
             if not row: raise KeyError(identity)
             if type(version)!=int or row['version']!=version:raise QueueConflict('This request changed. Reload its latest state')
-            state=row['state'];result=json.loads(row['result']) if row['result'] else {}
+            state=row['state'];body=json.loads(row['body']);result=json.loads(row['result']) if row['result'] else {}
             if action=='cancel':
                 if state not in ('queued','leased'):raise QueueConflict('A provider call already started; wait for its result')
                 state='cancelled'
             elif action=='cue':
-                if result.get('structured') or state!='completed' or row['role']!='ai' or not isinstance(cue,str) or len(cue)>400:raise ValueError('Invalid coaching cue')
+                if body.get('purpose')=='learning_plan' or result.get('structured') or result.get('structured_plan') or state!='completed' or row['role']!='ai' or not isinstance(cue,str) or len(cue)>400:raise ValueError('Invalid coaching cue')
                 result['cue']=cue.strip();result['cue_reviewed']=bool(cue.strip())
             else:raise ValueError('Invalid action')
             db.execute('UPDATE jobs SET state=?,result=?,token=NULL,updated=?,version=version+1 WHERE id=?',(state,json.dumps(result),self.clock(),identity));db.commit()

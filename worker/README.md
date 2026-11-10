@@ -112,20 +112,28 @@ change originals, the published library, application state or unrelated paths.
 This option defaults off; configure the artifact root's own read/traverse access
 explicitly at deployment.
 
-## Structured coaching and high-quality share exports (worker 0.3.0)
+## Structured coaching, player learning plans, and HDR-preserving share exports (worker 0.4.0)
 
-For the evidence-linked coaching UI and high-quality Clip study interval downloads,
-upgrade this installed package as well as the website container:
+For the evidence-linked coaching UI, player learning plans, and high-quality Clip study
+interval downloads, upgrade this installed package on both the `render` and `ai`
+workers alongside the website container:
 
-- The AI role advertises `coaching-annotations-v1`; older AI workers leave structured
-  coaching requests queued instead of consuming them incorrectly.
-- The render role advertises `share-export-v1`; older render workers leave high-quality
-  interval download jobs (`intent: "share"`) queued instead of rendering low-resolution
-  silent coaching previews. Share exports render up to 1920px (`crf: 18`), apply
-  validated HDR-to-SDR `zscale`/`tonemap=mobius` conversion to `bt709` when the source
-  is HDR, retime audio with chained `atempo` filters when source audio is present, and
-  publish only `excerpt.mp4` + `recipe.json` (skipping `frame-*.jpg` and `prompt.txt`
-  to minimize NAS writes).
+- The AI role advertises `coaching-annotations-v1` and `learning-plan-v1`; older AI
+  workers leave structured coaching requests and text-only player learning-plan
+  requests (`purpose: "learning_plan"`) queued instead of consuming them incorrectly.
+  Learning-plan requests run in the same read-only ephemeral Codex sandbox with tools
+  disabled and structured JSON output, without requiring a render export or image
+  attachments.
+- The render role advertises `share-export-v2` and `share-export-v1`; older render
+  workers leave high-quality interval download jobs (`intent: "share"`) queued instead
+  of rendering low-resolution silent coaching previews. Share exports render up to
+  1920px (`crf: 18`), preserve verified 10-bit HDR (`bt2020nc`/`bt2020` with HLG
+  `arib-std-b67` or PQ `smpte2084` in HEVC Main 10 `hvc1`) when the probed source is
+  verified HDR (or encode verified SDR `bt709` in H.264), retime audio with chained
+  `atempo` filters when source audio is present, and publish only `excerpt.mp4` +
+  `recipe.json` (skipping `frame-*.jpg` and `prompt.txt` to minimize NAS writes).
+  See [the learning plan design](../docs/LEARNING-PLAN.md) for incremental snapshot,
+  coverage, and practice-log persistence rules.
 
 No new account, queue or configuration secret is required. The existing artifact mount
 needs write access to `evidence/frames/`; the website reads it through its existing

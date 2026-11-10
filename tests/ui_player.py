@@ -961,6 +961,194 @@ def test_learning_navigation_saved_reviews_and_player_switch(browser,ui_server):
     page.close()
 
 
+def test_learning_plan_tabs_practice_log_editor_cancel_history_and_citations(browser,ui_server):
+    page=browser.new_page(viewport={'width':390,'height':844},has_touch=True)
+    headers={'X-Tennis-Request':'1'}
+    person=page.request.post(ui_server+'/api/players',headers=headers,data={'name':'PlanLearner','height_cm':172,'level':'intermediate'}).json()
+    pid=person['id']
+
+    # 1. Navigate to /learning, select PlanLearner, switch to Plan & progress tab, and test real practice log create/edit/cancel/history.
+    page.goto(ui_server+f'/learning?player={pid}')
+    expect(page.locator('#learning-tab-reviews')).to_have_attribute('aria-selected','true')
+    page.locator('#learning-tab-plan').click()
+    expect(page.locator('#learning-tab-plan')).to_have_attribute('aria-selected','true')
+    expect(page.locator('#learning-panel-plan')).to_be_visible()
+
+    page.locator('#learning-add-practice-btn').click()
+    page.locator('#manual-practice-title').fill('Early split step on return')
+    page.locator('#manual-practice-topic').fill('Footwork')
+    page.locator('#manual-practice-cue').fill('Land before server contact')
+    page.locator('#manual-practice-drill').fill('15 return split-steps')
+    page.locator('#manual-practice-note').fill('Initial focus note')
+    page.get_by_role('button',name='Save practice item',exact=True).click()
+
+    item=page.locator('.learning-practice-item').first
+    expect(item).to_be_visible()
+    expect(item.locator('h4')).to_have_text('Early split step on return')
+    expect(item).to_contain_text('Ongoing')
+
+    # Open inline editor, type unsaved text, and verify Cancel restores clean saved state.
+    item.locator('.learning-edit-practice-btn').click()
+    item.locator('input[name="title"]').fill('Unsaved temporary title')
+    item.locator('.learning-cancel-practice-btn').click()
+    expect(item.locator('h4')).to_have_text('Early split step on return')
+
+    # Edit status and note, save, and verify append-only history disclosure.
+    item.locator('.learning-edit-practice-btn').click()
+    item.locator('select[name="status"]').select_option('practiced')
+    item.locator('textarea[name="note"]').fill('Practiced 30 minutes; better timing.')
+    item.get_by_role('button',name='Save progress',exact=True).click()
+    expect(item).to_contain_text('Practiced')
+    expect(item).to_contain_text('Practiced 30 minutes; better timing.')
+    item.locator('.learning-practice-history summary').click()
+    expect(item.locator('.learning-history-list li')).to_have_count(2)
+    expect(item.locator('.learning-history-list')).to_contain_text('v2')
+    expect(item.locator('.learning-history-list')).to_contain_text('v1')
+
+    # 2. Test active plan rendering, consent gate, plan update request, and citation deep-link into Clip Study.
+    plan_requests=[]
+    def handle_plan_post(route):
+        plan_requests.append(route.request.post_data_json)
+        route.fulfill(status=201,json={'id':'job-plan-ui-1','role':'ai','state':'queued','version':1,'body':{'purpose':'learning_plan','player_id':pid}})
+    page.route('**/api/learning/plan',handle_plan_post)
+
+    eid='coach:a_ui_citation_1'
+    study_url=f'/review/{ID}?clip={CLIP}&coach_time=0.4&coach_end=1.4&coach_job=job_ui_1'
+    mock_plan_state={
+        'enabled':True,
+        'active_plan':{
+            'player_id':pid,
+            'revision':1,
+            'job_id':'job-plan-0',
+            'input_digest':'digest-rev-1',
+            'covered_state_digest':'digest-rev-1',
+            'request_digest':'req-rev-1',
+            'created_at':1700002000.0,
+            'updated_at':1700002000.0,
+            'coverage':{'covered_reviews_count':1,'covered_practice_logs_count':1,'truncated_reviews_count':0,'truncated_practice_logs_count':0},
+            'plan':{
+                'schema_version':1,
+                'observed_summary':'Balanced split step preparation on baseline rallies.',
+                'summary_evidence_ids':[eid],
+                'focus_areas':[{
+                    'item_key':'fi_ui_1',
+                    'topic':'Footwork',
+                    'title':'Split step timing',
+                    'observed_issue':'Landing slightly late.',
+                    'cue':'Land split step before opponent contact',
+                    'drill':'Shadow rhythm drill',
+                    'uncertainty':'Single camera angle.',
+                    'evidence_ids':[eid],
+                    'validation_warnings':[],
+                }],
+                'uncertainties':['Sampled frames cannot establish exact ball contact.'],
+                'unassessed_areas':['Serve and net play were not present in reviewed clips.'],
+                'progress_notes':'Player logged 30 minutes of split-step practice.',
+                'next_evidence_requests':['Record 5 return-of-serve points from behind baseline.'],
+                'validation_warnings':[],
+                'parse_status':'valid',
+            },
+            'provenance':{'covered_evidence_count':1,'delta_evidence_count':1,'removed_evidence_count':0},
+            'citations':{
+                eid:{
+                    'evidence_id':eid,
+                    'job_id':'job_ui_1',
+                    'source_id':ID,
+                    'clip_id':CLIP,
+                    'clip_index':1,
+                    'recording_title':'Morning practice',
+                    'asked_at':1700001000.0,
+                    'original_start':0.4,
+                    'original_end':1.4,
+                    'review_status':'accepted',
+                    'provenance_trust':'user_confirmed',
+                    'title':'Split step cue',
+                    'topic':'Footwork',
+                    'cue':'Land before contact',
+                    'historical':False,
+                    'media_available':True,
+                    'study_url':study_url,
+                    'currently_valid':True,
+                    'invalid_reason':None,
+                },
+            },
+        },
+        'revisions':[{'revision':1,'job_id':'job-plan-0','parent_revision':None,'status':'active','input_digest':'digest-rev-1','covered_state_digest':'digest-rev-1','request_digest':'req-rev-1','observed_summary':'Balanced split step preparation.','focus_count':1,'provenance':{'covered_evidence_count':1,'delta_evidence_count':1,'removed_evidence_count':0},'created_at':1700002000.0}],
+        'practice_logs':[],
+        'eligibility':{
+            'can_generate':True,
+            'reason':'updates_available',
+            'expected_parent_revision':1,
+            'input_digest':'digest-rev-2',
+            'valid_reviews_count':2,
+            'new_or_revised_reviews_count':1,
+            'removed_reviews_count':0,
+            'practice_log_changes_count':1,
+            'profile_changed':False,
+            'backlog_reviews_count':0,
+            'backlog_practice_logs_count':0,
+            'days_since_last_plan':3.0,
+            'recommended_cadence_days':14,
+            'requires_ambiguous_retry':False,
+        },
+        'pending_job':None,
+    }
+    page.route('**/api/learning?*',lambda route:route.fulfill(json={'entries':[],'next_after':None,'plan_state':mock_plan_state}))
+    page.goto(ui_server+f'/learning?player={pid}&tab=plan')
+    expect(page.locator('#learning-active-plan')).to_contain_text('Balanced split step preparation on baseline rallies.')
+    expect(page.locator('#learning-active-plan')).to_contain_text('Serve and net play were not present in reviewed clips.')
+
+    # Clicking Update learning plan without checking consent shows an error and does not call POST /api/learning/plan.
+    page.locator('#learning-plan-generate').click()
+    expect(page.locator('#learning-plan-error')).to_contain_text('Confirm sending review summaries')
+    assert len(plan_requests)==0
+
+    # Checking consent and clicking Update learning plan submits the exact parent revision and input digest.
+    page.locator('#learning-plan-consent').check()
+    page.locator('#learning-plan-generate').click()
+    assert len(plan_requests)==1
+    assert plan_requests[0]['expected_parent_revision']==1
+    assert plan_requests[0]['input_digest']=='digest-rev-2'
+    assert plan_requests[0]['consent'] is True
+
+    for width in (320,390,1280):
+        page.set_viewport_size({'width':width,'height':844})
+        assert not page.evaluate('document.documentElement.scrollWidth>innerWidth')
+
+    # Clicking the citation pill navigates directly to Clip Study for that review interval.
+    citation_link=page.locator('#learning-active-plan a.learning-citation').first
+    expect(citation_link).to_contain_text('User confirmed')
+    citation_link.click()
+    expect(page).to_have_url(re.compile(r'/review/' + ID))
+
+    # 3. Verify background 3s poll while a plan job is queued does not wipe an unsaved manual practice form draft.
+    pending_plan_state={**mock_plan_state,'pending_job':{'id':'job-poll-1','state':'queued','version':1}}
+    page.route('**/api/learning?*',lambda route:route.fulfill(json={'entries':[],'next_after':None,'plan_state':pending_plan_state}))
+    page.goto(ui_server+f'/learning?player={pid}&tab=plan')
+    page.locator('#learning-add-practice-btn').click()
+    page.locator('#manual-practice-title').fill('Unsaved draft preserved across poll')
+    page.wait_for_timeout(3500)
+    expect(page.locator('#manual-practice-title')).to_have_value('Unsaved draft preserved across poll')
+
+    # 4. Verify switching players while a plan POST is in flight does not disable the next player's generate button.
+    person_b=page.request.post(ui_server+'/api/players',headers=headers,data={'name':'PlanLearnerB','height_cm':175,'level':'beginner'}).json()
+    pid_b=person_b['id']
+    deferred_routes=[]
+    page.unroute('**/api/learning/plan')
+    page.route('**/api/learning/plan',lambda route:deferred_routes.append(route))
+    page.route('**/api/learning?*',lambda route:route.fulfill(json={'entries':[],'next_after':None,'plan_state':mock_plan_state}))
+    page.goto(ui_server+f'/learning?player={pid}&tab=plan')
+    page.locator('#learning-plan-consent').check()
+    page.locator('#learning-plan-generate').click()
+    expect(page.locator('#learning-plan-generate')).to_be_disabled()
+    page.locator('#learning-player').select_option(pid_b)
+    expect(page.locator('#learning-player')).to_have_value(pid_b)
+    assert len(deferred_routes)==1
+    deferred_routes[0].fulfill(status=201,json={'id':'job-plan-ui-deferred','role':'ai','state':'queued','version':1,'body':{'purpose':'learning_plan','player_id':pid}})
+    expect(page.locator('#learning-plan-generate')).to_be_enabled()
+    page.close()
+
+
 @pytest.mark.parametrize('width',[390,1280])
 def test_session_metadata_and_entity_note_targets(browser,ui_server,width):
     page=browser.new_page(viewport={'width':width,'height':900})

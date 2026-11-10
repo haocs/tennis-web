@@ -107,7 +107,7 @@ def register_annotations(app, library, session):
         if not after or after.startswith('coach-response:'):
             cursor=after[len('coach-response:'):] if after else ''
             with queue.db() as db:
-                jobs=db.execute("SELECT id,body,result,version,updated,asked_at FROM jobs WHERE role='ai' AND state='completed' AND json_extract(body,'$.source_id')=? AND id>? ORDER BY id LIMIT 201",(source,cursor)).fetchall()
+                jobs=db.execute("SELECT id,body,result,version,updated,asked_at FROM jobs WHERE role='ai' AND state='completed' AND COALESCE(json_extract(body,'$.purpose'),'coaching_frames')='coaching_frames' AND json_extract(body,'$.source_id')=? AND id>? ORDER BY id LIMIT 201",(source,cursor)).fetchall()
             for row in jobs:
                 body=json.loads(row['body']);answer=json.loads(row['result'])
                 target=dict(scope='interval',start_seconds=body['original_start'],end_seconds=body['original_end'])
@@ -239,26 +239,59 @@ def register_annotations(app, library, session):
             kind=kind,target=target,body=body.get('payload'),player_id=body.get('player_id'),request_id=body.get('request_id')))
         return jsonify(moment_view(value)),201
 
+    def learning_source_loader(sid):
+        data=optional_source(sid)
+        if data:
+            edits=app.extensions['state'].all().get('meta:'+sid,{}).get('value') or {}
+            data['title']=edits.get('title',data['title'])
+        return data
+
+    def require_learning_player(pid):
+        shared=app.extensions['state'].all()
+        if not isinstance(pid,str) or not re.fullmatch('[a-f0-9]{32}',pid) or 'player:'+pid not in shared or not shared['player:'+pid].get('value'):
+            abort(400,'Choose a saved player')
+        rec=shared['player:'+pid]
+        return dict(id=pid,**rec['value'],version=rec['version'])
+
     @app.get('/api/learning')
     def learning():
         pid=request.args.get('player_id','')
-        if not re.fullmatch('[a-f0-9]{32}',pid) or 'player:'+pid not in app.extensions['state'].all():
-            abort(400,'Choose a saved player')
+        player_profile=require_learning_player(pid)
         after=request.args.get('after','')
         if len(after)>100:abort(400,'Invalid review cursor')
         try:limit=int(request.args.get('limit',30))
         except ValueError:abort(400,'Invalid page size')
         if not 1<=limit<=50:abort(400,'Invalid page size')
         with queue.db() as db:
-            rows=db.execute("SELECT id,body,result,updated,asked_at FROM jobs WHERE role='ai' AND state='completed' AND id>? AND (json_extract(body,'$.player_context.player_id')=? OR json_extract(body,'$.player_context.player_id') IS NULL) ORDER BY id LIMIT ?",(after,pid,limit+1)).fetchall()
+            rows=db.execute(
+                "SELECT id,body,result,updated,asked_at FROM jobs "
+                "WHERE role='ai' AND state='completed' "
+                "AND COALESCE(json_extract(body,'$.purpose'),'coaching_frames')='coaching_frames' "
+                "AND json_extract(body,'$.source_id') IS NOT NULL "
+                "AND id>? AND (json_extract(body,'$.player_context.player_id')=? OR json_extract(body,'$.player_context.player_id') IS NULL) "
+                "ORDER BY id LIMIT ?",
+                (after,pid,limit+1),
+            ).fetchall()
+            job_ids=[r['id'] for r in rows[:limit]]
+            annots_by_job={}
+            if job_ids:
+                placeholders=','.join('?' for _ in job_ids)
+                for a in db.execute(f'SELECT id,job_id,current,status,version,updated FROM annotations WHERE job_id IN ({placeholders}) ORDER BY id',job_ids).fetchall():
+                    cur=json.loads(a['current'])
+                    annots_by_job.setdefault(a['job_id'],[]).append(dict(
+                        id=a['id'],
+                        title=cur.get('title',''),
+                        topic=cur.get('topic',''),
+                        cue=cur.get('cue',''),
+                        drill=cur.get('drill',''),
+                        status=a['status'],
+                        version=a['version'],
+                    ))
         entries={};sources={}
         for row in rows[:limit]:
             body=json.loads(row['body']);result=json.loads(row['result']);sid=body['source_id']
-            if sid not in sources:sources[sid]=optional_source(sid)
+            if sid not in sources:sources[sid]=learning_source_loader(sid)
             data=sources[sid]
-            if data:
-                edits=app.extensions['state'].all().get('meta:'+sid,{}).get('value') or {}
-                data['title']=edits.get('title',data['title'])
             profile=body.get('player_context') or {};explicit=profile.get('player_id')==pid
             start,end=body['original_start'],body['original_end']
             clips=[c for c in data['clips'] if max(start,c['original_start_seconds'])<min(end,c['original_end_seconds'])] if data else []
@@ -279,6 +312,7 @@ def register_annotations(app, library, session):
                 entry['reviews'].append(dict(id=row['id'],original_start=start,original_end=end,asked_at=row['asked_at'],updated_at=row['updated'],
                     summary=(result.get('structured') or {}).get('summary','') or result.get('answer','')[:400],
                     answer=result.get('answer','')[:12000],answer_truncated=len(result.get('answer',''))>12000,
+                    suggestions=annots_by_job.get(row['id'],[]),
                     historical=historical,player_mismatch=mismatch,association='review' if explicit else 'current_clip',
                     response_url='/api/coaching/jobs/'+row['id']))
                 entry['reviews'].sort(key=lambda r: (-(r['asked_at'] if r.get('asked_at') is not None else (r.get('updated_at') or 0)), r['id']))
@@ -291,7 +325,75 @@ def register_annotations(app, library, session):
                 e['id'],
             ),
         )
-        return jsonify(entries=ordered_entries,next_after=rows[limit-1]['id'] if len(rows)>limit else None)
+        payload=dict(entries=ordered_entries,next_after=rows[limit-1]['id'] if len(rows)>limit else None)
+        if not after:
+            payload['plan_state']=queue.build_learning_plan_state(
+                pid,
+                player_profile,
+                learning_source_loader,
+                enabled=bool(app.config.get('COACH_WORKER_TOKEN')),
+            )
+        return jsonify(**payload)
+
+    @app.post('/api/learning/plan')
+    def generate_learning_plan():
+        if not app.config.get('COACH_WORKER_TOKEN'):
+            abort(503,'Coaching workers are not configured')
+        b=request.get_json()
+        if not isinstance(b,dict):
+            abort(400,'Expected an object')
+        player_profile=require_learning_player(b.get('player_id',''))
+        try:
+            job=queue.queue_learning_plan(player_profile['id'],player_profile,b,learning_source_loader)
+            return jsonify(job),201
+        except ValueError as error:
+            from coaching import QueueConflict
+            if isinstance(error,QueueConflict):raise
+            abort(400,str(error))
+
+    @app.post('/api/learning/practice-logs')
+    def create_learning_practice_log():
+        b=request.get_json()
+        if not isinstance(b,dict):
+            abort(400,'Expected an object')
+        player_profile=require_learning_player(b.get('player_id',''))
+        try:
+            item=queue.create_practice_log(player_profile['id'],b)
+            return jsonify(item),201
+        except ValueError as error:
+            from coaching import QueueConflict
+            if isinstance(error,QueueConflict):raise
+            abort(400,str(error))
+
+    @app.put('/api/learning/practice-logs/<log_id>')
+    def update_learning_practice_log(log_id):
+        b=request.get_json()
+        if not isinstance(b,dict):
+            abort(400,'Expected an object')
+        player_profile=require_learning_player(b.get('player_id',''))
+        try:
+            item=queue.update_practice_log(player_profile['id'],log_id,b)
+            return jsonify(item)
+        except KeyError:
+            abort(404,'Practice item not found')
+        except ValueError as error:
+            from coaching import QueueConflict
+            if isinstance(error,QueueConflict):raise
+            abort(400,str(error))
+
+    @app.get('/api/learning/practice-logs/<log_id>/revisions')
+    def get_learning_practice_log_revisions(log_id):
+        player_profile=require_learning_player(request.args.get('player_id',''))
+        try:
+            after=int(request.args.get('after',0))
+        except ValueError:
+            abort(400,'Invalid revision cursor')
+        if after<0:
+            abort(400,'Invalid revision cursor')
+        try:
+            return jsonify(**queue.practice_log_revisions(player_profile['id'],log_id,after=after))
+        except KeyError:
+            abort(404,'Practice item not found')
 
     @app.get('/api/annotations/sources/<source>/export')
     def export(source):
@@ -310,7 +412,7 @@ def register_annotations(app, library, session):
         except ValueError:abort(400,'Invalid revision cursor')
         if after<0:abort(400,'Invalid revision cursor')
         if identity.startswith('coach-response:'):
-            with queue.db() as db:row=db.execute("SELECT version,updated,result FROM jobs WHERE id=? AND role='ai' AND state='completed'",(identity[len('coach-response:'):],)).fetchone()
+            with queue.db() as db:row=db.execute("SELECT version,updated,result FROM jobs WHERE id=? AND role='ai' AND state='completed' AND COALESCE(json_extract(body,'$.purpose'),'coaching_frames')='coaching_frames' AND json_extract(body,'$.source_id') IS NOT NULL",(identity[len('coach-response:'):],)).fetchone()
             if not row:abort(404,'Coaching response not found')
             values=[dict(version=row['version'],created_at=row['updated'],content=dict(cue=json.loads(row['result']).get('answer','')),status='saved_response',history_complete=False)] if row['version']>after else []
         elif identity.startswith('coach:'):

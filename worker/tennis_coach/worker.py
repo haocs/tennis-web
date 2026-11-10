@@ -15,7 +15,7 @@ import time
 import urllib.request
 import urllib.error
 import uuid
-from .annotations import CAPABILITY, RENDER_SHARE_CAPABILITY, RENDER_SHARE_V1_CAPABILITY, expected_frames, evidence_manifest, coaching_prompt, response_schema
+from .annotations import CAPABILITY, LEARNING_PLAN_CAPABILITY, RENDER_SHARE_CAPABILITY, RENDER_SHARE_V1_CAPABILITY, expected_frames, evidence_manifest, coaching_prompt, response_schema, learning_plan_prompt, learning_plan_schema
 
 
 def atomic(path,data):
@@ -212,8 +212,36 @@ def render(config,job,local):
 
 
 def analyze(config,job,local,before_call=None):
-    """Subscription-backed Codex image analysis; no native-video claim."""
-    started=time.monotonic();s=job['body'];render_id=s['export_id']
+    """Subscription-backed Codex image or learning-plan analysis; no native-video claim."""
+    started=time.monotonic();s=job['body']
+    if s.get('purpose')=='learning_plan':
+        codex=config.get('codex') or shutil.which('codex')
+        if not codex:raise ValueError('Install Codex CLI and sign in with ChatGPT on this Mac')
+        status=subprocess.run([codex,'login','status'],capture_output=True,text=True,timeout=20)
+        if status.returncode or 'ChatGPT' not in status.stdout+status.stderr:raise ValueError('ChatGPT sign-in required; run codex login on the worker Mac')
+        atomic(local/'response-schema.json',s.get('response_contract') or learning_plan_schema())
+        prompt=s.get('submitted_prompt') or learning_plan_prompt(s)
+        (local/'submitted-prompt.txt').write_text(prompt)
+        cmd=[codex,'exec','--ignore-user-config','--ephemeral','--skip-git-repo-check','--sandbox','read-only','--color','never','--json','-C',str(local),'-o',str(local/'answer.txt'),'--output-schema',str(local/'response-schema.json')]
+        for flag in ['shell_tool','unified_exec','apps','plugins','browser_use','computer_use','in_app_browser','code_mode']:
+            cmd+=['--disable',flag]
+        if config.get('model'):cmd+=['--model',config['model']]
+        cmd+=['-']
+        env=os.environ.copy()
+        for key in ('OPENAI_API_KEY','CODEX_API_KEY'):env.pop(key,None)
+        if before_call:before_call(None)
+        done=subprocess.run(cmd,input=prompt,capture_output=True,text=True,env=env,timeout=300)
+        if done.returncode:raise ValueError('ChatGPT request failed; inspect private worker logs or login/usage status')
+        answer=(local/'answer.txt').read_text().strip()
+        if not answer or len(answer)>64000:raise ValueError('Invalid AI answer')
+        usage=None
+        for line in done.stdout.splitlines():
+            try:
+                event=json.loads(line)
+                if event.get('type')=='turn.completed':usage=event.get('usage')
+            except ValueError:pass
+        return dict(answer=answer,analysis_mode='learning_plan',model=config.get('model','Codex account default'),elapsed_seconds=time.monotonic()-started,usage=usage)
+    render_id=s['export_id']
     ref=s['artifact_directory'];folder=inside(config['artifact_root'],render_id+'/'+ref)
     meta=json.loads((folder/'recipe.json').read_text());files=[]
     for f in meta['frames']:
@@ -313,7 +341,7 @@ class Worker:
         try:self.storage_ready()
         except Exception:
             self.state(status='storage_unavailable');return False
-        response=self.api('worker/'+self.role+'/claim',{'worker_id':self.identity,'capabilities':[CAPABILITY] if self.role=='ai' else [RENDER_SHARE_CAPABILITY,RENDER_SHARE_V1_CAPABILITY]});job=response['job']
+        response=self.api('worker/'+self.role+'/claim',{'worker_id':self.identity,'capabilities':[CAPABILITY,LEARNING_PLAN_CAPABILITY] if self.role=='ai' else [RENDER_SHARE_CAPABILITY,RENDER_SHARE_V1_CAPABILITY]});job=response['job']
         if not job:self.state(status='ready');return False
         identity=job['id'];local=self.root/'jobs'/identity/hashlib.sha256(job['token'].encode()).hexdigest()[:24];local.mkdir(parents=True,exist_ok=True)
         self.state(status='working',job_id=identity);atomic(local/'job.json',job)
