@@ -221,7 +221,7 @@ in-range list. Moment anchors use original-recording time, optionally with an en
 Untimed notes belong in **Edit clip** or **Edit video**, with their history and
 archive state preserved. Like/dislike are entity reactions outside Moments.
 
-Use **More video actions → Review cuts** for processing-quality reports, including
+Use **More video actions → Review cut** for processing-quality reports, including
 early/late boundaries and downtime. These are tied to the reviewed publication;
 no processing job or training label is generated automatically. Changed cuts and
 removed moments remain visible as historical/unavailable metadata.
@@ -253,3 +253,5 @@ retained; a captioned mark is preferred as the active highlight.
 
 See [serving entities and processing annotations](docs/ENTITY-MODEL.md) for Session,
 Video/version, Clip, Moment, metadata ownership, reprocessing and compatibility APIs.
+
+Cut review, worker diagnostics, explicit feedback-guided reruns and retained version comparison are documented in [CUT-REVIEW.md](docs/CUT-REVIEW.md). The optional processing API bridge uses metadata only; candidate activation remains an explicit processing-server action.

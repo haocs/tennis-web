@@ -13,16 +13,19 @@ from entity_model import classify, record_class, output_version
 
 SCOPES = {'point', 'interval', 'clip', 'video'}
 CUT_REASONS = {'poor_cut', 'no_play', 'downtime', 'too_short', 'wrong_player',
-               'start_early', 'start_late', 'end_early', 'end_late'}
+               'start_early', 'start_late', 'end_early', 'end_late',
+               'lost_player', 'split_rally', 'missed_play'}
+CUT_VERDICTS = {'good_cut', 'needs_adjustment', 'poor_cut', 'missed_play'}
 KINDS = {
     'note': dict(domain='application', scopes=sorted(SCOPES)),
     'highlight': dict(domain='application', scopes=['point', 'interval']),
     'usefulness': dict(domain='entity_metadata', scopes=['clip', 'video']),
-    'cut_feedback': dict(domain='processing_feedback', scopes=['clip']),
+    'cut_feedback': dict(domain='processing_feedback', scopes=['clip', 'interval']),
     'processing_label': dict(domain='processing_feedback', scopes=sorted(SCOPES)),
     'coach': dict(domain='coaching', scopes=['interval'], read_only=True),
 }
 SOURCE_ID = re.compile(r'[a-f0-9]{64}')
+VERSION_ID = re.compile(r'v_[a-f0-9]{32}')
 
 
 def canonical(value):
@@ -39,7 +42,27 @@ class AnnotationConflict(ValueError):
         self.current = current
 
 
-def validate_body(kind, body, *, allow_empty=False):
+def removed_gaps_ms(data):
+    duration_ms = max(0, round(float(data['source']['duration_seconds']) * 1000))
+    clips = sorted(
+        ((round(float(c['original_start_seconds']) * 1000), round(float(c['original_end_seconds']) * 1000))
+         for c in data.get('clips', []) if float(c['original_end_seconds']) > float(c['original_start_seconds'])),
+        key=lambda b: (b[0], b[1]),
+    )
+    if not clips:
+        return [(0, duration_ms)] if duration_ms > 0 else []
+    gaps = []
+    if clips[0][0] > 0:
+        gaps.append((0, clips[0][0]))
+    for (s1, e1), (s2, e2) in zip(clips, clips[1:]):
+        if e1 < s2:
+            gaps.append((e1, s2))
+    if clips[-1][1] < duration_ms:
+        gaps.append((clips[-1][1], duration_ms))
+    return gaps
+
+
+def validate_body(kind, body, *, allow_empty=False, target=None, data=None):
     if not isinstance(body, dict):
         raise ValueError('Expected note details')
     text = body.get('text', '')
@@ -58,13 +81,57 @@ def validate_body(kind, body, *, allow_empty=False):
             raise ValueError('Choose a valid usefulness reason')
         result.update(value='less_useful', reason=reason)
     if kind == 'cut_feedback':
-        allowed.add('reasons')
-        reasons = body.get('reasons')
-        if (not isinstance(reasons, list) or not reasons or len(reasons) > len(CUT_REASONS)
+        allowed |= {'reasons', 'verdict', 'suggested_start_ms', 'suggested_end_ms', 'heuristic_ref'}
+        verdict = body.get('verdict')
+        if verdict is not None and (not isinstance(verdict, str) or verdict not in CUT_VERDICTS):
+            raise ValueError('Choose a valid cut verdict')
+        reasons = body.get('reasons', [] if verdict is not None else None)
+        if reasons is None and verdict is not None:
+            reasons = []
+        if (not isinstance(reasons, list) or len(reasons) > len(CUT_REASONS)
                 or any(not isinstance(r, str) or r not in CUT_REASONS for r in reasons)
-                or len(set(reasons)) != len(reasons)):
+                or len(set(reasons)) != len(reasons)
+                or (not reasons and verdict is None)):
             raise ValueError('Choose at least one cut issue')
+        s_start = body.get('suggested_start_ms')
+        s_end = body.get('suggested_end_ms')
+        if s_start is not None and (type(s_start) is not int or s_start < 0):
+            raise ValueError('Suggested start must be within the original recording')
+        if s_end is not None and (type(s_end) is not int or s_end <= 0):
+            raise ValueError('Suggested end must be within the original recording')
+        if s_start is not None and s_end is not None and s_start >= s_end:
+            raise ValueError('Suggested end must be after suggested start')
+        heuristic_ref = body.get('heuristic_ref')
+        if heuristic_ref is not None:
+            if not isinstance(heuristic_ref, str) or not heuristic_ref.strip() or len(heuristic_ref.strip()) > 80 or not re.fullmatch(r'[A-Za-z0-9_.:-]+', heuristic_ref.strip()):
+                raise ValueError('Invalid heuristic reference')
+            heuristic_ref = heuristic_ref.strip()
+        if target is not None and data is not None:
+            duration_ms = round(float(data['source']['duration_seconds']) * 1000)
+            if target.get('scope') == 'clip':
+                if verdict == 'missed_play':
+                    raise ValueError('Missed play verdict applies to a removed gap interval')
+                clip = next((c for c in data['clips'] if c['id'] == target.get('clip_id')), None)
+                if clip and (s_start is not None or s_end is not None):
+                    clip_start_ms = round(float(clip['original_start_seconds']) * 1000)
+                    clip_end_ms = round(float(clip['original_end_seconds']) * 1000)
+                    eff_start = s_start if s_start is not None else clip_start_ms
+                    eff_end = s_end if s_end is not None else clip_end_ms
+                    if not (0 <= eff_start < eff_end <= duration_ms):
+                        raise ValueError('Suggested bounds must stay within the original recording and form a valid start/end pair')
+            elif target.get('scope') == 'interval':
+                if s_start is not None or s_end is not None:
+                    raise ValueError('Gap interval reports use the target interval bounds')
+                if verdict == 'good_cut':
+                    raise ValueError('A removed gap cannot be marked as a good clip cut')
+        result['verdict'] = verdict
         result['reasons'] = sorted(reasons)
+        if s_start is not None:
+            result['suggested_start_ms'] = s_start
+        if s_end is not None:
+            result['suggested_end_ms'] = s_end
+        if heuristic_ref is not None:
+            result['heuristic_ref'] = heuristic_ref
     if kind == 'processing_label':
         allowed |= {'label','value','confidence'}
         label=body.get('label');confidence=body.get('confidence')
@@ -114,6 +181,19 @@ def validate_target(kind, target, data):
         result['clip_id'] = clip['id']
     elif 'clip_id' in target:
         raise ValueError('Only a clip target has a clip reference')
+    elif kind == 'cut_feedback' and scope == 'interval':
+        start_ms = round(float(start) * 1000)
+        end_ms = round(float(end) * 1000)
+        overlaps_clip = any(
+            max(float(start), float(c['original_start_seconds'])) < min(float(end), float(c['original_end_seconds'])) - 1e-6
+            for c in data['clips']
+        )
+        inside_single_gap = any(
+            g_start <= start_ms < end_ms <= g_end
+            for g_start, g_end in removed_gaps_ms(data)
+        )
+        if overlaps_clip or not inside_single_gap:
+            raise ValueError('Missed-play interval must be wholly inside a removed gap')
     return result
 
 
@@ -128,6 +208,8 @@ def coverage(spans):
 def project(annotation, data):
     """Return a derived view. Never mutate a saved selector to fit a new cut."""
     result = classify(annotation)
+    if result['kind'] == 'cut_feedback' and isinstance(result.get('body'), dict):
+        result['body'].setdefault('verdict', None)
     target = result['target'];scope = target['scope']
     result.update(related_clip_ids=[], visible_intervals=[], relation='unavailable', playback_eligible=False,
                   training_label_status='not_released')
@@ -166,6 +248,9 @@ def project(annotation, data):
         # A clip judgment cannot decorate a split/merged/expanded cut by overlap.
         result['playback_eligible'] = bool(exact_clips)
         result['matched_clip_ids'] = exact_clips
+    elif result['kind'] == 'cut_feedback' and scope == 'interval' and not result['visible_intervals']:
+        result['relation'] = 'removed_gap'
+        result['playback_eligible'] = False
     elif result['visible_intervals']:
         result['relation'] = 'retained'
         result['playback_eligible'] = True

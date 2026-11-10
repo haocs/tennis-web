@@ -36,3 +36,8 @@
 !worker/tennis_coach/
 !worker/tennis_coach/__init__.py
 !worker/tennis_coach/annotations.py
+
+!cut_diagnostics.py
+!cut_reprocess.py
+!cut_comparisons.py
+!processing_bridge.py

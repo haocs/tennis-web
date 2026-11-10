@@ -17,7 +17,7 @@ Watch supports quick highlights at the playhead, a reversible less-useful clip
 flag, and a compact moments/notes list with edit/archive and jump actions. A note
 editor supports moment, interval, clip and recording targets. Current clip rows
 show highlights/usefulness and a Highlights filter. Cut-report editing lives on
-a separate Review cuts page reached from More actions, with source timestamps,
+a separate Review cut page reached from More actions, with source timestamps,
 original clip bounds, reason flags and comments. No new ML training or detector
 is part of this release.
 

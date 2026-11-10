@@ -209,3 +209,46 @@ def test_adjacent_clip_moments_are_half_open_and_spanning_moments_keep_original_
     spanning=c.post('/api/moments',json={**base,'start_ms':14000,'end_ms':16000,'request_id':'clip-boundary-range-001'},headers=H)
     assert spanning.status_code==201 and spanning.json['clip_ids']==[CLIP,'c'*24]
     assert spanning.json['start_ms']==14000 and spanning.json['end_ms']==16000
+
+
+def test_admit_version_immutability_and_collision_rejection(setup):
+    import pytest
+    app,root,data=setup;c=app.test_client()
+    catalog=app.extensions['entity_catalog']
+    v1_id=output_version(ID,data['published_at'])
+    before=catalog.version_manifest(ID,v1_id)
+    assert before is not None
+
+    # Admitting a historical version with update_current_serving=False does not change current_version_id
+    older=copy.deepcopy(data);older['published_at']-=500
+    older_id=catalog.admit_version(older,update_current_serving=False)
+    with catalog.db() as db:
+        assert db.execute('SELECT current_version_id FROM videos WHERE id=?',(ID,)).fetchone()['current_version_id']==v1_id
+    assert catalog.version_manifest(ID,older_id)['published_at']==older['published_at']
+
+    # Collisions across clips, video duration, source metadata, media_directory, or processing are rejected
+    for mutator in (
+        lambda d: d['clips'][0].update(original_end_seconds=16),
+        lambda d: d['video'].update(duration_seconds=12),
+        lambda d: d['source'].update(duration_seconds=25),
+        lambda d: d.update(media_directory='f'*64),
+        lambda d: d.update(processing={'run_id':'tampered'}),
+    ):
+        tampered=copy.deepcopy(data)
+        mutator(tampered)
+        with pytest.raises(ValueError,match='collision'):
+            catalog.admit_version(tampered)
+        assert catalog.version_manifest(ID,v1_id)==before
+
+    # Public versions endpoint returns 409 without overwriting retained manifest on generation collision
+    tampered_disk=copy.deepcopy(data);tampered_disk['video']['duration_seconds']=11
+    publish(root,tampered_disk)
+    resp=c.get(f'/api/processing/videos/{ID}/versions')
+    assert resp.status_code==409
+    assert catalog.version_manifest(ID,v1_id)==before
+
+    # Malformed or non-finite version_manifest lookup returns None cleanly
+    assert catalog.version_manifest(ID,'not-a-version') is None
+    with catalog.db() as db:
+        db.execute('INSERT INTO video_versions VALUES(?,?,?)',('v_'+'9'*32,ID,'{"id":"'+ID+'","published_at":"bad"}'))
+    assert catalog.version_manifest(ID,'v_'+'9'*32) is None

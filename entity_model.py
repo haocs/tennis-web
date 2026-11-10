@@ -2,16 +2,34 @@
 import copy
 import hashlib
 import json
+import math
+import re
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 from practices import group_recordings, recording_time
 
+VERSION_ID_RE = re.compile(r'v_[a-f0-9]{32}')
+
 
 def output_version(source, publication):
     # Publication is the v1 publisher's immutable generation token, not capture time.
-    raw = json.dumps([source, float(publication)], separators=(',', ':'))
+    pub = float(publication)
+    if not math.isfinite(pub):
+        raise ValueError('Publication timestamp must be finite')
+    raw = json.dumps([source, pub], separators=(',', ':'), allow_nan=False)
     return 'v_' + hashlib.sha256(raw.encode()).hexdigest()[:32]
+
+
+def canonical_manifest(v):
+    manifest = {k: copy.deepcopy(v[k]) for k in ('id', 'source', 'published_at', 'video', 'clips', 'processing', 'artifact_directory', 'media_directory') if k in v}
+    manifest['clips'] = [{k: c[k] for k in ('id', 'index', 'file', 'original_start_seconds', 'original_end_seconds', 'duration_seconds', 'playback_start_seconds', 'playback_end_seconds')} for c in v['clips']]
+    manifest['video'] = {k: val for k, val in v['video'].items() if k != 'nas_url'}
+    return manifest
+
+
+def _canonical_json(value):
+    return json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False)
 
 
 def clip_identity(data, clip_id):
@@ -81,6 +99,50 @@ class EntityCatalog:
         try:yield db
         finally:db.close()
 
+    def _check_version_collision(self, existing_row, video_id, manifest):
+        if existing_row['video_id'] != video_id:
+            raise ValueError('Video version collision across different video IDs')
+        old = json.loads(existing_row['manifest'])
+        if _canonical_json(canonical_manifest(old)) != _canonical_json(manifest):
+            raise ValueError('Video version collision with different manifest contents')
+
+    def _write_version_manifest(self, db, v, *, update_current_serving=False, strict_collision=True):
+        version = output_version(v['id'], v['published_at'])
+        manifest = canonical_manifest(v)
+        existing = db.execute('SELECT video_id,manifest FROM video_versions WHERE id=?', (version,)).fetchone()
+        if existing and strict_collision:
+            self._check_version_collision(existing, v['id'], manifest)
+        if update_current_serving:
+            db.execute('INSERT INTO videos VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET current_version_id=excluded.current_version_id WHERE current_version_id<>excluded.current_version_id', (v['id'], v['id'], version))
+        if not existing:
+            for clip in v['clips']:
+                descriptor = {k: clip[k] for k in ('id', 'index', 'file', 'original_start_seconds', 'original_end_seconds', 'duration_seconds', 'playback_start_seconds', 'playback_end_seconds')}
+                db.execute('INSERT OR IGNORE INTO clips VALUES(?,?,?)', (clip_identity(v, clip['id']), version, json.dumps(descriptor)))
+            db.execute('INSERT OR IGNORE INTO original_recordings VALUES(?,?)', (v['id'], json.dumps(v['source'])))
+            db.execute('INSERT OR IGNORE INTO video_versions VALUES(?,?,?)', (version, v['id'], json.dumps(manifest)))
+        return version
+
+    def admit_version(self, recording, *, update_current_serving=False):
+        """Admit a validated version manifest without changing current_version_id unless serving."""
+        v = copy.deepcopy(recording)
+        version = output_version(v['id'], v['published_at'])
+        manifest = canonical_manifest(v)
+        with self.db() as db:
+            existing = db.execute('SELECT video_id,manifest FROM video_versions WHERE id=?', (version,)).fetchone()
+            vid_row = db.execute('SELECT current_version_id FROM videos WHERE id=?', (v['id'],)).fetchone() if update_current_serving else None
+            if existing:
+                self._check_version_collision(existing, v['id'], manifest)
+                if not update_current_serving or (vid_row and vid_row['current_version_id'] == version):
+                    return version
+            db.execute('BEGIN IMMEDIATE')
+            version = self._write_version_manifest(db, v, update_current_serving=update_current_serving, strict_collision=True)
+            db.commit()
+        return version
+
+    def sync_serving_video(self, recording):
+        """Ingest the active serving session manifest and update videos.current_version_id."""
+        return self.admit_version(recording, update_current_serving=True)
+
     def sync(self, recordings, gap_minutes=30):
         """New recordings may join a session; existing membership never regroups."""
         values=copy.deepcopy(recordings)
@@ -90,17 +152,7 @@ class EntityCatalog:
             db.execute('BEGIN IMMEDIATE')
             memberships={r['video_id']:r['session_id'] for r in db.execute('SELECT * FROM session_members')}
             for v in values:
-                version=output_version(v['id'],v['published_at'])
-                db.execute('INSERT INTO videos VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET current_version_id=excluded.current_version_id WHERE current_version_id<>excluded.current_version_id',(v['id'],v['id'],version))
-                for clip in v['clips']:
-                    descriptor={k:clip[k] for k in ('id','index','file','original_start_seconds','original_end_seconds','duration_seconds','playback_start_seconds','playback_end_seconds')}
-                    db.execute('INSERT OR IGNORE INTO clips VALUES(?,?,?)',(clip_identity(v,clip['id']),version,json.dumps(descriptor)))
-                db.execute('INSERT OR IGNORE INTO original_recordings VALUES(?,?)',(v['id'],json.dumps(v['source'])))
-                manifest={k:copy.deepcopy(v[k]) for k in ('id','source','published_at','video','clips','processing','artifact_directory','media_directory') if k in v}
-                manifest['clips']=[{k:c[k] for k in ('id','index','file','original_start_seconds','original_end_seconds','duration_seconds','playback_start_seconds','playback_end_seconds')} for c in v['clips']]
-                manifest['video']={k:val for k,val in manifest['video'].items() if k!='nas_url'}
-                db.execute('INSERT OR IGNORE INTO video_versions VALUES(?,?,?)',
-                    (version,v['id'],json.dumps(manifest)))
+                self._write_version_manifest(db, v, update_current_serving=True, strict_collision=False)
             for group in proposals:
                 existing=[memberships[i] for i in group['recording_ids'] if i in memberships]
                 identity=existing[0] if existing else group['id']
@@ -141,6 +193,28 @@ class EntityCatalog:
 
     def versions(self, video_id):
         with self.db() as db:return [dict(id=r['id'],video_id=video_id,manifest=json.loads(r['manifest'])) for r in db.execute('SELECT * FROM video_versions WHERE video_id=? ORDER BY rowid',(video_id,))]
+
+    def version_manifest(self, video_id, version_id):
+        if not isinstance(video_id, str) or not isinstance(version_id, str) or not VERSION_ID_RE.fullmatch(version_id):
+            return None
+        with self.db() as db:
+            row = db.execute('SELECT * FROM video_versions WHERE id=? AND video_id=?', (version_id, video_id)).fetchone()
+        if not row:
+            return None
+        try:
+            manifest = json.loads(row['manifest'])
+            if (not isinstance(manifest, dict) or manifest.get('id') != video_id
+                    or not isinstance(manifest.get('source'), dict) or not isinstance(manifest.get('clips'), list)
+                    or not isinstance(manifest.get('video'), dict)):
+                return None
+            pub = manifest.get('published_at')
+            if type(pub) not in (int, float) or not math.isfinite(pub):
+                return None
+            if output_version(video_id, pub) != version_id:
+                return None
+        except (ValueError, TypeError, KeyError):
+            return None
+        return manifest
 
     def decorate(self, data):
         data['entity_type']='video';data['original_recording_id']=data['id'];data['video_version_id']=output_version(data['id'],data['published_at'])
