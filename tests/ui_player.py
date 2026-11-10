@@ -537,45 +537,103 @@ def test_single_fullscreen_action_across_mobile_and_desktop(browser, ui_server):
 def test_structured_coaching_evidence_review_and_draft(browser, ui_server, width):
     """Browser rendering contract; real validation/retention is covered by API tests."""
     import base64
-    page=browser.new_page(viewport={'width':width,'height':844})
+    page=browser.new_page(viewport={'width':width,'height':844},has_touch=width<761)
     errors=[];page.on('pageerror',lambda e:errors.append(str(e)))
     source=page.request.get(ui_server+'/api/sessions/'+ID).json()
     publication=source['published_at']
     frame=dict(frame_id='f_test',order=1,sha256='e'*64,original_seconds=.5,clip_seconds=.5,excerpt_seconds=1)
     content=dict(title='Balanced reset',topic='Ready position',observation='A narrow stance in this still.',cue='Reset with soft knees.',drill='Recover and hold.',uncertainty='Stills cannot confirm split-step timing.',evidence_frame_ids=['f_test'],applies_to=[dict(start_seconds=.25,end_seconds=1.5)],validation_warnings=[],timing_status='timed')
     annotation=dict(id='a_test',job_id='job-test',current=content,proposal=copy.deepcopy(content),status='proposed',historical=False,playback_eligible=False,version=1,provenance=dict(clip_id=CLIP,publication=publication),related_clip_ids=[CLIP])
-    job=dict(id='job-test',version=1,role='ai',state='completed',body=dict(source_id=ID,clip_id=CLIP,publication=publication,export_id='render-test',original_start=0,original_end=1.8,start=0,end=1.8,prompt='Check balance',evidence_frames=[frame]),result=dict(answer='Original test response',structured=dict(summary='One observable improvement.',validation_warnings=[],parse_status='valid')))
+    job=dict(id='job-test',version=1,role='ai',state='completed',asked_at=1700000100.0,updated=1700000200.0,body=dict(source_id=ID,clip_id=CLIP,publication=publication,export_id='render-test',original_start=0,original_end=1.8,start=0,end=1.8,prompt='Check balance',evidence_frames=[frame]),result=dict(answer='Original test response',structured=dict(summary='One observable improvement.',validation_warnings=[],parse_status='valid')))
     rendered=dict(id='render-test',version=1,role='render',state='completed',body=dict(source_id=ID,clip_id=CLIP,publication=publication,start=0,end=1.8,original_start=0,original_end=1.8,speed=.5,crop=[0,0,1,1]),result=dict(bytes=1000,output_seconds=3.6,frames=[frame]))
     state=dict(jobs=[job,rendered],annotations=[annotation],workers=[],enabled=True)
     page.route('**/api/coaching/exports/render-test/excerpt.mp4',lambda route:route.fulfill(body=(Path(__file__).parent/'fixtures/clip.mp4').read_bytes(),content_type='video/mp4'))
     page.route('**/api/coaching/sessions/*',lambda route:route.fulfill(json=state))
     png=base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jWZkAAAAASUVORK5CYII=')
     page.route('**/api/coaching/evidence/*/*.jpg',lambda route:route.fulfill(body=png,content_type='image/png'))
+    fail_next_update={'conflict':False}
     def update(route):
+        if fail_next_update['conflict']:
+            fail_next_update['conflict']=False
+            route.fulfill(status=409,json=dict(error='This suggestion changed. Reload before saving your review'))
+            return
         body=route.request.post_data_json
         assert body['version']==annotation['version']
+        if 'content' in body:
+            annotation['current']=dict(annotation['current'],**body['content'])
         annotation.update(status=body['status'],version=annotation['version']+1,playback_eligible=body['status']=='accepted')
         route.fulfill(json=annotation)
     page.route('**/api/coaching/annotations/a_test',update)
-    page.goto(ui_server+f'/review/{ID}?clip={CLIP}')
-    page.get_by_role('button',name='Study clip',exact=True).click()
-    if width<761:page.get_by_role('button',name='Coach',exact=True).click()
+    page.goto(ui_server+f'/review/{ID}?clip={CLIP}&coach_job=job-test&coach_annotation=a_test&coach_time=0.25')
+    expect(page.locator('#clip-study')).to_be_visible()
+    expect(page.locator('#study-pin-start')).to_have_text('')
+    expect(page.locator('#study-pin-end')).to_have_text('')
+    pin_dims=page.locator('#study-pin-start').evaluate('el=>{const s=getComputedStyle(el);return [parseFloat(s.width),parseFloat(s.height),parseFloat(s.minWidth),parseFloat(s.minHeight)];}')
+    assert all(v>=44 for v in pin_dims)
+    assert float(page.locator('#study-pin-start').get_attribute('aria-valuenow'))==pytest.approx(0.25,abs=0.05)
+    assert float(page.locator('#study-pin-end').get_attribute('aria-valuenow'))==pytest.approx(1.5,abs=0.05)
     question=page.get_by_role('textbox',name='Question for coach',exact=True)
     question.fill('Keep my custom question')
     expect(page.get_by_role('heading',name='Balanced reset',exact=True)).to_be_visible()
+    expect(page.locator('.coach-asked-at')).to_contain_text('Asked ')
     card=page.locator('.coach-suggestion')
-    expect(card.get_by_text('Needs your review',exact=True)).to_be_visible()
+    expect(card).to_have_class(re.compile(r'\bis-highlighted\b'))
+    expect(card.locator('.coach-review-state')).to_have_text('Needs your review')
+    expect(card.get_by_role('button',name='Save',exact=True)).to_have_count(0)
+    expect(card.get_by_role('button',name='Use in playback',exact=True)).to_be_visible()
+    card.get_by_role('button',name='Use in playback',exact=True).click()
+    expect(card.locator('.coach-review-state')).to_have_text('Saved · Active in playback')
+    expect(card.get_by_role('button',name='Use in playback',exact=True)).to_have_count(0)
+    expect(card.get_by_role('button',name='Save',exact=True)).to_have_count(0)
     image=card.locator('img');expect(image).to_be_visible()
     expect(image).to_have_attribute('src','/api/coaching/evidence/job-test/f_test.jpg')
     card.get_by_role('button',name=re.compile('Frame 1')).click()
     assert page.locator('#study-video').evaluate('v=>v.currentTime')==pytest.approx(.5,abs=.08)
-    card.get_by_role('button',name='Discard',exact=True).click()
-    expect(page.locator('.coach-review-state')).to_have_text('Discarded')
-    card.get_by_role('button',name='Save',exact=True).click()
-    expect(page.locator('.coach-review-state')).to_have_text('Saved')
-    assert page.locator('#clip-study').evaluate('d=>d.scrollWidth<=d.clientWidth')
-    page.get_by_role('button',name='← Back to review',exact=True).click()
+    # Failed save (409 conflict) keeps dirty state so top-right × still protects unsaved edits.
+    card.locator('.coach-editor summary').click()
+    card.get_by_label('Playback cue',exact=True).fill('Unsaved edited cue')
+    fail_next_update['conflict']=True
+    card.get_by_role('button',name='Save edits and accept',exact=True).click()
+    expect(page.locator('#coach-status')).to_contain_text('This suggestion changed. Reload before saving your review')
+    expect(card.get_by_label('Playback cue',exact=True)).to_have_value('Unsaved edited cue')
+    card.get_by_role('button',name='Discard suggestion',exact=True).click()
+    expect(page.locator('#coach-status')).to_contain_text('Save or reset your edits before discarding')
+    expect(card.locator('.coach-review-state')).to_have_text('Saved · Active in playback')
+    # Reset edits restores the saved cue and clears dirty state, and successful save also clears dirty state.
+    card.get_by_role('button',name='Reset edits',exact=True).click()
+    expect(page.locator('#coach-status')).to_have_text('Edits reset.')
+    card.locator('.coach-editor summary').click()
+    expect(card.get_by_label('Playback cue',exact=True)).to_have_value('Reset with soft knees.')
+    card.get_by_label('Playback cue',exact=True).fill('Saved edited cue')
+    card.get_by_role('button',name='Save edits and accept',exact=True).click()
+    expect(page.locator('#coach-status')).to_have_text('Suggestion saved.')
+    card.get_by_role('button',name='Discard suggestion',exact=True).click()
+    expect(card.locator('.coach-review-state')).to_have_text('Discarded')
+    card.get_by_role('button',name='Restore',exact=True).click()
+    expect(card.locator('.coach-review-state')).to_have_text('Saved · Active in playback')
+    # Missing exact suggestion shows a truthful notice instead of silently masquerading parent response as the suggestion.
+    page.evaluate("()=>window.Coach.focusTarget({clipId: '"+CLIP+"', jobId: 'job-test', annotationId: 'a_missing', startSeconds: 0.4, endSeconds: 1.2})")
+    expect(page.locator('#coach-status')).to_contain_text('The selected coaching suggestion is unavailable; showing its parent coaching review.')
+    expect(page.locator('.coach-suggestion.is-highlighted')).to_have_count(0)
+    # Deferred loadedmetadata seek callback is fenced if Study closes and reopens before old metadata arrives.
+    page.evaluate("""() => {
+      const v = document.getElementById('study-video');
+      Object.defineProperty(v, 'readyState', {configurable: true, get: () => 0});
+      window.Coach.focusTarget({clipId: '"""+CLIP+"""', jobId: 'job-test', annotationId: 'a_test', startSeconds: 1.1, endSeconds: 1.5});
+      document.getElementById('study-close').click();
+      delete v.readyState;
+    }""")
     page.get_by_role('button',name='Study clip',exact=True).click()
+    page.wait_for_function("() => document.getElementById('study-video')?.readyState >= 1")
+    page.evaluate("""() => {
+      const v = document.getElementById('study-video');
+      v.pause();
+      v.currentTime = 0.2;
+      v.dispatchEvent(new Event('loadedmetadata'));
+    }""")
+    assert page.locator('#study-video').evaluate('v=>v.currentTime')!=pytest.approx(1.1,abs=0.05)
+    assert page.locator('#clip-study').evaluate('d=>d.scrollWidth<=d.clientWidth')
+    assert not page.evaluate('document.documentElement.scrollWidth>innerWidth')
     if width<761:page.get_by_role('button',name='Coach',exact=True).click()
     expect(question).to_have_value('Keep my custom question')
     page.get_by_role('button',name='Re-ask',exact=True).click()
@@ -882,16 +940,19 @@ def test_learning_navigation_saved_reviews_and_player_switch(browser,ui_server):
         created=page.request.post(ui_server+'/api/players',headers={'X-Tennis-Request':'1'},data={'name':'Learner','height_cm':None,'level':'beginner'}).json()
         players=[created]
     person=players[0];c=page.request.get(ui_server+f'/api/sessions/{ID}').json()['clips'][0]
-    entry=dict(id=ID+':'+CLIP,source_id=ID,clip_id=CLIP,clip_index=1,title='Saved coaching fixture',recorded_at='2026-10-24T17:00:00-07:00',original_start=0,original_end=2,duration_seconds=2,media_available=True,poster_url=f'/api/sessions/{ID}/clips/{CLIP}/poster',reviews=[dict(id='saved-review',original_start=.25,original_end=1.25,updated_at=1,summary='Reset with balance.',answer='Recover with soft knees.',historical=False,player_mismatch=False,association='review',answer_truncated=False)])
-    page.route('**/api/learning?*',lambda route:route.fulfill(json={'entries':[entry],'next_after':None}))
+    older_clip_newer_ask=dict(id=ID+':'+CLIP,source_id=ID,clip_id=CLIP,clip_index=1,title='Older recording newer ask',recorded_at='2026-10-20T17:00:00-07:00',original_start=0,original_end=2,duration_seconds=2,media_available=True,poster_url=f'/api/sessions/{ID}/clips/{CLIP}/poster',reviews=[dict(id='saved-review-newer',original_start=.25,original_end=1.25,asked_at=1700005000.0,updated_at=1700005100.0,summary='Reset with balance.',answer='Recover with soft knees.',historical=False,player_mismatch=False,association='review',answer_truncated=False)])
+    newer_clip_older_ask=dict(id=ID+':'+('c'*24),source_id=ID,clip_id='c'*24,clip_index=2,title='Newer recording older ask',recorded_at='2026-10-24T17:00:00-07:00',original_start=2,original_end=4,duration_seconds=2,media_available=True,poster_url=f'/api/sessions/{ID}/clips/{"c"*24}/poster',reviews=[dict(id='saved-review-older',original_start=2.2,original_end=3.2,asked_at=1700001000.0,updated_at=1700009000.0,summary='Earlier ask.',answer='Earlier answer.',historical=False,player_mismatch=False,association='review',answer_truncated=False)])
+    page.route('**/api/learning?*',lambda route:route.fulfill(json={'entries':[newer_clip_older_ask,older_clip_newer_ask],'next_after':None}))
     page.goto(ui_server+'/')
     page.get_by_role('link',name='Learning',exact=True).click()
     expect(page.get_by_role('heading',name='Learning',exact=True)).to_be_visible()
     page.get_by_role('combobox',name='Learning player',exact=True).select_option(person['id'])
-    expect(page.locator('.learning-card')).to_have_count(1)
-    expect(page.locator('.learning-card')).to_contain_text('Reset with balance.')
-    page.locator('.learning-review summary').click()
-    expect(page.locator('.learning-answer')).to_have_text('Recover with soft knees.')
+    expect(page.locator('.learning-card')).to_have_count(2)
+    assert page.locator('.learning-card h2').evaluate_all('els=>els.map(e=>e.textContent)')==['Older recording newer ask · Clip 1','Newer recording older ask · Clip 2']
+    expect(page.locator('.learning-card').first).to_contain_text('Reset with balance.')
+    expect(page.locator('.learning-card').first.locator('.learning-asked-at')).to_contain_text('Asked ')
+    page.locator('.learning-review summary').first.click()
+    expect(page.locator('.learning-answer').first).to_have_text('Recover with soft knees.')
     page.get_by_role('combobox',name='Learning player',exact=True).select_option('')
     expect(page.locator('.learning-card')).to_have_count(0)
     for width in (320,390,1280):
@@ -1162,7 +1223,7 @@ def test_moment_cues_default_durations_ranges_and_collapsed_area(browser,ui_serv
     expect(page.locator('[data-active-moment="coach-point"]')).to_be_visible()
     with_two_teasers=page.locator('#notes-panel').bounding_box()
     assert with_two_teasers['height']>with_teaser['height']+20
-    expect(page.locator('[data-active-moment="coach-point"]')).to_have_count(0,timeout=4500)
+    expect(page.locator('[data-active-moment="coach-point"]')).to_have_count(0,timeout=6500)
     expect(page.locator('[data-active-moment="range"]')).to_be_visible()
     page.locator('#player').evaluate('v=>{v.currentTime=1.75;}')
     expect(page.locator('[data-active-moment="range"]')).to_have_count(0)
@@ -1249,10 +1310,14 @@ def test_moment_panel_scope_filters_jump_and_full_video(browser,ui_server,width)
 
 def test_structured_coaching_moment_renders_readable_cue(browser,ui_server):
     page=browser.new_page(viewport={'width':390,'height':844})
-    a=_playback_moment('structured-review','coach',.2,1.5)
+    a=_playback_moment('coach-response:job-review-link','coach',.2,1.5)
+    a['origin']=dict(type='ai',reference='job-review-link',job_id='job-review-link')
     a['body']=dict(response=True,text=json.dumps(dict(schema_version=2,summary='Recover after each shot.',suggestions=[dict(title='Ready position',cue='Bend knees.',drill='Reset ten times.')])) )
     a['playback_eligible']=False
     _mock_playback_moments(page,ui_server,[a])
+    source=page.request.get(ui_server+'/api/sessions/'+ID).json()
+    job=dict(id='job-review-link',version=1,role='ai',state='completed',asked_at=1700000100.0,updated=1700000200.0,body=dict(source_id=ID,clip_id=CLIP,publication=source['published_at'],export_id='render-test',original_start=.2,original_end=1.5,start=.2,end=1.5,prompt='Check recovery',evidence_frames=[]),result=dict(answer='Recover after each shot.',structured=dict(summary='Recover after each shot.',validation_warnings=[],parse_status='valid')))
+    page.route('**/api/coaching/sessions/*',lambda route:route.fulfill(json=dict(jobs=[job],annotations=[],workers=[],enabled=True)))
     page.goto(ui_server+f'/review/{ID}?clip={CLIP}')
     expect(page.locator('#video-seek')).to_be_enabled()
     expect(page.locator('#clip-list .clip-row').first.locator('.note-moment')).to_have_text('⚡')
@@ -1263,6 +1328,12 @@ def test_structured_coaching_moment_renders_readable_cue(browser,ui_server):
     page.get_by_text('Read saved response',exact=True).click()
     expect(page.locator('#notes-list')).to_contain_text('Cue: Bend knees.')
     expect(page.locator('#notes-list')).not_to_contain_text('schema_version')
+    page.get_by_role('button',name='Review coaching',exact=True).click()
+    expect(page.locator('#clip-study')).to_be_visible()
+    expect(page.locator('#clip-study')).to_have_attribute('data-mobile-mode','coach')
+    expect(page.locator('.coach-note[data-job="job-review-link"]')).to_have_class(re.compile(r'\bis-highlighted\b'))
+    assert float(page.locator('#study-pin-start').get_attribute('aria-valuenow'))==pytest.approx(0.2,abs=0.05)
+    assert float(page.locator('#study-pin-end').get_attribute('aria-valuenow'))==pytest.approx(1.5,abs=0.05)
     page.close()
 
 

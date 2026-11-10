@@ -157,8 +157,9 @@ def register_coaching(app,library,session):
                     if is_share and (inside(root,identity+'/'+fence+'/prompt.txt').exists() or any(inside(root,identity+'/'+fence).glob('frame-*.jpg'))):
                         raise ValueError('Unexpected coaching artifacts in share export')
                     result={k:saved[k] for k in ('frames','bytes','output_seconds','sha256','render_seconds')}
-                    if 'audio_output' in saved:
-                        result['audio_output']=saved['audio_output']
+                    for optional in ('audio_output','color_output','video_codec','pix_fmt','fps_output'):
+                        if optional in saved:
+                            result[optional]=saved[optional]
                     result['artifact_directory']=fence
                 except (ValueError,OSError,KeyError,TypeError) as e:abort(400,str(e))
             elif not isinstance(result,dict) or not isinstance(result.get('answer'),str) or not 1<=len(result['answer'])<=64000 or result.get('analysis_mode')!='timestamped_frames':

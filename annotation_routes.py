@@ -95,10 +95,10 @@ def register_annotations(app, library, session):
                           end_seconds=max(s['end_seconds'] for s in spans),selectors=spans)
             value = dict(id='coach:'+a['id'],schema_version=1,source_id=source,kind='coach',target=target,
                          body=dict(text=current.get('cue',''),suggestion=current,review_status=a['status'],timing_verified=bool(current['applies_to'])),
-                         context=dict(publication=provenance['publication']),origin=dict(type='ai',reference=a['id'],job_id=a['job_id'],provenance=provenance),
+                         context=dict(publication=provenance['publication']),origin=dict(type='ai',reference=a['id'],job_id=a['job_id'],asked_at=a.get('asked_at'),provenance=provenance),
                          player_id=(provenance.get('player_context') or {}).get('player_id'),
                          status='archived' if a['status']=='dismissed' else 'active',version=a['version'],
-                         updated_at=a['updated'],read_only=True,edit_url='/api/coaching/annotations/'+a['id'])
+                         asked_at=a.get('asked_at'),updated_at=a['updated'],read_only=True,edit_url='/api/coaching/annotations/'+a['id'])
             value = project(value, data)
             value['playback_eligible'] = value['playback_eligible'] and a['playback_eligible']
             result.append(value)
@@ -107,16 +107,16 @@ def register_annotations(app, library, session):
         if not after or after.startswith('coach-response:'):
             cursor=after[len('coach-response:'):] if after else ''
             with queue.db() as db:
-                jobs=db.execute("SELECT id,body,result,version,updated FROM jobs WHERE role='ai' AND state='completed' AND json_extract(body,'$.source_id')=? AND id>? ORDER BY id LIMIT 201",(source,cursor)).fetchall()
+                jobs=db.execute("SELECT id,body,result,version,updated,asked_at FROM jobs WHERE role='ai' AND state='completed' AND json_extract(body,'$.source_id')=? AND id>? ORDER BY id LIMIT 201",(source,cursor)).fetchall()
             for row in jobs:
                 body=json.loads(row['body']);answer=json.loads(row['result'])
                 target=dict(scope='interval',start_seconds=body['original_start'],end_seconds=body['original_end'])
                 value=dict(id='coach-response:'+row['id'],schema_version=1,source_id=source,kind='coach',target=target,
                     body=dict(text=answer.get('answer','')[:12000],response=True,timing_verified=False,text_truncated=len(answer.get('answer',''))>12000),
-                    context=dict(publication=body['publication']),origin=dict(type='ai',reference=row['id'],job_id=row['id'],
-                    provenance={k:body.get(k) for k in ('clip_id','publication','export_id','player_context')}),
+                    context=dict(publication=body['publication']),origin=dict(type='ai',reference=row['id'],job_id=row['id'],asked_at=row['asked_at'],
+                    provenance={**{k:body.get(k) for k in ('clip_id','publication','export_id','player_context')},'asked_at':row['asked_at']}),
                     player_id=(body.get('player_context') or {}).get('player_id'),status='active',version=row['version'],
-                    updated_at=row['updated'],read_only=True,edit_url='/api/coaching/jobs/'+row['id'])
+                    asked_at=row['asked_at'],updated_at=row['updated'],read_only=True,edit_url='/api/coaching/jobs/'+row['id'])
                 value=project(value,data);value['playback_eligible']=False;result.append(value)
         return result
 
@@ -250,7 +250,7 @@ def register_annotations(app, library, session):
         except ValueError:abort(400,'Invalid page size')
         if not 1<=limit<=50:abort(400,'Invalid page size')
         with queue.db() as db:
-            rows=db.execute("SELECT id,body,result,updated FROM jobs WHERE role='ai' AND state='completed' AND id>? AND (json_extract(body,'$.player_context.player_id')=? OR json_extract(body,'$.player_context.player_id') IS NULL) ORDER BY id LIMIT ?",(after,pid,limit+1)).fetchall()
+            rows=db.execute("SELECT id,body,result,updated,asked_at FROM jobs WHERE role='ai' AND state='completed' AND id>? AND (json_extract(body,'$.player_context.player_id')=? OR json_extract(body,'$.player_context.player_id') IS NULL) ORDER BY id LIMIT ?",(after,pid,limit+1)).fetchall()
         entries={};sources={}
         for row in rows[:limit]:
             body=json.loads(row['body']);result=json.loads(row['result']);sid=body['source_id']
@@ -276,12 +276,22 @@ def register_annotations(app, library, session):
                     original_start=clip['original_start_seconds'] if clip else start,original_end=clip['original_end_seconds'] if clip else end,
                     duration_seconds=clip['duration_seconds'] if clip else end-start,media_available=clip is not None,
                     poster_url=f'/api/sessions/{sid}/clips/{cid}/poster?v={data["published_at"]}' if clip else None,reviews=[]))
-                entry['reviews'].append(dict(id=row['id'],original_start=start,original_end=end,updated_at=row['updated'],
+                entry['reviews'].append(dict(id=row['id'],original_start=start,original_end=end,asked_at=row['asked_at'],updated_at=row['updated'],
                     summary=(result.get('structured') or {}).get('summary','') or result.get('answer','')[:400],
                     answer=result.get('answer','')[:12000],answer_truncated=len(result.get('answer',''))>12000,
                     historical=historical,player_mismatch=mismatch,association='review' if explicit else 'current_clip',
                     response_url='/api/coaching/jobs/'+row['id']))
-        return jsonify(entries=list(entries.values()),next_after=rows[limit-1]['id'] if len(rows)>limit else None)
+                entry['reviews'].sort(key=lambda r: (-(r['asked_at'] if r.get('asked_at') is not None else (r.get('updated_at') or 0)), r['id']))
+        ordered_entries=sorted(
+            entries.values(),
+            key=lambda e: (
+                -max(((r['asked_at'] if r.get('asked_at') is not None else (r.get('updated_at') or 0)) for r in e['reviews']), default=0),
+                e['source_id'],
+                e['original_start'],
+                e['id'],
+            ),
+        )
+        return jsonify(entries=ordered_entries,next_after=rows[limit-1]['id'] if len(rows)>limit else None)
 
     @app.get('/api/annotations/sources/<source>/export')
     def export(source):

@@ -2,7 +2,7 @@
    current playback coordinates and never changes a saved moment's target. */
 (function(root,factory){const api=factory();if(typeof module==='object'&&module.exports)module.exports=api;else root.MomentPlayback=api;})(typeof globalThis!=='undefined'?globalThis:this,()=>{
  'use strict';
- const defaults={highlight:3,coach:3,note:3};
+ const defaults={highlight:3,coach:5,note:3};
  const finite=x=>typeof x==='number'&&Number.isFinite(x);
  const msRound=x=>Math.round(Number(x)*1000)/1000;
  const msMin=x=>Math.ceil(Number(x)*1000-1e-6)/1000;
@@ -86,7 +86,18 @@
    const result=[],ids=new Set();
    for(const e of events){
     if(ids.has(e.id))continue;
-    if(!e.point){if(position>=e.start&&position<e.end){result.push(e);ids.add(e.id);}continue;}
+    if(!e.point){
+     const inRange=position>=e.start&&position<e.end;
+     const crossedRange=playing&&!discontinuity&&!backward&&this.previous!==null&&this.previous<e.start&&position>=e.start&&position-this.previous<=Math.max(1,rate);
+     if(e.kind==='coach'){
+      if((inRange||crossedRange)&&!this.points.has(e.key))this.points.set(e.key,now+e.duration*1000);
+      const expiresAt=this.points.get(e.key);
+      if(inRange||(expiresAt&&expiresAt>now)){result.push(expiresAt&&expiresAt>now?{...e,expiresAt}:e);ids.add(e.id);}
+     }else if(inRange){
+      result.push(e);ids.add(e.id);
+     }
+     continue;
+    }
     const near=position>=e.start&&position<e.start+e.duration;
     const crossed=playing&&!discontinuity&&!backward&&this.previous!==null&&this.previous<e.start&&position>=e.start&&position-this.previous<=Math.max(1,rate);
     if((near||crossed)&&!this.points.has(e.key))this.points.set(e.key,now+e.duration*1000);

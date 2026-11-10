@@ -6,7 +6,8 @@ import math
 SCHEMA_VERSION = 2
 PROMPT_VERSION = 'tennis-coach-evidence-v2'
 CAPABILITY = 'coaching-annotations-v1'
-RENDER_SHARE_CAPABILITY = 'share-export-v1'
+RENDER_SHARE_V1_CAPABILITY = 'share-export-v1'
+RENDER_SHARE_CAPABILITY = 'share-export-v2'
 TEXT_LIMITS = dict(title=120, topic=80, observation=1600, cue=400, drill=1200, uncertainty=1200)
 
 

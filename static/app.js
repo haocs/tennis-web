@@ -196,7 +196,27 @@ function review(s){model.session=s;nav();const query=new URLSearchParams(locatio
  $('#player-dev-mode').addEventListener('click',()=>{const on=model.playerControls?.toggleDevMode();$('#player-dev-mode').setAttribute('aria-pressed',String(!!on));$('.player-more').open=false;});
  $('#player-nas').addEventListener('click',()=>{const clip=model.mode==='clip'?s.clips.find(c=>c.id===model.current):null;$('.player-more').open=false;showNasAddress(s,clip);});
  $('#edit-session').addEventListener('click',openEdit);bindLikes($('.review-heading'));renderClipList();renderTimeline();
- const requested=s.clips.find(c=>c.id===query.get('clip'));if(requested)playClip(requested.id,false);NoteUI.mount(s);if(requested&&query.has('coach_job')){$('#study-clip').click();$('#study-mode-coach')?.click();$('#coach-step-4')?.click();}
+ const coachTime=query.has('coach_time')?Number(query.get('coach_time')):NaN;
+ const coachEnd=query.has('coach_end')?Number(query.get('coach_end')):NaN;
+ const hasCoachDeepLink=query.has('coach_job')||query.has('coach_annotation');
+ const findClipByOriginalTime=()=>{
+  if(!Number.isFinite(coachTime))return null;
+  if(Number.isFinite(coachEnd)&&coachEnd>coachTime){
+   return s.clips.find(c=>Math.max(c.original_start_seconds,coachTime)<Math.min(c.original_end_seconds,coachEnd))||null;
+  }
+  return s.clips.find(c=>c.original_start_seconds<=coachTime&&coachTime<c.original_end_seconds)||null;
+ };
+ const requested=s.clips.find(c=>c.id===query.get('clip'))||findClipByOriginalTime();
+ if(requested)playClip(requested.id,false);
+ NoteUI.mount(s);
+ if(hasCoachDeepLink){
+  if(requested){
+   window.Coach?.focusTarget?.({clipId:requested.id,jobId:query.get('coach_job')||null,annotationId:query.get('coach_annotation')||null,startSeconds:Number.isFinite(coachTime)?coachTime:null,endSeconds:Number.isFinite(coachEnd)?coachEnd:null});
+   $('#study-clip').click();
+  }else{
+   toast('This coaching moment is outside the current cuts.');
+  }
+ }
 }
 function updatePlayerDownload(){
  const s=model.session, clip=model.mode==='clip'?s.clips.find(c=>c.id===model.current):null;

@@ -5,6 +5,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import shutil
 import signal
 import subprocess
@@ -14,7 +15,7 @@ import time
 import urllib.request
 import urllib.error
 import uuid
-from .annotations import CAPABILITY, RENDER_SHARE_CAPABILITY, expected_frames, evidence_manifest, coaching_prompt, response_schema
+from .annotations import CAPABILITY, RENDER_SHARE_CAPABILITY, RENDER_SHARE_V1_CAPABILITY, expected_frames, evidence_manifest, coaching_prompt, response_schema
 
 
 def atomic(path,data):
@@ -48,36 +49,139 @@ def atempo_chain(speed):
 
 
 def source_has_audio(ff, src):
+    return probe_media(ff, src)['has_audio']
+
+
+def probe_media(ff, src):
     probe = subprocess.run([ff, '-hide_banner', '-i', str(src)], capture_output=True, text=True, timeout=15)
-    return 'Audio:' in (probe.stderr or '')
+    stderr = probe.stderr or ''
+    video_line = next((line.strip() for line in stderr.splitlines() if 'Video:' in line), '')
+    if not video_line:
+        raise ValueError('Selected clip has no readable video stream')
+    codec_match = re.search(r'Video:\s*([a-zA-Z0-9_]+)', video_line)
+    codec = codec_match.group(1).lower() if codec_match else ''
+    pix_match = re.search(r',\s*(yuv[a-z0-9]+|p010[a-z0-9]*|nv12|rgb[a-z0-9]*|gbr[a-z0-9]*)(?:\(([^)]*)\))?', video_line)
+    pix_fmt = pix_match.group(1).lower() if pix_match else ''
+    details = pix_match.group(2) if pix_match and pix_match.group(2) else ''
+    colorspace = primaries = transfer = ''
+    ignored = {'tv', 'pc', 'progressive', 'top first', 'bottom first', 'left', 'center', 'topleft', 'bottomleft', 'unspecified', 'unknown'}
+    for raw_token in details.split(','):
+        token = raw_token.strip().lower()
+        if not token or token in ignored:
+            continue
+        if '/' in token:
+            parts = [p.strip() for p in token.split('/')]
+            if len(parts) >= 3:
+                colorspace, primaries, transfer = parts[0], parts[1], parts[2]
+                break
+        elif token in ('bt709', 'smpte170m', 'bt470bg', 'bt2020'):
+            colorspace = primaries = transfer = token
+            break
+    fps_match = re.search(r'(\d+(?:\.\d+)?)\s*fps', video_line)
+    fps = float(fps_match.group(1)) if fps_match else 30.0
+    is_10bit = pix_fmt in ('yuv420p10le', 'yuv420p10be', 'p010le', 'p010be')
+    sdr_spaces = ('bt709', 'smpte170m', 'bt470bg', 'smpte240m')
+    sdr_transfers = ('bt709', 'smpte170m', 'bt470m', 'bt470bg', 'smpte240m', 'iec61966-2-1')
+    verified_sdr = (
+        primaries in sdr_spaces
+        and colorspace in sdr_spaces
+        and transfer in sdr_transfers
+    )
+    verified_hdr = (
+        is_10bit
+        and primaries == 'bt2020'
+        and colorspace in ('bt2020nc', 'bt2020c')
+        and transfer in ('arib-std-b67', 'smpte2084')
+    )
+    has_hdr_signal = (
+        primaries == 'bt2020'
+        or colorspace in ('bt2020nc', 'bt2020c')
+        or transfer in ('arib-std-b67', 'smpte2084', 'smpte428')
+        or (is_10bit and not verified_sdr)
+    )
+    return dict(
+        codec=codec,
+        pix_fmt=pix_fmt,
+        colorspace=colorspace,
+        primaries=primaries,
+        transfer=transfer,
+        fps=fps,
+        has_audio='Audio:' in stderr,
+        is_10bit=is_10bit,
+        verified_sdr=verified_sdr,
+        verified_hdr=verified_hdr,
+        has_hdr_signal=has_hdr_signal,
+        video_line=video_line,
+    )
 
 
 def render(config,job,local):
-    """Media-only worker: fixed normalized crop, SDR export, no provider calls."""
+    """Media-only worker: fixed normalized crop, HDR-preserving share export or SDR coaching export, no provider calls."""
     t=time.monotonic();s=job['body'];src=inside(config['library_media_root'],s['media_ref']['path'])
     if not src.is_file():raise ValueError('Selected clip is unavailable in mounted storage')
     if s.get('input_sha256') and digest(src)!=s['input_sha256']:raise ValueError('Published clip changed; prepare a fresh excerpt')
     ff=config.get('ffmpeg') or shutil.which('ffmpeg')
     if not ff:raise ValueError('Configure ffmpeg for the media-export worker')
     is_share=s.get('intent')=='share'
+    legacy_share_v1=is_share and s.get('required_capability')==RENDER_SHARE_V1_CAPABILITY and s.get('color')=='sdr-bt709'
+    probe=probe_media(ff, src)
+    if not probe['verified_hdr'] and not probe['verified_sdr'] and (bool(s.get('hdr')) or probe['has_hdr_signal']):
+        raise ValueError('HDR clip has incomplete or unsupported color metadata; cannot verify color-accurate export')
+    preserve_hdr=is_share and not legacy_share_v1 and probe['verified_hdr']
+    out_fps=(60 if probe['fps']>=45.0 else 30) if is_share else 30
     x,y,w,h=s['crop'];edge=1920 if is_share else (960 if s['quality']=='balanced' else 640)
     crf='18' if is_share else ('24' if s['quality']=='balanced' else '29')
     crop=f'crop=trunc(iw*{w}/2)*2:trunc(ih*{h}/2)*2:trunc(iw*{x}/2)*2:trunc(ih*{y}/2)*2'
-    filters=[]
-    if s['hdr']:
-        # Explicit HDR-to-SDR conversion; fail rather than silently changing transfer tags.
-        filters+=['zscale=t=linear:npl=100','format=gbrpf32le','tonemap=tonemap=mobius:desat=0','zscale=p=bt709:t=bt709:m=bt709:r=tv']
-    filters += [f'trim=duration={s["end"]-s["start"]}',crop,f'scale=w=trunc(iw*min(1\\,{edge}/max(iw\\,ih))/2)*2:h=trunc(ih*min(1\\,{edge}/max(iw\\,ih))/2)*2',f'setpts=(PTS-STARTPTS)/{s["speed"]}','fps=30','format=yuv420p']
-    out=local/'excerpt.mp4';seconds=s['end']-s['start']
+    seconds=s['end']-s['start']
+    filters=[
+        f'trim=duration={seconds}',
+        crop,
+        f'scale=w=trunc(iw*min(1\\,{edge}/max(iw\\,ih))/2)*2:h=trunc(ih*min(1\\,{edge}/max(iw\\,ih))/2)*2',
+        f'setpts=(PTS-STARTPTS)/{s["speed"]}',
+        f'fps={out_fps}',
+    ]
+    if preserve_hdr:
+        trc=probe['transfer']
+        x265_transfer='18' if trc=='arib-std-b67' else '16'
+        filters.append('format=yuv420p10le')
+        video_args=[
+            '-c:v','libx265','-preset','fast','-crf',crf,'-pix_fmt','yuv420p10le','-tag:v','hvc1',
+            '-x265-params',f'pools=1:frame-threads=1:log-level=error:colorprim=9:transfer={x265_transfer}:colormatrix=9',
+            '-color_primaries','bt2020','-color_trc',trc,'-colorspace','bt2020nc',
+        ]
+        color_output='hdr10-hlg-bt2020' if trc=='arib-std-b67' else 'hdr10-pq-bt2020'
+        video_codec='hevc'
+        pix_fmt_output='yuv420p10le'
+    else:
+        if probe['verified_hdr']:
+            # Explicit HDR-to-SDR conversion for coaching stills or legacy v1 share jobs; run after trim/crop/scale.
+            filters+=['zscale=t=linear:npl=100','format=gbrpf32le','tonemap=tonemap=mobius:desat=0','zscale=p=bt709:t=bt709:m=bt709:r=tv']
+        filters.append('format=yuv420p')
+        video_args=[
+            '-c:v','libx264','-preset','fast','-crf',crf,'-pix_fmt','yuv420p',
+            '-x264-params','colorprim=bt709:transfer=bt709:colormatrix=bt709',
+            '-color_primaries','bt709','-color_trc','bt709','-colorspace','bt709',
+        ]
+        color_output='sdr-bt709'
+        video_codec='h264'
+        pix_fmt_output='yuv420p'
+    out=local/'excerpt.mp4'
     audio_args=['-an'];audio_output='removed'
     if is_share:
-        if source_has_audio(ff, src):
+        if probe['has_audio']:
             af_stages=[f'atrim=duration={seconds}','asetpts=PTS-STARTPTS']+atempo_chain(s['speed'])
             audio_args=['-af',','.join(af_stages),'-c:a','aac','-b:a','128k']
             audio_output='retimed' if abs(s['speed']-1.0)>=1e-6 else 'preserved'
         else:
             audio_output='none'
-    subprocess.run([ff,'-hide_banner','-loglevel','error','-y','-ss',str(s['start']),'-i',str(src),'-t',str(seconds/s['speed']),'-vf',','.join(filters),*audio_args,'-c:v','libx264','-preset','fast','-crf',crf,'-color_primaries','bt709','-color_trc','bt709','-colorspace','bt709','-movflags','+faststart',str(out)],check=True,capture_output=True,timeout=600)
+    subprocess.run([ff,'-hide_banner','-loglevel','error','-y','-ss',str(s['start']),'-i',str(src),'-t',str(seconds/s['speed']),'-vf',','.join(filters),*audio_args,*video_args,'-movflags','+faststart',str(out)],check=True,capture_output=True,timeout=600)
+    out_probe=probe_media(ff, out)
+    if preserve_hdr:
+        if not (out_probe['codec']=='hevc' and out_probe['pix_fmt']=='yuv420p10le' and out_probe['primaries']=='bt2020' and out_probe['colorspace']=='bt2020nc' and out_probe['transfer']==probe['transfer']):
+            raise ValueError('Encoded HDR share export failed color verification')
+    else:
+        if not (out_probe['codec']=='h264' and out_probe['pix_fmt']=='yuv420p' and out_probe['primaries']=='bt709' and out_probe['transfer']=='bt709' and out_probe['colorspace']=='bt709'):
+            raise ValueError('Encoded SDR export failed color verification')
     # Input trim occurs before setpts using -to via trim; ensure no later source frames leak.
     frames=[]
     if not is_share:
@@ -87,7 +191,7 @@ def render(config,job,local):
             subprocess.run([ff,'-hide_banner','-loglevel','error','-y','-ss',str(original/s['speed']),'-i',str(out),'-frames:v','1','-q:v','3',str(local/name)],check=True,capture_output=True,timeout=30)
             if not (local/name).is_file():raise ValueError('Frame extraction failed')
             frames.append(dict(file=name,excerpt_seconds=original/s['speed'],clip_seconds=s['start']+original,original_seconds=s['original_start']+original,sha256=digest(local/name)))
-    info=dict(recipe=s,lease_token=job['token'],frames=frames,bytes=out.stat().st_size,output_seconds=seconds/s['speed'],sha256=digest(out),render_seconds=time.monotonic()-t)
+    info=dict(recipe=s,lease_token=job['token'],frames=frames,bytes=out.stat().st_size,output_seconds=seconds/s['speed'],sha256=digest(out),render_seconds=time.monotonic()-t,color_output=color_output,video_codec=video_codec,pix_fmt=pix_fmt_output,fps_output=out_fps)
     if is_share:
         info['audio_output']=audio_output
     atomic(local/'recipe.json',info)
@@ -209,7 +313,7 @@ class Worker:
         try:self.storage_ready()
         except Exception:
             self.state(status='storage_unavailable');return False
-        response=self.api('worker/'+self.role+'/claim',{'worker_id':self.identity,'capabilities':[CAPABILITY] if self.role=='ai' else [RENDER_SHARE_CAPABILITY]});job=response['job']
+        response=self.api('worker/'+self.role+'/claim',{'worker_id':self.identity,'capabilities':[CAPABILITY] if self.role=='ai' else [RENDER_SHARE_CAPABILITY,RENDER_SHARE_V1_CAPABILITY]});job=response['job']
         if not job:self.state(status='ready');return False
         identity=job['id'];local=self.root/'jobs'/identity/hashlib.sha256(job['token'].encode()).hexdigest()[:24];local.mkdir(parents=True,exist_ok=True)
         self.state(status='working',job_id=identity);atomic(local/'job.json',job)

@@ -103,11 +103,24 @@
       if (!context || pin.disabled) return;
       event.preventDefault();
       event.stopPropagation();
-      pinDrag = {which, pointerId: event.pointerId};
-      if (pin.setPointerCapture) {
-        try { pin.setPointerCapture(event.pointerId); } catch (_) {}
+      let chosen = which;
+      const bar = $('study-interval-bar');
+      if (bar) {
+        const rect = bar.getBoundingClientRect();
+        const ratio = C.clamp((event.clientX - rect.left) / Math.max(1, rect.width), 0, 1);
+        const pointerTime = ratio * fallbackDuration();
+        const distStart = Math.abs(pointerTime - context.intervalStart);
+        const distEnd = Math.abs(pointerTime - context.intervalEnd);
+        if (Math.abs(distStart - distEnd) > 1e-6) {
+          chosen = distStart < distEnd ? 'start' : 'end';
+        }
       }
-      pin.focus({preventScroll: true});
+      const activePin = $(chosen === 'start' ? 'study-pin-start' : 'study-pin-end') || pin;
+      pinDrag = {which: chosen, pointerId: event.pointerId};
+      if (activePin.setPointerCapture) {
+        try { activePin.setPointerCapture(event.pointerId); } catch (_) {}
+      }
+      activePin.focus({preventScroll: true});
     });
     pin.addEventListener('keydown', event => {
       if (!context || pin.disabled) return;
@@ -360,7 +373,8 @@
             const readyLink = $('study-download-ready');
             readyLink.href = href;
             readyLink.hidden = false;
-            status('High-quality download ready.');
+            const isHdr = String(currentJob.result?.color_output || '').startsWith('hdr10-');
+            status(isHdr ? 'High-quality HDR (10-bit HEVC) download ready.' : 'High-quality download ready.');
             readyLink.click();
           } else if (currentJob.state === 'failed' || currentJob.state === 'cancelled') {
             clearInterval(owner.shareTimer);

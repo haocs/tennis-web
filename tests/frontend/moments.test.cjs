@@ -17,11 +17,11 @@ test('point text dismisses at three wall-clock seconds even when paused',()=>{
  assert.equal(clock.tick(events,2,3000).length,0);
  assert.equal(clock.tick(events,2,4000).length,0); // no repeated trigger at a paused playhead
 });
-test('point coaching dismisses at three seconds without inventing an end timestamp',()=>{
+test('point coaching dismisses at five seconds without inventing an end timestamp',()=>{
  const a=moment('coach',1,{kind:'coach'}),clock=new CueClock(),events=timeline([a]);
  assert.equal(clock.tick(events,1,0).length,1);
- assert.equal(clock.tick(events,1,2999).length,1);
- assert.equal(clock.tick(events,1,3000).length,0);
+ assert.equal(clock.tick(events,1,4999).length,1);
+ assert.equal(clock.tick(events,1,5000).length,0);
  assert.equal(a.target.end_seconds,undefined);
 });
 test('explicit ends use playback time and remain visible while paused',()=>{
@@ -45,11 +45,13 @@ test('replaying and changing media resets point cues',()=>{
  assert.equal(clock.tick(events,1,3002).length,1);
  clock.reset();assert.equal(clock.tick(events,1,4000).length,1);
 });
-test('supports overlapping cues, fast playback crossings and half-open ends',()=>{
- const events=timeline([moment('h',1),moment('coach',1,{kind:'coach',end:2})]),clock=new CueClock();
+test('supports overlapping cues, fast playback crossings, minimum 5s coach teaser and half-open ends',()=>{
+ const events=timeline([moment('h',1),moment('coach',1,{kind:'coach',end:2}),moment('note-range',1,{kind:'note',end:2})]),clock=new CueClock();
  clock.tick(events,.9,0);
- assert.deepEqual(clock.tick(events,1.4,100,{playing:true,rate:2}).map(e=>e.id).sort(),['coach','h']);
- assert.equal(clock.tick(events,2,4000).length,0);
+ assert.deepEqual(clock.tick(events,1.4,100,{playing:true,rate:2}).map(e=>e.id).sort(),['coach','h','note-range']);
+ // At playback position 2 (4000ms wall clock), note-range and 3s highlight have expired, while 5s coach teaser remains visible until 5100ms.
+ assert.deepEqual(clock.tick(events,2,4000).map(e=>e.id),['coach']);
+ assert.equal(clock.tick(events,2,5100).length,0);
 });
 test('Jump is current-scope, includes all types, wraps, and groups coincident destinations',()=>{
  const items=[moment('first',1),moment('comment',2,{kind:'note'}),moment('same',2),moment('later',8,{clip:'c2',local:1,playback:4})];

@@ -22,37 +22,58 @@ normalized crop, playback speed and prompt:
    and its ChatGPT/Codex sign-in. This is **not native video analysis**; frame
    density is bounded and can miss events between frames.
 3. **Review response** — displays the AI coach summary, structured suggestions, and
-   clickable original-recording evidence stills. Each suggestion can be **Saved**
-   (accepted as a playback Moment cue) or **Discarded** (dismissed), or the user can
-   click **Re-ask** to ask a follow-up question reusing the prepared excerpt and
-   retained original-time evidence.
+   clickable original-recording evidence stills. New AI suggestions remain
+   `proposed` until explicitly accepted via **Use in playback** (or **Use for
+   current video** when a recording was reprocessed), edited and saved via **Save**
+   (with **Reset edits** to abandon unsaved form changes), or dismissed via the
+   top-right **×** discard button. Accepted coaching Moments display a 5-second
+   playback teaser in the Watch player, and clicking **Review** on a coaching
+   Moment or Learning item deep-links directly into Clip study with the target
+   interval and card highlighted. Coaching requests and cards record immutable
+   `asked_at` timestamps so edits or status changes do not reorder historical
+   questions.
 
 ### High-quality interval download (`intent: "share"`)
 
 Clicking **Download interval** in Clip study queues a separate render profile
-(`intent: "share"`, `quality: "high"`, `required_capability: "share-export-v1"`):
+(`intent: "share"`, `quality: "high"`, `required_capability: "share-export-v2"`,
+`renderer_version: 3`):
 
 - Preserves the selected `[start, end]` interval, normalized zoom/pan crop, and
   playback speed at high spatial quality (`max_edge: 1920` without upscaling,
-  `crf: 18`, 30 fps H.264 `yuv420p`).
+  `crf: 18`, up to 60 fps when the source clip is ≥45 fps, otherwise 30 fps).
+- Probes authoritative published input stream properties (`codec`, `pix_fmt`,
+  `colorspace`, `primaries`, `transfer`, `fps`, `has_audio`) before encoding:
+  - Verified 10-bit BT.2020 HDR clips (`yuv420p10le`/`p010le`, `bt2020` primaries,
+    `bt2020nc`/`bt2020c` matrix, and `arib-std-b67` HLG or `smpte2084` PQ transfer)
+    are encoded as 10-bit HEVC (`libx265`, `yuv420p10le`, `hvc1`, explicit VUI and
+    container color tags), keeping HLG (`hdr10-hlg-bt2020`) and PQ
+    (`hdr10-pq-bt2020`) distinct.
+  - Verified SDR clips are encoded as 8-bit H.264 (`libx264`, `yuv420p`, explicit
+    `bt709` VUI and container tags, `sdr-bt709`).
+  - Clips flagged as HDR or carrying partial/unsupported HDR stream tags without
+    complete 10-bit BT.2020 HLG/PQ metadata fail deterministically rather than
+    guessing or silently stripping transfer metadata.
 - Retimes source audio when present using chained FFmpeg `atempo` filters (covering
   `0.1×`–`1×` speeds) rather than inheriting the silent `-an` coaching preview path;
   falls back cleanly to video-only when the source clip has no audio stream.
-- Applies the validated HDR-to-SDR Mobius tonemapping pipeline (`zscale` linear
-  transfer, `tonemap=mobius`, `bt709` primaries/transfer/matrix) when the source
-  clip is HDR, rather than simply relabeling HDR pixels as SDR. Input color metadata
-  remains authoritative; full HDR container metadata pass-through is not claimed.
+- Keeps the in-browser Clip study preview separate from the downloadable file (10-bit
+  HEVC downloads target compatible media players/devices), and keeps coaching renders
+  (`intent: "coaching"`) on the 30 fps 8-bit SDR H.264 path with linear-light Mobius
+  tone-mapping (`zscale` + `tonemap=mobius` after trim/crop/scale).
 - Skips coaching frame extraction (`frame-*.jpg`) and `prompt.txt` generation,
-  publishing only `excerpt.mp4` and `recipe.json` to shared storage to minimize NAS
-  writes. Share exports cannot be submitted to `/api/coaching/requests` as coaching
-  evidence.
-- Requires render workers advertising `share-export-v1` (worker package `0.3.0+`) so
-  older render workers leave share jobs queued rather than producing low-resolution
-  muted output.
+  publishing only `excerpt.mp4` and `recipe.json` (including `color_output`,
+  `video_codec`, `pix_fmt`, `fps_output`, and `audio_output`) to shared storage.
+  Share exports cannot be submitted to `/api/coaching/requests` as coaching evidence.
+- Requires render workers advertising `share-export-v2` so older `share-export-v1`
+  renderers cannot claim HDR-preserving share jobs, while upgraded render workers
+  advertise both `share-export-v2` and `share-export-v1` for queue compatibility.
 
-Export tests encode real SDR and 10-bit HLG fixtures, verify the HDR input tags,
-then inspect output timing, dimensions, audio and color tags. These checks exercise
-conversion and metadata handling; they are not a color-reference calibration.
+Export tests encode synthetic 60 fps SDR (`bt709`), 10-bit HLG (`arib-std-b67`), and
+10-bit PQ (`smpte2084`) fixtures with audio, verify input and output stream tags,
+bit depth, frame rate, crop, duration, coaching SDR tone-mapping, and deterministic
+failure on incomplete HDR metadata. These checks verify encoding and metadata
+preservation; they are not a display-reference color calibration.
 
 ## Placement
 

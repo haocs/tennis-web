@@ -56,9 +56,9 @@ def recipe(body, data, clip):
                 input_sha256=data.get('media_checksums',{}).get(clip['file']),
                 hdr=bool(data['video'].get('hdr')),
                 audio='retime_if_present' if intent == 'share' else 'removed',
-                color='sdr-bt709',
+                color='preserve-hdr-or-sdr' if intent == 'share' else 'sdr-bt709',
                 analysis_mode='none' if intent == 'share' else 'timestamped_frames',
-                renderer_version=2 if intent == 'share' else 1,
+                renderer_version=3 if intent == 'share' else 1,
                 source_sha256=data.get('source',{}).get('sha256',data['id']),processing=data.get('processing'))
     if intent == 'share':
         spec.update(intent='share', required_capability=RENDER_SHARE_CAPABILITY)
@@ -78,7 +78,9 @@ class Coaching(Annotations):
                     if 'locked' not in str(error) or attempt==9:raise
                     time.sleep(.02*(attempt+1))
             db.execute('BEGIN IMMEDIATE')
-            db.execute('CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY, role TEXT, state TEXT, body TEXT, request_id TEXT UNIQUE, fingerprint TEXT, worker TEXT, token TEXT, expires REAL, version INTEGER, updated REAL, result TEXT)')
+            db.execute('CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY, role TEXT, state TEXT, body TEXT, request_id TEXT UNIQUE, fingerprint TEXT, worker TEXT, token TEXT, expires REAL, version INTEGER, updated REAL, result TEXT, asked_at REAL)')
+            if 'asked_at' not in [r['name'] for r in db.execute('PRAGMA table_info(jobs)')]:
+                db.execute('ALTER TABLE jobs ADD COLUMN asked_at REAL')
             db.execute('CREATE TABLE IF NOT EXISTS workers(id TEXT PRIMARY KEY, role TEXT, updated REAL, status TEXT)')
             if 'capabilities' not in [r['name'] for r in db.execute('PRAGMA table_info(workers)')]:
                 db.execute("ALTER TABLE workers ADD COLUMN capabilities TEXT DEFAULT '[]'")
@@ -93,6 +95,7 @@ class Coaching(Annotations):
 
     def decode(self,row,private=False):
         d=dict(row);d['body']=json.loads(d['body']);d['result']=json.loads(d['result']) if d['result'] else None
+        d['asked_at']=d.get('asked_at')
         if not private:
             d.pop('token',None); d.pop('fingerprint',None);d.pop('request_id',None)
         return d
@@ -108,7 +111,8 @@ class Coaching(Annotations):
                 if row['fingerprint']!=fingerprint: raise QueueConflict('Request ID already used for a different selection')
                 return self.decode(row)
             identity=uuid.uuid4().hex
-            db.execute('INSERT INTO jobs VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',(identity,role,'queued',encoded,request_id,fingerprint,None,None,0,1,self.clock(),None))
+            now=self.clock()
+            db.execute('INSERT INTO jobs(id,role,state,body,request_id,fingerprint,worker,token,expires,version,updated,result,asked_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',(identity,role,'queued',encoded,request_id,fingerprint,None,None,0,1,now,None,now))
             db.commit()
         return self.get(identity)
 
@@ -120,7 +124,7 @@ class Coaching(Annotations):
 
     def listing(self,source):
         with self.db() as db:
-            rows=db.execute("SELECT * FROM jobs WHERE json_extract(body,'$.source_id')=? AND (role='ai' OR id IN (SELECT id FROM jobs WHERE json_extract(body,'$.source_id')=? ORDER BY updated DESC LIMIT 100)) ORDER BY updated DESC",(source,source)).fetchall()
+            rows=db.execute("SELECT * FROM jobs WHERE json_extract(body,'$.source_id')=? AND (role='ai' OR id IN (SELECT id FROM jobs WHERE json_extract(body,'$.source_id')=? ORDER BY COALESCE(asked_at,updated) DESC, id DESC LIMIT 100)) ORDER BY COALESCE(asked_at,updated) DESC, id DESC",(source,source)).fetchall()
             workers=[dict(r) for r in db.execute('SELECT * FROM workers')]
         jobs=[self.decode(r) for r in rows]
         for job in jobs:

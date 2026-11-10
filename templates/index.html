@@ -29,8 +29,8 @@
         <div class="study-interval-bar" id="study-interval-bar">
           <div class="study-interval-track" aria-hidden="true"><div class="study-interval-fill" id="study-interval-fill"></div></div>
           <input id="study-seek" type="range" min="0" max="1" step="0.01" value="0" aria-label="Seek within this clip" disabled>
-          <button type="button" class="study-interval-pin study-interval-pin-start" id="study-pin-start" role="slider" aria-label="Interval start" aria-valuemin="0" aria-valuemax="1" aria-valuenow="0" aria-valuetext="0:00.000" disabled><span aria-hidden="true">A</span></button>
-          <button type="button" class="study-interval-pin study-interval-pin-end" id="study-pin-end" role="slider" aria-label="Interval end" aria-valuemin="0" aria-valuemax="1" aria-valuenow="1" aria-valuetext="0:00.000" disabled><span aria-hidden="true">B</span></button>
+          <button type="button" class="study-interval-pin study-interval-pin-start" id="study-pin-start" role="slider" aria-label="Interval start" aria-valuemin="0" aria-valuemax="1" aria-valuenow="0" aria-valuetext="0:00.000" disabled></button>
+          <button type="button" class="study-interval-pin study-interval-pin-end" id="study-pin-end" role="slider" aria-label="Interval end" aria-valuemin="0" aria-valuemax="1" aria-valuenow="1" aria-valuetext="0:00.000" disabled></button>
         </div>
         <div class="study-playback-row">
           <div class="study-play-buttons"><button class="study-button study-icon-button" id="study-back" type="button" aria-label="Step back 0.1 seconds" title="Step back 0.1 seconds" disabled>&lt;</button><button class="study-button study-primary study-icon-button" id="study-play" type="button" aria-label="Play" title="Play" disabled><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M8 5v14l11-7z"/></svg></button><button class="study-button study-icon-button" id="study-forward" type="button" aria-label="Step forward 0.1 seconds" title="Step forward 0.1 seconds" disabled>&gt;</button></div>
@@ -40,7 +40,7 @@
           <button class="study-button study-download-interval" id="study-download-interval" type="button" disabled>Download interval</button>
           <a class="study-button" id="study-download-ready" download hidden>Save video</a>
         </div>
-        <details class="study-control-help"><summary>Shortcuts & gestures</summary><p class="study-hint">Drag pins A/B to select an interval. Drag video to pan when zoomed; pinch to zoom. ← / → seek 0.1s; Shift seeks 1s.</p></details>
+        <details class="study-control-help"><summary>Shortcuts & gestures</summary><p class="study-hint">Drag interval boundaries to select an interval. Drag video to pan when zoomed; pinch to zoom. ← / → seek 0.1s; Shift seeks 1s.</p></details>
       </div>
     </section>
     <aside class="study-sidebar" aria-label="Processor context and AI review preparation">

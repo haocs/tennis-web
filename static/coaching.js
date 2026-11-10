@@ -17,8 +17,8 @@
     return owner?.clip?.main_player?base.replace(' I am a beginner.',''):base;
   }
   function defaultQuestion(){return presetQuestion('full');}
-  let owner=null,timer=null,generation=0,selectedExport=null,selectedAsk=null,pendingAsk=null,busy=false,revision=0,requestId=null,askId=null,askFingerprint=null,lastData=null,historyKey='',followUpId=null,mobileMode='watch';
-  let stopWatch=()=>{};
+  let owner=null,timer=null,generation=0,selectedExport=null,selectedAsk=null,pendingAsk=null,busy=false,revision=0,requestId=null,askId=null,askFingerprint=null,lastData=null,historyKey='',followUpId=null,mobileMode='watch',pendingFocus=null,highlightedKey=null;
+  let stopWatch=()=>{},stopIntervalSeek=()=>{};
   function el(tag,text,cls){const n=document.createElement(tag);if(text!==undefined)n.textContent=text;if(cls)n.className=cls;return n;}
   async function api(path,body,method='POST'){
     const r=await fetch('/api/coaching/'+path,body===undefined?{}:{method,headers:{'Content-Type':'application/json','X-Tennis-Request':'1'},body:JSON.stringify(body)});
@@ -245,7 +245,7 @@
   }
   function jump(original){
     const clip=owner.clip;
-    if(original>=clip.original_start_seconds&&original<=clip.original_end_seconds){
+    if(original>=clip.original_start_seconds&&original<clip.original_end_seconds){
       $('clip-study').dataset.playerCollapsed='false';
       if($('study-mobile-collapse'))$('study-mobile-collapse').textContent='Hide player';
       requestAnimationFrame(mobileOffsets);
@@ -260,7 +260,7 @@
       if(mobile())document.querySelector('.study-workspace').scrollIntoView({block:'start',behavior:'smooth'});
       return;
     }
-    const target=owner.session.clips.find(c=>c.original_start_seconds<=original&&c.original_end_seconds>=original);
+    const target=owner.session.clips.find(c=>c.original_start_seconds<=original&&original<c.original_end_seconds);
     if(target){location.href=`/review/${owner.session.id}?clip=${target.id}&coach_time=${original}`;}
     else message('This moment was cut from the current video. See the saved frame.');
   }
@@ -272,12 +272,21 @@
     return strip;
   }
   async function review(a,status,content){
+    if(!owner)return false;
+    const current=owner,gen=generation;
     try{
-      await api('annotations/'+a.id,{version:a.version,publication:owner.session.published_at,status,...(content?{content}:{})},'PUT');
+      await api('annotations/'+a.id,{version:a.version,publication:current.session.published_at,status,...(content?{content}:{})},'PUT');
+      if(owner!==current||gen!==generation)return false;
       await refresh(true);
+      if(owner!==current||gen!==generation)return true;
       window.dispatchEvent(new Event('coach-notes-changed'));
       message(status==='accepted'?'Suggestion saved.':'Suggestion discarded.');
-    }catch(e){message(e.message);/* Keep the unsaved edit visible after a conflict. */}
+      return true;
+    }catch(e){
+      if(owner===current&&gen===generation)message(e.message);
+      /* Keep the unsaved edit visible after a conflict. */
+      return false;
+    }
   }
   function editor(a,job,manual=false){
     const details=el('details',undefined,'coach-editor');details.append(el('summary',manual?'Add your own suggestion':'Edit suggestion or timing'));
@@ -287,27 +296,86 @@
     for(const [key,name] of Object.entries(names)){const label=el('label',name),input=el('textarea');input.rows=key==='cue'?2:1;input.value=a.current[key];input.maxLength=limits[key];label.append(input);form.append(label);fields[key]=input;}
     form.append(el('p','Original recording times · optional','study-hint'));
     const ranges=el('div'),rows=[];
-    function addRange(start,end){const row=el('div',undefined,'coach-time-row'),inputs=[];for(const [name,value] of [['Start',start],['End',end]]){const label=el('label',name+' seconds'),input=el('input');input.type='number';input.min=job.body.original_start;input.max=job.body.original_end;input.step='.001';input.required=true;input.value=value;label.append(input);row.append(label);inputs.push(input);}row.append(button('Remove',()=>{row.remove();rows.splice(rows.indexOf(inputs),1);}));rows.push(inputs);ranges.append(row);}
+    function addRange(start,end){const row=el('div',undefined,'coach-time-row'),inputs=[];for(const [name,value] of [['Start',start],['End',end]]){const label=el('label',name+' seconds'),input=el('input');input.type='number';input.min=job.body.original_start;input.max=job.body.original_end;input.step='.001';input.required=true;input.value=value;label.append(input);row.append(label);inputs.push(input);}row.append(button('Remove',()=>{row.remove();rows.splice(rows.indexOf(inputs),1);form.dataset.dirty='true';}));rows.push(inputs);ranges.append(row);}
     for(const i of a.current.applies_to)addRange(i.start_seconds,i.end_seconds);
-    form.append(ranges,button('Add excerpt interval',()=>{if(rows.length<12)addRange(job.body.original_start,job.body.original_end);}));
+    form.append(ranges,button('Add excerpt interval',()=>{if(rows.length<12){addRange(job.body.original_start,job.body.original_end);form.dataset.dirty='true';}}));
     const refs=el('fieldset');refs.append(el('legend','Evidence frames'));const checks=[];
     for(const f of job.body.evidence_frames||[]){const label=el('label',`Frame ${f.order} · original ${C.clock(f.original_seconds)}`),input=el('input');input.type='checkbox';input.checked=a.current.evidence_frame_ids.includes(f.frame_id);label.prepend(input);refs.append(label);checks.push([input,f.frame_id]);}form.append(refs);
-    const submit=el('button',manual?'Save reviewed suggestion':'Save edits and accept','study-button study-primary');submit.type='submit';form.append(submit);
-    form.onsubmit=event=>{event.preventDefault();const content=Object.fromEntries(Object.entries(fields).map(([k,v])=>[k,v.value]));content.evidence_frame_ids=checks.filter(([check])=>check.checked).map(([,id])=>id);content.applies_to=rows.map(([s,e])=>({start_seconds:Number(s.value),end_seconds:Number(e.value)}));if(manual){const reqId=details.dataset.requestId||(details.dataset.requestId=cryptoId());api('annotations',{job_id:job.id,publication:owner.session.published_at,content,request_id:reqId}).then(()=>{refresh(true);window.dispatchEvent(new Event('coach-notes-changed'));message('Suggestion saved.');}).catch(e=>message(e.message));}else review(a,'accepted',content);};details.append(form);return details;
+    form.addEventListener('input',()=>{form.dataset.dirty='true';});
+    form.addEventListener('change',()=>{form.dataset.dirty='true';});
+    function resetEditor(){
+      for(const [key,input] of Object.entries(fields))input.value=a.current[key]||'';
+      ranges.replaceChildren();rows.length=0;
+      for(const i of a.current.applies_to)addRange(i.start_seconds,i.end_seconds);
+      for(const [input,frameId] of checks)input.checked=a.current.evidence_frame_ids.includes(frameId);
+      form.dataset.dirty='false';
+    }
+    const actionsRow=el('div',undefined,'coach-actions');
+    const submit=el('button',manual?'Save reviewed suggestion':'Save edits and accept','study-button study-primary');submit.type='submit';
+    const resetBtn=button('Reset edits',()=>{resetEditor();details.open=false;message('Edits reset.');},'study-button');
+    actionsRow.append(submit,resetBtn);
+    form.append(actionsRow);
+    form.onsubmit=async event=>{
+      event.preventDefault();
+      if(!owner||submit.disabled)return;
+      const current=owner,gen=generation;
+      const content=Object.fromEntries(Object.entries(fields).map(([k,v])=>[k,v.value]));
+      content.evidence_frame_ids=checks.filter(([check])=>check.checked).map(([,id])=>id);
+      content.applies_to=rows.map(([s,e])=>({start_seconds:Number(s.value),end_seconds:Number(e.value)}));
+      submit.disabled=true;
+      try{
+        if(manual){
+          const reqId=details.dataset.requestId||(details.dataset.requestId=cryptoId());
+          await api('annotations',{job_id:job.id,publication:current.session.published_at,content,request_id:reqId});
+          if(owner!==current||gen!==generation)return;
+          form.dataset.dirty='false';
+          await refresh(true);
+          if(owner!==current||gen!==generation)return;
+          window.dispatchEvent(new Event('coach-notes-changed'));
+          message('Suggestion saved.');
+        }else{
+          const ok=await review(a,'accepted',content);
+          if(ok&&owner===current&&gen===generation)form.dataset.dirty='false';
+        }
+      }catch(e){
+        if(owner===current&&gen===generation)message(e.message);
+      }finally{
+        submit.disabled=false;
+      }
+    };
+    details.append(form);return details;
   }
   function suggestionCard(a,job){
     const card=el('article',undefined,'coach-suggestion');card.dataset.annotation=a.id;
-    const stateLabel=a.status==='accepted'?'Saved':a.status==='dismissed'?'Discarded':'Needs your review';
-    card.append(el('p',`${stateLabel}${a.historical?' · Previous publication':''}`,'coach-review-state'),el('h5',a.current.title));
+    if(highlightedKey==='a:'+a.id)card.classList.add('is-highlighted');
+    const stateLabel=a.status==='accepted'?(a.playback_eligible?'Saved · Active in playback':'Saved'):a.status==='dismissed'?'Discarded':'Needs your review';
+    const header=el('div',undefined,'coach-suggestion-header');
+    const heading=el('div',undefined,'coach-suggestion-heading');
+    heading.append(el('p',`${stateLabel}${a.historical?' · Previous publication':''}`,'coach-review-state'),el('h5',a.current.title));
+    header.append(heading);
+    if(a.status!=='dismissed'){
+      const discard=button('×',()=>{
+        const form=card.querySelector('.coach-editor form');
+        if(form&&form.dataset.dirty==='true'){message('Save or reset your edits before discarding this suggestion.');return;}
+        review(a,'dismissed');
+      },'coach-discard-btn');
+      discard.setAttribute('aria-label','Discard suggestion');
+      discard.title='Discard suggestion';
+      header.append(discard);
+    }
+    card.append(header);
     if(a.historical)card.append(el('p',a.playback_eligible?'Reviewed for this video.':'Older video version. Review again to show cues.','study-hint'));
     for(const [key,title] of [['observation','Observed'],['cue','Try'],['drill','Practice'],['uncertainty','Uncertainty']])if(a.current[key]){const p=el('p');p.append(el('strong',title+': '),document.createTextNode(a.current[key]));card.append(p);}
     const timing=el('div',undefined,'coach-timing');if(a.current.applies_to.length)for(const i of a.current.applies_to)timing.append(button(`Original ${C.clock(i.start_seconds)}–${C.clock(i.end_seconds)}`,()=>jump(i.start_seconds)));else timing.append(el('p','Add timing to show a playback cue.','study-muted'));card.append(timing,evidenceStrip(job,a));
     for(const warning of a.current.validation_warnings||[])card.append(el('p',warning+'. Edit references before accepting.','coach-warning'));
-    card.append(
-      button(a.historical?'Save for current video':'Save',()=>review(a,'accepted'),'study-button study-primary'),
-      button('Discard',()=>review(a,'dismissed')),
-      editor(a,job)
-    );
+    if(a.historical&&!a.playback_eligible&&a.status!=='dismissed'){
+      card.append(button('Use for current video',()=>review(a,'accepted'),'study-button study-primary'));
+    }else if(a.status==='dismissed'){
+      card.append(button('Restore',()=>review(a,'accepted'),'study-button'));
+    }else if(a.status==='proposed'&&!a.historical&&!(a.current.validation_warnings&&a.current.validation_warnings.length)){
+      card.append(button('Use in playback',()=>review(a,'accepted'),'study-button study-primary'));
+    }
+    card.append(editor(a,job));
     return card;
   }
   function legacyCard(card,j){
@@ -330,16 +398,31 @@
     $('coach-question').focus({preventScroll:true});
     if(lastData)askAvailability(lastData);
   }
+  function formatAskedAt(job){
+    const ts=Number.isFinite(job?.asked_at)?job.asked_at:null;
+    if(ts!==null){
+      const d=new Date(ts*1000);
+      if(!Number.isNaN(d.valueOf()))return 'Asked '+d.toLocaleString(undefined,{month:'short',day:'numeric',year:'numeric',hour:'numeric',minute:'2-digit'});
+    }
+    if(Number.isFinite(job?.updated)){
+      const d=new Date(job.updated*1000);
+      if(!Number.isNaN(d.valueOf()))return 'Ask time not recorded · updated '+d.toLocaleString(undefined,{month:'short',day:'numeric',year:'numeric',hour:'numeric',minute:'2-digit'});
+    }
+    return 'Ask time not recorded';
+  }
   function history(data){
     const box=$('coach-history');box.replaceChildren();
-    const jobs=data.jobs.filter(j=>j.role==='ai'&&(j.body.clip_id===owner.clip.id||j.body.original_start<owner.clip.original_end_seconds&&j.body.original_end>owner.clip.original_start_seconds));
+    const jobs=data.jobs
+      .filter(j=>j.role==='ai'&&(j.body.clip_id===owner.clip.id||j.body.original_start<owner.clip.original_end_seconds&&j.body.original_end>owner.clip.original_start_seconds))
+      .sort((a,b)=>((Number.isFinite(b.asked_at)?b.asked_at:(b.updated||0))-(Number.isFinite(a.asked_at)?a.asked_at:(a.updated||0)))||String(b.id||'').localeCompare(String(a.id||'')));
     if(!jobs.length){box.append(el('p','No coach responses yet.','study-muted'));return;}
     for(const j of jobs){
-      const card=el('article',undefined,'coach-note');card.append(el('strong',`${C.clock(j.body.original_start)}–${C.clock(j.body.original_end)} · ${states[j.state]||j.state}${j.body.follow_up_of?' · Follow-up':''}`));
+      const card=el('article',undefined,'coach-note');card.dataset.job=j.id;card.append(el('strong',`${C.clock(j.body.original_start)}–${C.clock(j.body.original_end)} · ${states[j.state]||j.state}${j.body.follow_up_of?' · Follow-up':''}`),el('p',formatAskedAt(j),'study-hint coach-asked-at'));
       if(j.body.player_context&&typeof model==='object'&&model?.players){const p=model.players.find(p=>p.id===j.body.player_context.player_id);card.append(el('p','For '+(p?.name||'saved player'),'study-hint'));}
       const question=el('details');question.append(el('summary','Question asked'),el('p',j.body.prompt));card.append(question);
       if(j.state==='completed'){
         if(j.body.publication===owner.session.published_at)card.append(button('Re-ask',()=>followUp(j),'study-button'));
+        if(highlightedKey==='j:'+j.id)card.classList.add('is-highlighted');
         if(j.result.structured){const result=j.result.structured;if(result.summary)card.append(el('p',result.summary,'coach-summary'));for(const warning of result.validation_warnings)card.append(el('p',warning,'coach-warning'));if(result.parse_status==='unstructured')card.append(el('p','Timing unavailable. See the original response and frames.','study-hint'));
           for(const a of data.annotations.filter(a=>a.job_id===j.id))card.append(suggestionCard(a,j));
           const all=el('details');all.append(el('summary','All submitted snapshots'));const fake={current:{evidence_frame_ids:(j.body.evidence_frames||[]).map(f=>f.frame_id)}};all.append(evidenceStrip(j,fake));card.append(all);
@@ -367,6 +450,96 @@
     $('coach-ask').disabled=busy||exportInProgress||aiInProgress||data?.enabled===false||!$('coach-question').value.trim();
     $('coach-ask').textContent='Ask coach';
   }
+  function applyClipInterval(origStart,origEnd){
+    stopIntervalSeek();
+    if(!owner||!Number.isFinite(origStart))return;
+    const current=owner,gen=generation,clip=owner.clip,dur=clip.duration_seconds||1;
+    const localStart=C.clamp(origStart-clip.original_start_seconds,0,dur);
+    const localEnd=Number.isFinite(origEnd)&&origEnd>origStart?C.clamp(origEnd-clip.original_start_seconds,Math.min(dur,localStart+0.1),dur):dur;
+    window.ClipStudy?.setInterval?.(localStart,localEnd);
+    const v=$('study-video');
+    if(v){
+      const expectedSrc=v.getAttribute('src');
+      const seek=()=>{
+        stopIntervalSeek=()=>{};
+        if(owner!==current||gen!==generation||!$('clip-study')?.open||v.getAttribute('src')!==expectedSrc)return;
+        v.pause();
+        v.currentTime=localStart;
+      };
+      if(v.readyState>=1)seek();
+      else{
+        v.addEventListener('loadedmetadata',seek,{once:true});
+        stopIntervalSeek=()=>{v.removeEventListener('loadedmetadata',seek);};
+      }
+    }
+  }
+  function applyPendingFocus(data){
+    if(!pendingFocus||!owner)return {handled:false,preserveMessage:false};
+    if(pendingFocus.clipId&&pendingFocus.clipId!==owner.clip.id)return {handled:false,preserveMessage:false};
+    const target=pendingFocus;pendingFocus=null;
+    const box=$('coach-history');
+    for(const el of box.querySelectorAll('.is-highlighted'))el.classList.remove('is-highlighted');
+    let card=null,origStart=target.startSeconds,origEnd=target.endSeconds,preserveMessage=false;
+    if(target.annotationId){
+      const ann=data.annotations.find(a=>a.id===target.annotationId);
+      card=[...box.querySelectorAll('.coach-suggestion')].find(n=>n.dataset.annotation===target.annotationId)||null;
+      if(ann&&ann.current?.applies_to?.length){
+        origStart=Math.min(...ann.current.applies_to.map(i=>i.start_seconds));
+        origEnd=Math.max(...ann.current.applies_to.map(i=>i.end_seconds));
+      }
+      if(card){
+        highlightedKey='a:'+target.annotationId;
+        if(ann?.status==='dismissed'){
+          message('This coaching suggestion was discarded. Use Restore below to include it again.');
+          preserveMessage=true;
+        }
+      }else{
+        highlightedKey=null;
+        const parentJob=target.jobId?data.jobs.find(j=>j.id===target.jobId):null;
+        const parentCard=target.jobId?[...box.querySelectorAll('.coach-note')].find(n=>n.dataset.job===target.jobId)||null:null;
+        if(parentJob&&!Number.isFinite(origEnd)){
+          if(!Number.isFinite(origStart))origStart=parentJob.body?.original_start;
+          origEnd=parentJob.body?.original_end;
+        }
+        if(Number.isFinite(origStart))applyClipInterval(origStart,origEnd);
+        showMode('coach',false);
+        if(parentCard){
+          parentCard.tabIndex=-1;
+          requestAnimationFrame(()=>{
+            parentCard.scrollIntoView({block:'center',behavior:'smooth'});
+            parentCard.focus({preventScroll:true});
+          });
+          message('The selected coaching suggestion is unavailable; showing its parent coaching review.');
+        }else{
+          message('The selected coaching suggestion is unavailable for this clip.');
+        }
+        return {handled:true,preserveMessage:true};
+      }
+    }else if(target.jobId){
+      const job=data.jobs.find(j=>j.id===target.jobId);
+      card=[...box.querySelectorAll('.coach-note')].find(n=>n.dataset.job===target.jobId)||null;
+      if(job&&!Number.isFinite(origEnd)){
+        if(!Number.isFinite(origStart))origStart=job.body?.original_start;
+        origEnd=job.body?.original_end;
+      }
+      if(card)highlightedKey='j:'+target.jobId;
+    }
+    if(Number.isFinite(origStart))applyClipInterval(origStart,origEnd);
+    if(!card){
+      highlightedKey=null;
+      showMode('coach',false);
+      message('The selected coaching review is unavailable for this clip.');
+      return {handled:true,preserveMessage:true};
+    }
+    card.classList.add('is-highlighted');
+    card.tabIndex=-1;
+    showMode('coach',false);
+    requestAnimationFrame(()=>{
+      card.scrollIntoView({block:'center',behavior:'smooth'});
+      card.focus({preventScroll:true});
+    });
+    return {handled:true,preserveMessage};
+  }
   async function refresh(force=false){
     if(!owner)return;const current=owner,gen=generation;
     try{const data=await api('sessions/'+current.session.id);if(owner!==current||gen!==generation)return;lastData=data;
@@ -383,7 +556,9 @@
       }
       const key=JSON.stringify([data.jobs.map(j=>[j.id,j.version,j.state]),data.annotations.map(a=>[a.id,a.version,a.status])]);
       if(force||key!==historyKey&&!document.activeElement?.closest('#coach-history')&&!$('coach-history').querySelector('.coach-editor[open]')){history(data);historyKey=key;}
+      const focusOutcome=applyPendingFocus(data);
       askAvailability(data);
+      if(focusOutcome.preserveMessage)return;
       if(!data.enabled)message('Coaching workers are not configured yet.');
       else if(ai&&['queued','leased','calling'].includes(ai.state))message('Getting response…');
       else if(ai&&ai.state==='failed')message(ai.result?.error||'Failed to get coach response.');
@@ -393,15 +568,23 @@
     }catch(e){if(owner===current)message(e.message);}
   }
   window.Coach={
+    focusTarget(target){
+      pendingFocus=target?{...target}:null;
+      if(owner&&lastData)applyPendingFocus(lastData);
+    },
     open(session,clip){
       if(!$('coaching-panel'))makePanel();
-      generation++;owner={session,clip};selectedExport=null;selectedAsk=null;pendingAsk=null;requestId=null;busy=false;historyKey='';lastData=null;
+      stopIntervalSeek();
+      generation++;owner={session,clip};selectedExport=null;selectedAsk=null;pendingAsk=null;requestId=null;busy=false;historyKey='';lastData=null;highlightedKey=null;
       $('clip-study').dataset.playerCollapsed='false';
       if($('study-mobile-collapse'))$('study-mobile-collapse').textContent='Hide player';
       followUpId=null;$('coach-follow-up-context').hidden=true;$('coach-status').textContent='';
       $('coach-player-context').textContent=clip.main_player?'For '+clip.main_player.name+' · height and level are included; name stays in this library.':'No main player assigned.';
       let d={};try{d=JSON.parse(sessionStorage.getItem(draftKey())||'{}');}catch(_){}
-      if(Number.isFinite(d.start)&&Number.isFinite(d.end)&&d.start<d.end){
+      const focusing=pendingFocus&&(!pendingFocus.clipId||pendingFocus.clipId===clip.id);
+      if(focusing&&Number.isFinite(pendingFocus.startSeconds)){
+        applyClipInterval(pendingFocus.startSeconds,pendingFocus.endSeconds);
+      }else if(Number.isFinite(d.start)&&Number.isFinite(d.end)&&d.start<d.end){
         window.ClipStudy?.setInterval?.(d.start,d.end);
       }
       const savedQuestion=typeof d.question==='string'&&d.question!==oldDefault&&d.question!==defaults?d.question:defaultQuestion();
@@ -410,13 +593,26 @@
       $('coach-preset').value=matchingKey||'custom';
       selectedExport=d.selectedExport||null;selectedAsk=d.selectedAsk||null;followUpId=d.followUpId||null;
       if(followUpId){$('coach-follow-up-context').hidden=false;$('coach-follow-up-context').textContent='Re-asking with previous question and response context.';}
-      showRange();setBusy(false);showMode('watch',false);refresh(true);clearInterval(timer);timer=setInterval(()=>refresh(),4000);
+      showRange();setBusy(false);showMode(focusing?'coach':'watch',false);refresh(true);clearInterval(timer);timer=setInterval(()=>refresh(),4000);
     },
-    close(){saveDraft();pendingAsk=null;generation++;owner=null;clearInterval(timer);},
+    close(){stopIntervalSeek();saveDraft();pendingAsk=null;pendingFocus=null;highlightedKey=null;generation++;owner=null;clearInterval(timer);},
     watch({session,clip,player}){
       stopWatch();let pendingSeek=null;
-      const requested=new URL(location.href).searchParams.get('coach_time');if(requested!==null&&clip){const t=Number(requested);if(Number.isFinite(t)&&t>=clip.original_start_seconds&&t<=clip.original_end_seconds){const seek=()=>{player.currentTime=t-clip.original_start_seconds;pendingSeek=null;};if(player.readyState)seek();else{pendingSeek=seek;player.addEventListener('loadedmetadata',seek,{once:true});}}}
-      stopWatch=()=>{if(pendingSeek)player.removeEventListener('loadedmetadata',pendingSeek);};
+      const requested=new URL(location.href).searchParams.get('coach_time');
+      if(requested!==null&&clip&&player){
+        const t=Number(requested);
+        if(Number.isFinite(t)&&t>=clip.original_start_seconds&&t<=clip.original_end_seconds){
+          const expectedSrc=player.getAttribute('src'),expectedClipId=clip.id,expectedSessionId=session?.id;
+          const seek=()=>{
+            pendingSeek=null;
+            if(typeof model==='object'&&model&&(model.session?.id!==expectedSessionId||model.current!==expectedClipId))return;
+            if(player.getAttribute('src')!==expectedSrc)return;
+            player.currentTime=t-clip.original_start_seconds;
+          };
+          if(player.readyState>=1)seek();else{pendingSeek=seek;player.addEventListener('loadedmetadata',seek,{once:true});}
+        }
+      }
+      stopWatch=()=>{if(pendingSeek){player.removeEventListener('loadedmetadata',pendingSeek);pendingSeek=null;}};
     }
   };
 })();

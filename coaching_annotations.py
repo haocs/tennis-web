@@ -45,14 +45,16 @@ class Annotations:
     def annotation_list(self, source, publication, clips, after=None, limit=201):
         with self.db() as db:
             if after is None:
-                rows = db.execute('SELECT a.*, j.body FROM annotations a JOIN jobs j ON j.id=a.job_id WHERE a.source_id=? ORDER BY a.updated DESC', (source,)).fetchall()
+                rows = db.execute('SELECT a.*, j.body, j.asked_at FROM annotations a JOIN jobs j ON j.id=a.job_id WHERE a.source_id=? ORDER BY COALESCE(j.asked_at, a.updated) DESC, a.updated DESC, a.id DESC', (source,)).fetchall()
             else:
-                rows = db.execute('SELECT a.*, j.body FROM annotations a JOIN jobs j ON j.id=a.job_id WHERE a.source_id=? AND a.id>? ORDER BY a.id LIMIT ?', (source,after,limit)).fetchall()
+                rows = db.execute('SELECT a.*, j.body, j.asked_at FROM annotations a JOIN jobs j ON j.id=a.job_id WHERE a.source_id=? AND a.id>? ORDER BY a.id LIMIT ?', (source,after,limit)).fetchall()
         result = []
         for row in rows:
-            a = dict(row); body = json.loads(a.pop('body'))
+            a = dict(row); body = json.loads(a.pop('body')); asked_at = a.pop('asked_at', None)
+            a['asked_at'] = asked_at
             a['proposal'] = json.loads(a['proposal']); a['current'] = json.loads(a['current'])
             a['provenance'] = {k: body.get(k) for k in ('source_id','source_sha256','clip_id','publication','export_id','prompt_version','processing','player_context','original_start','original_end')}
+            a['provenance']['asked_at'] = asked_at
             # Even an untimed proposal retains its historical selection without inventing precise cue timing.
             intervals = a['current']['applies_to'] or [dict(start_seconds=body['original_start'], end_seconds=body['original_end'])]
             a['related_clip_ids'] = [c['id'] for c in clips if any(i['start_seconds'] <= c['original_end_seconds'] and i['end_seconds'] >= c['original_start_seconds'] for i in intervals)]

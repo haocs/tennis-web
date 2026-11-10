@@ -14,13 +14,17 @@ are retained; returning restores the studied clip position, paused, and the pare
 original playback speed. Study never auto-advances to a different clip.
 
 Playback starts paused at the parent's position. The progress bar includes two
-accessible draggable pins (**Interval start** and **Interval end**, defaulting to
-the beginning and end of the clip) alongside the playhead slider. Dragging or
-stepping either pin clamps the active `[start, end]` interval with at least a
-0.1-second span (or full clip duration for shorter clips) and keeps the playhead
-inside that interval. Ordinary playback, stepping, seeking and looping are strictly
-bounded to the selected `[start, end]` interval: playback pauses at the end pin
-unless loop is enabled, in which case it wraps directly back to the start pin.
+accessible draggable boundary lines (**Interval start** and **Interval end**,
+defaulting to the beginning and end of the clip) alongside the playhead slider.
+Each boundary uses a thin 3 px visual marker with an enlarged 44×44 px touch hit
+target and nearest-boundary pointer arbitration so narrow intervals remain
+independently draggable on mobile and desktop without covering the timeline with
+lettered badges. Dragging or stepping either boundary clamps the active
+`[start, end]` interval with at least a 0.1-second span (or full clip duration for
+shorter clips) and keeps the playhead inside that interval. Ordinary playback,
+stepping, seeking and looping are strictly bounded to the selected `[start, end]`
+interval: playback pauses at the end boundary unless loop is enabled, in which case
+it wraps directly back to the start boundary.
 
 Compact transport controls provide `<` (0.1-second step back), a play/pause icon
 button, `>` (0.1-second step forward), a watch-style playback speed selector

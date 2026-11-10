@@ -167,7 +167,7 @@ def test_worker_server_error_is_actionable_and_redacted(tmp_path,monkeypatch):
 
 def test_share_export_capability_gating_and_profile_isolation(setup):
     import hashlib
-    from worker.tennis_coach.annotations import RENDER_SHARE_CAPABILITY
+    from worker.tennis_coach.annotations import RENDER_SHARE_CAPABILITY, RENDER_SHARE_V1_CAPABILITY
     app,root,data=enabled(setup);c=app.test_client()
     body=dict(selection(data),intent='share',quality='high',request_id='share-request-001')
     created=post(c,'exports',body)
@@ -176,21 +176,22 @@ def test_share_export_capability_gating_and_profile_isolation(setup):
     assert spec['intent']=='share' and spec['quality']=='high'
     assert spec['required_capability']==RENDER_SHARE_CAPABILITY
     assert spec['audio']=='retime_if_present' and spec['analysis_mode']=='none'
-    # Legacy render worker without share-export-v1 capability must not claim share jobs.
+    # Legacy render worker without share-export-v2 capability (including old v1-only renderer) must not claim v2 share jobs.
     assert post(c,'worker/render/claim',{'worker_id':'old-render','capabilities':[]},'test-worker-secret').json['job'] is None
-    claim=post(c,'worker/render/claim',{'worker_id':'new-render','capabilities':[RENDER_SHARE_CAPABILITY]},'test-worker-secret').json['job']
+    assert post(c,'worker/render/claim',{'worker_id':'v1-render','capabilities':[RENDER_SHARE_V1_CAPABILITY]},'test-worker-secret').json['job'] is None
+    claim=post(c,'worker/render/claim',{'worker_id':'new-render','capabilities':[RENDER_SHARE_CAPABILITY,RENDER_SHARE_V1_CAPABILITY]},'test-worker-secret').json['job']
     assert claim['id']==created.json['id']
     fence=hashlib.sha256(claim['token'].encode()).hexdigest()[:24]
     folder=Path(app.config['COACH_MEDIA_ROOT'])/claim['id']/fence;folder.mkdir(parents=True)
     (folder/'excerpt.mp4').write_bytes(b'high-quality-video')
-    payload=dict(recipe=claim['body'],lease_token=claim['token'],frames=[],bytes=18,output_seconds=4,sha256='b'*64,render_seconds=0.8,audio_output='retimed')
+    payload=dict(recipe=claim['body'],lease_token=claim['token'],frames=[],bytes=18,output_seconds=4,sha256='b'*64,render_seconds=0.8,audio_output='retimed',color_output='sdr-bt709',video_codec='h264',pix_fmt='yuv420p',fps_output=60)
     (folder/'recipe.json').write_text(json.dumps(payload))
     # Unexpected coaching prompt file in share export directory is rejected.
     (folder/'prompt.txt').write_text('should-not-exist')
     assert post(c,'worker/jobs/'+claim['id']+'/complete',{'token':claim['token']},'test-worker-secret').status_code==400
     (folder/'prompt.txt').unlink()
     done=post(c,'worker/jobs/'+claim['id']+'/complete',{'token':claim['token']},'test-worker-secret')
-    assert done.status_code==200 and done.json['result']['audio_output']=='retimed'
+    assert done.status_code==200 and done.json['result']['audio_output']=='retimed' and done.json['result']['color_output']=='sdr-bt709'
     # Share exports cannot be used as coaching evidence.
     rejected_ai=post(c,'requests',{'export_id':claim['id'],'prompt':'coach','consent':True,'request_id':'ask-from-share'})
     assert rejected_ai.status_code==400 and 'Share downloads cannot be used as coaching evidence' in rejected_ai.json['error']
@@ -199,8 +200,8 @@ def test_share_export_capability_gating_and_profile_isolation(setup):
     assert dl.status_code==200 and f'{CLIP}-interval-excerpt.mp4' in dl.headers.get('Content-Disposition','')
 
 
-@pytest.mark.parametrize('hdr', [False, True])
-def test_share_export_ffmpeg_synthetic_video_audio_and_hdr(setup, tmp_path, hdr):
+@pytest.mark.parametrize('profile', ['sdr', 'hlg', 'pq'])
+def test_share_export_ffmpeg_synthetic_video_audio_and_hdr(setup, tmp_path, profile):
     import hashlib, os, re, shutil, subprocess
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'worker'))
     from tennis_coach.worker import atempo_chain, render
@@ -215,47 +216,114 @@ def test_share_export_ffmpeg_synthetic_video_audio_and_hdr(setup, tmp_path, hdr)
     c = app.test_client()
     clip_rel = data.get('media_directory', data['id']) + '/' + data['clips'][0]['file']
     src_path = Path(app.config['LIBRARY_ROOT']) / 'media' / clip_rel
+    hdr = profile != 'sdr'
     # Encoder VUI tags are a precondition, not a mocked tone-map command.
-    if hdr:
-        encoding = ['-c:v', 'libx265', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p10le',
-                    '-x265-params', 'colorprim=bt2020:transfer=arib-std-b67:colormatrix=bt2020nc:log-level=error:pools=1:frame-threads=1', '-tag:v', 'hvc1']
+    if profile == 'sdr':
+        encoding = ['-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-crf', '18',
+                    '-x264-params', 'colorprim=bt709:transfer=bt709:colormatrix=bt709',
+                    '-color_primaries', 'bt709', '-color_trc', 'bt709', '-colorspace', 'bt709']
     else:
-        encoding = ['-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-crf', '18',
-                    '-x264-params', 'colorprim=bt709:transfer=bt709:colormatrix=bt709']
+        trc = 'arib-std-b67' if profile == 'hlg' else 'smpte2084'
+        transfer_code = '18' if profile == 'hlg' else '16'
+        encoding = ['-vf', f'zscale=pin=bt709:tin=bt709:min=bt709:rin=limited:p=bt2020:t={trc}:m=bt2020nc:r=limited,format=yuv420p10le',
+                    '-c:v', 'libx265', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p10le',
+                    '-x265-params', f'pools=1:frame-threads=1:log-level=error:colorprim=9:transfer={transfer_code}:colormatrix=9',
+                    '-tag:v', 'hvc1', '-color_primaries', 'bt2020', '-color_trc', trc, '-colorspace', 'bt2020nc']
     subprocess.run([ff, '-hide_banner', '-loglevel', 'error', '-y',
-                    '-f', 'lavfi', '-i', 'testsrc2=size=1280x720:rate=30:duration=3',
-                    '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000:duration=3',
+                    '-f', 'lavfi', '-i', 'testsrc2=size=640x360:rate=60:duration=2',
+                    '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000:duration=2',
                     *encoding, '-c:a', 'aac', '-b:a', '128k', str(src_path)],
                    check=True, capture_output=True, timeout=30)
     if hdr:
+        expected_trc = 'arib-std-b67' if profile == 'hlg' else 'smpte2084'
         input_probe = subprocess.run([ff, '-hide_banner', '-i', str(src_path)],
                                      capture_output=True, text=True, timeout=15).stderr
-        assert 'yuv420p10le' in input_probe and 'bt2020nc/bt2020/arib-std-b67' in input_probe
-    data['video']['hdr'] = hdr
+        assert 'yuv420p10le' in input_probe and f'bt2020nc/bt2020/{expected_trc}' in input_probe
+    # Deliberately invert the manifest hdr flag to verify probed stream tags are authoritative over stale flags.
+    data['video']['hdr'] = not hdr
     data.setdefault('media_checksums', {})[data['clips'][0]['file']] = hashlib.sha256(src_path.read_bytes()).hexdigest()
     (Path(app.config['LIBRARY_ROOT']) / 'metadata/sessions' / f'{ID}.json').write_text(json.dumps(data))
-    body = dict(source_id=ID, clip_id=CLIP, publication=data['published_at'], start=0.5,
-                end=1.5, speed=0.25, crop=[0.25, 0.25, 0.5, 0.5], intent='share',
-                quality='high', request_id='share-ffmpeg-001')
-    assert post(c, 'exports', body).status_code == 201
+    body = dict(source_id=ID, clip_id=CLIP, publication=data['published_at'], start=0.25,
+                end=0.75, speed=0.5, crop=[0.25, 0.25, 0.5, 0.5], intent='share',
+                quality='high', request_id=f'share-ffmpeg-{profile}')
+    created = post(c, 'exports', body)
+    assert created.status_code == 201
+    assert created.json['body']['color'] == 'preserve-hdr-or-sdr'
     job = post(c, 'worker/render/claim', {'worker_id': 'render-worker',
                'capabilities': [RENDER_SHARE_CAPABILITY]}, 'test-worker-secret').json['job']
-    local = tmp_path / 'local'
+    local = tmp_path / f'local-{profile}'
     local.mkdir()
     cfg = dict(library_media_root=str(Path(app.config['LIBRARY_ROOT']) / 'media'),
                artifact_root=str(app.config['COACH_MEDIA_ROOT']), ffmpeg=ff)
     info = render(cfg, job, local)
-    assert info['frames'] == [] and info['audio_output'] == 'retimed'
+    assert info['frames'] == [] and info['audio_output'] == 'retimed' and info['fps_output'] == 60
     fence = hashlib.sha256(job['token'].encode()).hexdigest()[:24]
     dest = Path(app.config['COACH_MEDIA_ROOT']) / job['id'] / fence
     assert sorted(p.name for p in dest.iterdir()) == ['excerpt.mp4', 'recipe.json']
     probe = subprocess.run([ff, '-hide_banner', '-i', str(dest / 'excerpt.mp4')],
                            capture_output=True, text=True, timeout=15).stderr
-    assert 'Video: h264' in probe and '640x360' in probe and 'bt709' in probe
+    if hdr:
+        expected_trc = 'arib-std-b67' if profile == 'hlg' else 'smpte2084'
+        expected_color = 'hdr10-hlg-bt2020' if profile == 'hlg' else 'hdr10-pq-bt2020'
+        assert info['color_output'] == expected_color and info['video_codec'] == 'hevc' and info['pix_fmt'] == 'yuv420p10le'
+        assert 'Video: hevc' in probe and 'hvc1' in probe and 'yuv420p10le' in probe
+        assert f'bt2020nc/bt2020/{expected_trc}' in probe and '320x180' in probe and '60 fps' in probe
+    else:
+        assert info['color_output'] == 'sdr-bt709' and info['video_codec'] == 'h264' and info['pix_fmt'] == 'yuv420p'
+        assert 'Video: h264' in probe and 'yuv420p' in probe and '320x180' in probe and 'bt709' in probe and '60 fps' in probe
     assert 'Audio: aac' in probe
     measured = re.search(r'Duration: (\d+):(\d+):(\d+\.\d+)', probe)
     assert measured, probe
     h, m, sec = map(float, measured.groups())
-    assert h * 3600 + m * 60 + sec == pytest.approx(4.0, abs=0.1)
-    assert post(c, 'worker/jobs/' + job['id'] + '/complete',
-                {'token': job['token']}, 'test-worker-secret').status_code == 200
+    assert h * 3600 + m * 60 + sec == pytest.approx(1.0, abs=0.12)
+    completed = post(c, 'worker/jobs/' + job['id'] + '/complete',
+                     {'token': job['token']}, 'test-worker-secret')
+    assert completed.status_code == 200
+    assert completed.json['result']['color_output'] == info['color_output']
+    assert completed.json['result']['video_codec'] == info['video_codec']
+    assert completed.json['result']['fps_output'] == 60
+    if profile == 'hlg':
+        # Verify coaching export on HDR clip still converts to 30fps 8-bit SDR H.264 and extracts frames.
+        coach_body = dict(source_id=ID, clip_id=CLIP, publication=data['published_at'], start=0.25,
+                          end=0.75, speed=0.5, crop=[0.25, 0.25, 0.5, 0.5], intent='coaching',
+                          quality='balanced', request_id='coach-from-hlg')
+        assert post(c, 'exports', coach_body).status_code == 201
+        coach_job = post(c, 'worker/render/claim', {'worker_id': 'render-worker',
+                         'capabilities': [RENDER_SHARE_CAPABILITY]}, 'test-worker-secret').json['job']
+        coach_local = tmp_path / 'local-coach-hlg'
+        coach_local.mkdir()
+        coach_info = render(cfg, coach_job, coach_local)
+        assert coach_info['color_output'] == 'sdr-bt709' and coach_info['video_codec'] == 'h264' and coach_info['fps_output'] == 30
+        assert len(coach_info['frames']) >= 4
+        # Verify 10-bit BT.709 SDR is treated as valid SDR rather than rejected as incomplete HDR.
+        sdr10_src = src_path.with_name('sdr10.mp4')
+        subprocess.run([ff, '-hide_banner', '-loglevel', 'error', '-y',
+                        '-f', 'lavfi', '-i', 'testsrc2=size=320x240:rate=30:duration=1',
+                        '-c:v', 'libx265', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p10le',
+                        '-x265-params', 'pools=1:frame-threads=1:log-level=error:colorprim=1:transfer=1:colormatrix=1',
+                        '-tag:v', 'hvc1', '-color_primaries', 'bt709', '-color_trc', 'bt709', '-colorspace', 'bt709',
+                        str(sdr10_src)],
+                       check=True, capture_output=True, timeout=20)
+        sdr10_job = copy.deepcopy(job)
+        sdr10_job['id'] = 'job-sdr10'
+        sdr10_job['body']['hdr'] = True
+        sdr10_job['body']['media_ref']['path'] = str(sdr10_src.relative_to(Path(app.config['LIBRARY_ROOT']) / 'media'))
+        sdr10_job['body']['input_sha256'] = hashlib.sha256(sdr10_src.read_bytes()).hexdigest()
+        sdr10_local = tmp_path / 'local-sdr10'
+        sdr10_local.mkdir()
+        sdr10_info = render(cfg, sdr10_job, sdr10_local)
+        assert sdr10_info['color_output'] == 'sdr-bt709' and sdr10_info['video_codec'] == 'h264' and sdr10_info['pix_fmt'] == 'yuv420p'
+        # Verify incomplete/untagged HDR metadata fails deterministically rather than guessing tags.
+        bad_job = copy.deepcopy(job)
+        bad_job['body']['hdr'] = True
+        bad_src = src_path.with_name('untagged.mp4')
+        subprocess.run([ff, '-hide_banner', '-loglevel', 'error', '-y',
+                        '-f', 'lavfi', '-i', 'testsrc2=size=320x240:rate=30:duration=1',
+                        '-c:v', 'libx264', '-pix_fmt', 'yuv420p', str(bad_src)],
+                       check=True, capture_output=True, timeout=20)
+        bad_job['body']['media_ref']['path'] = str(bad_src.relative_to(Path(app.config['LIBRARY_ROOT']) / 'media'))
+        bad_job['body']['input_sha256'] = hashlib.sha256(bad_src.read_bytes()).hexdigest()
+        bad_local = tmp_path / 'local-bad-hdr'
+        bad_local.mkdir()
+        with pytest.raises(ValueError, match='HDR clip has incomplete or unsupported color metadata'):
+            render(cfg, bad_job, bad_local)

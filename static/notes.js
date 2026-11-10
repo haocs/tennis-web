@@ -254,8 +254,22 @@ const NoteUI=(()=>{
     if(b.dataset.noteAction==='archive'){if(box.id==='entity-notes-list')editNoteDirty=false;await update(a,{status:a.status==='active'?'archived':'active'},cuts?cutContextForRecord(a):{publication:source.published_at});await refresh(true);toast(a.status==='active'?'Archived.':'Restored.');}
     if(b.dataset.noteAction==='history'){const h=$('.note-history',card);let after=0,versions=[];do{const r=await api('/api/annotations/'+a.id+'/revisions'+(after?'?after='+after:''));versions.push(...r.revisions);after=r.next_after;}while(after);h.textContent=versions.map(r=>'v'+r.version+' · '+(r.status||'')+(r.body?.verdict?' · '+(verdicts[r.body.verdict]||r.body.verdict):'')+(r.target?.scope==='interval'&&r.kind==='cut_feedback'?' · '+preciseTime(r.target.start_seconds)+'–'+preciseTime(r.target.end_seconds):'')+' · '+(r.body?.text||r.content?.cue||'')).join('\n');h.hidden=!h.hidden;}
     if(b.dataset.noteAction==='coach'){
-     const fragment=MomentPlayback.inScope([a],scopeOptions())[0]?.fragments[0];const clip=source.clips.find(c=>c.id===(model.mode==='clip'?model.current:fragment?.clip_id));if(!clip)throw new Error('No current clip contains this suggestion. Its history is retained in the export.');
-     playClip(clip.id,false);$('#study-clip').click();$('#study-mode-coach').click();$('#coach-step-4').click();
+     const scopedFrag=MomentPlayback.inScope([a],scopeOptions())[0]?.fragments[0];
+     const fallbackFrag=(a.visible_intervals||[])[0];
+     const fragment=scopedFrag||fallbackFrag;
+     const cur=currentClip();
+     const tStart=a.target?.start_seconds,tEnd=a.target?.end_seconds;
+     const overlapsCur=cur&&Number.isFinite(tStart)&&(Number.isFinite(tEnd)&&tEnd>tStart?Math.max(cur.original_start_seconds,tStart)<Math.min(cur.original_end_seconds,tEnd):(cur.original_start_seconds<=tStart&&tStart<cur.original_end_seconds));
+     const clipId=model.mode==='clip'?(scopedFrag?.clip_id||(overlapsCur?cur.id:fallbackFrag?.clip_id)):fragment?.clip_id;
+     const clip=clipId?source.clips.find(c=>c.id===clipId):null;
+     if(!clip)throw new Error('No current clip contains this suggestion. Its history is retained in the export.');
+     const annotationId=a.id.startsWith('coach:')?a.id.slice(6):(a.origin&&!a.body?.response?a.origin.reference:null);
+     const jobId=a.origin?.job_id||(a.id.startsWith('coach-response:')?a.id.slice(15):null);
+     const startSeconds=fragment?.original_start??a.target?.start_seconds;
+     const endSeconds=fragment?.original_end??a.target?.end_seconds??startSeconds;
+     playClip(clip.id,false);
+     window.Coach?.focusTarget?.({clipId:clip.id,jobId,annotationId,startSeconds,endSeconds});
+     $('#study-clip').click();
     }
    }catch(e){toast(e.message);if(e.status===409)await refresh(true);}finally{b.disabled=false;}
   });
