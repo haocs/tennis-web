@@ -322,6 +322,228 @@
     }
   }
 
+  function round3(value) {
+    return Math.round(value * 1000) / 1000;
+  }
+
+  function planAutoCoachSampleTimes(duration, maxSamples = 16) {
+    if (!finite(duration) || duration <= 0) return [];
+    const cap = clamp(Math.floor(finite(maxSamples) ? maxSamples : 16), 2, 16);
+    const count =
+      duration < 1.0
+        ? clamp(Math.floor(duration / 0.2), 2, Math.min(4, cap))
+        : clamp(Math.round(duration / 1.5), 4, cap);
+    return Array.from({length: count}, (_, i) => round3((duration * (i + 0.5)) / count));
+  }
+
+  function scoreAutoCoachSamples(rawSamples, frameWidth = 1, frameHeight = 1, options = {}) {
+    if (!Array.isArray(rawSamples) || !rawSamples.length) return [];
+    const minScore = finite(options.minScore) ? options.minScore : 0.22;
+    const minArea = finite(options.minArea) ? options.minArea : 0.004;
+    const sorted = rawSamples
+      .filter(s => s && finite(s.time) && s.time >= 0)
+      .map(s => ({...s, time: Number(s.time)}))
+      .sort((a, b) => a.time - b.time);
+    let previousBox = null;
+    let previousTime = null;
+    const scored = sorted.map(sample => {
+      const fw = finite(sample.frameWidth) && sample.frameWidth > 0 ? sample.frameWidth : frameWidth;
+      const fh = finite(sample.frameHeight) && sample.frameHeight > 0 ? sample.frameHeight : frameHeight;
+      const candidates = normalizeDetections(sample.detections || [], fw, fh, minScore);
+      const trackContext =
+        previousBox && previousTime !== null && sample.time - previousTime <= 2.5 ? previousBox : null;
+      const primary = selectPrimaryPerson(candidates, trackContext);
+      if (!primary || primary.area < minArea) {
+        if (previousTime !== null && sample.time - previousTime > 1.5) {
+          previousBox = null;
+          previousTime = null;
+        }
+        return {
+          time: sample.time,
+          hasPerson: false,
+          primary: null,
+          presenceScore: 0,
+          motionScore: 0,
+          hasMotionContext: false,
+          activityScore: 0,
+        };
+      }
+      const presenceScore =
+        clamp(Math.sqrt(primary.area) / 0.28, 0, 1) * 0.65 +
+        clamp(primary.bottom, 0, 1) * 0.2 +
+        clamp(primary.score, 0, 1) * 0.15;
+      let motionScore = 0;
+      let hasMotionContext = false;
+      if (previousBox && previousTime !== null) {
+        const dt = sample.time - previousTime;
+        const dc = Math.hypot(primary.cx - previousBox.cx, primary.cy - previousBox.cy);
+        const overlap = iou(primary, previousBox);
+        if (dt > 0.02 && dt <= 2.5 && (dc < 0.55 || overlap > 0.02)) {
+          const ds = Math.hypot(primary.width - previousBox.width, primary.height - previousBox.height);
+          const scale = Math.max(0.08, Math.sqrt(primary.area));
+          const velocity = (dc + 0.35 * ds) / (dt * scale);
+          motionScore = clamp(velocity / 1.2, 0, 1);
+          hasMotionContext = true;
+        }
+      }
+      previousBox = primary;
+      previousTime = sample.time;
+      return {
+        time: sample.time,
+        hasPerson: true,
+        primary,
+        presenceScore,
+        motionScore,
+        hasMotionContext,
+        activityScore: 0,
+      };
+    });
+
+    // Propagate neighbor motion to the leading frame of a continuous movement sequence.
+    for (let i = 0; i < scored.length - 1; i += 1) {
+      const cur = scored[i];
+      const next = scored[i + 1];
+      if (
+        cur.hasPerson &&
+        !cur.hasMotionContext &&
+        next.hasPerson &&
+        next.hasMotionContext &&
+        next.time - cur.time <= 2.5
+      ) {
+        cur.motionScore = Math.max(cur.motionScore, next.motionScore * 0.85);
+        cur.hasMotionContext = true;
+      }
+    }
+
+    for (const item of scored) {
+      if (!item.hasPerson) {
+        item.activityScore = 0;
+      } else if (item.hasMotionContext) {
+        item.activityScore = 0.45 * item.presenceScore + 0.55 * item.motionScore;
+      } else {
+        item.activityScore = 0.5 * item.presenceScore;
+      }
+    }
+    return scored;
+  }
+
+  function selectAutoCoachWindows(rawSamples, duration, options = {}) {
+    if (!finite(duration) || duration < 0.1) return [];
+    const maxWindows = clamp(Math.floor(finite(options.maxWindows) ? options.maxWindows : 2), 0, 2);
+    if (maxWindows <= 0) return [];
+    const frameWidth = finite(options.frameWidth) && options.frameWidth > 0 ? options.frameWidth : 1;
+    const frameHeight = finite(options.frameHeight) && options.frameHeight > 0 ? options.frameHeight : 1;
+    const minWindowScore = finite(options.minWindowScore) ? options.minWindowScore : 0.24;
+    const minMotionScore = finite(options.minMotionScore) ? options.minMotionScore : 0.08;
+    const origStartBase = finite(options.originalStartSeconds) ? Math.max(0, options.originalStartSeconds) : 0;
+    const origEndLimit = finite(options.originalEndSeconds)
+      ? Math.max(origStartBase, options.originalEndSeconds)
+      : origStartBase + duration;
+
+    const scored = scoreAutoCoachSamples(rawSamples, frameWidth, frameHeight, options);
+    if (!scored.length) return [];
+
+    const maxAllowedSpan = Math.min(30, duration);
+    const targetSpan = duration < 2.5 ? duration : clamp(duration * 0.35, 2.5, 8.0);
+    const windowSpan = clamp(targetSpan, Math.min(0.1, maxAllowedSpan), maxAllowedSpan);
+    const maxStart = Math.max(0, duration - windowSpan);
+
+    const rawStarts = [0, maxStart];
+    for (let i = 0; i < scored.length; i += 1) {
+      const t = scored[i].time;
+      rawStarts.push(
+        clamp(t - windowSpan * 0.5, 0, maxStart),
+        clamp(t - windowSpan * 0.25, 0, maxStart),
+        clamp(t - windowSpan * 0.75, 0, maxStart)
+      );
+      if (i + 1 < scored.length) {
+        const mid = (t + scored[i + 1].time) * 0.5;
+        rawStarts.push(clamp(mid - windowSpan * 0.5, 0, maxStart));
+      }
+    }
+    rawStarts.sort((a, b) => a - b);
+    const candidateStarts = [];
+    for (const s of rawStarts) {
+      const rounded = round3(s);
+      if (!candidateStarts.length || Math.abs(rounded - candidateStarts[candidateStarts.length - 1]) >= 0.04) {
+        candidateStarts.push(rounded);
+      }
+    }
+
+    const minDetected = duration >= 1.5 && scored.length >= 4 ? 2 : 1;
+    const eligible = [];
+    for (const start of candidateStarts) {
+      const end = round3(clamp(start + windowSpan, Math.min(duration, start + 0.1), duration));
+      if (end - start < 0.1 - 1e-6) continue;
+      const inWindow = scored.filter(s => s.time >= start - 1e-6 && s.time <= end + 1e-6);
+      if (!inWindow.length) continue;
+      const detected = inWindow.filter(s => s.hasPerson);
+      if (detected.length < minDetected) continue;
+      const peakMotion = detected.reduce((m, s) => Math.max(m, s.motionScore), 0);
+      const maxPresence = detected.reduce((m, s) => Math.max(m, s.presenceScore), 0);
+      if (detected.length >= 2) {
+        if (peakMotion < minMotionScore) continue;
+      } else if (maxPresence < 0.45) {
+        continue;
+      }
+      const meanActivity = inWindow.reduce((sum, s) => sum + s.activityScore, 0) / inWindow.length;
+      const detectedMeanActivity = detected.reduce((sum, s) => sum + s.activityScore, 0) / detected.length;
+      const score = 0.5 * meanActivity + 0.3 * detectedMeanActivity + 0.2 * peakMotion;
+      if (score < minWindowScore) continue;
+
+      const totalAct = detected.reduce((sum, s) => sum + s.activityScore, 0);
+      const centroid =
+        totalAct > 0
+          ? detected.reduce((sum, s) => sum + s.time * s.activityScore, 0) / totalAct
+          : (start + end) * 0.5;
+      const center = (start + end) * 0.5;
+      const centerAlign = 1 - clamp(Math.abs(centroid - center) / Math.max(0.25, windowSpan * 0.5), 0, 1);
+      const rankingScore = score + 0.03 * centerAlign;
+      eligible.push({
+        start,
+        end,
+        center,
+        score: Number(score.toFixed(4)),
+        rankingScore,
+        peakMotion: Number(peakMotion.toFixed(4)),
+        detectedCount: detected.length,
+        sampleCount: inWindow.length,
+      });
+    }
+
+    if (!eligible.length) return [];
+    eligible.sort((a, b) => b.rankingScore - a.rankingScore || a.start - b.start);
+
+    const chosen = [eligible[0]];
+    if (maxWindows >= 2 && duration >= 5.0) {
+      const first = eligible[0];
+      const minGap = duration >= 9.0 ? 0.5 : 0;
+      const minCenterSep = Math.max(2.5, windowSpan * 0.85);
+      for (let i = 1; i < eligible.length; i += 1) {
+        const cand = eligible[i];
+        const nonOverlapping = cand.end <= first.start - minGap + 1e-6 || cand.start >= first.end + minGap - 1e-6;
+        if (!nonOverlapping) continue;
+        if (Math.abs(cand.center - first.center) < minCenterSep - 1e-6) continue;
+        if (cand.score < first.score * 0.45) continue;
+        chosen.push(cand);
+        break;
+      }
+    }
+
+    chosen.sort((a, b) => a.start - b.start);
+    return chosen.map((w, idx) => ({
+      rank: idx + 1,
+      start: w.start,
+      end: w.end,
+      original_start: round3(clamp(origStartBase + w.start, origStartBase, origEndLimit)),
+      original_end: round3(clamp(origStartBase + w.end, origStartBase, origEndLimit)),
+      score: w.score,
+      peakMotion: w.peakMotion,
+      detectedCount: w.detectedCount,
+      sampleCount: w.sampleCount,
+    }));
+  }
+
   return {
     finite,
     clamp,
@@ -334,5 +556,8 @@
     projectBoxToStage,
     diagnosticsVerdict,
     AutoFocusTracker,
+    planAutoCoachSampleTimes,
+    scoreAutoCoachSamples,
+    selectAutoCoachWindows,
   };
 });

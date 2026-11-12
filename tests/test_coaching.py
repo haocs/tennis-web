@@ -327,3 +327,337 @@ def test_share_export_ffmpeg_synthetic_video_audio_and_hdr(setup, tmp_path, prof
         bad_local.mkdir()
         with pytest.raises(ValueError, match='HDR clip has incomplete or unsupported color metadata'):
             render(cfg, bad_job, bad_local)
+
+
+def _complete_render_job(app, client, render_id):
+    import hashlib
+    claim = post(client, 'worker/render/claim', {'worker_id': 'render-auto'}, 'test-worker-secret').json['job']
+    assert claim['id'] == render_id
+    fence = hashlib.sha256(claim['token'].encode()).hexdigest()[:24]
+    folder = Path(app.config['COACH_MEDIA_ROOT']) / claim['id'] / fence
+    folder.mkdir(parents=True, exist_ok=True)
+    frame_bytes = b'auto-frame-bytes'
+    frame_sha = hashlib.sha256(frame_bytes).hexdigest()
+    (folder / 'excerpt.mp4').write_bytes(b'auto-video')
+    (folder / 'frame-000.jpg').write_bytes(frame_bytes)
+    (folder / 'prompt.txt').write_text(claim['body'].get('question') or 'coach')
+    evidence_dir = Path(app.config['COACH_MEDIA_ROOT']) / 'evidence/frames'
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    (evidence_dir / f'{frame_sha}.jpg').write_bytes(frame_bytes)
+    payload = dict(
+        recipe=claim['body'],
+        lease_token=claim['token'],
+        frames=[{
+            'file': 'frame-000.jpg',
+            'sha256': frame_sha,
+            'original_seconds': claim['body']['original_start'] + 0.25,
+            'clip_seconds': claim['body']['start'] + 0.25,
+            'excerpt_seconds': 0.25 / claim['body']['speed'],
+        }],
+        bytes=10,
+        output_seconds=2.0,
+        sha256='c' * 64,
+        render_seconds=0.4,
+    )
+    (folder / 'recipe.json').write_text(json.dumps(payload))
+    done = post(client, 'worker/jobs/' + claim['id'] + '/complete', {'token': claim['token']}, 'test-worker-secret')
+    assert done.status_code == 200
+    return done.json
+
+
+def test_auto_coach_cap_concurrency_idempotency_and_slot_lifecycle(setup):
+    from worker.tennis_coach.annotations import CAPABILITY, evidence_manifest
+    app, root, data = enabled(setup)
+    c = app.test_client()
+
+    # 1. Validation of auto_detect requirements on /exports
+    base_auto = dict(
+        selection(data),
+        auto_detect=True,
+        consent=True,
+        question='Review my split step and recovery',
+        auto_slot=1,
+    )
+    assert post(c, 'exports', dict(base_auto, consent=False, request_id='auto-no-consent')).status_code == 400
+    assert post(c, 'exports', dict(base_auto, question='   ', request_id='auto-no-question')).status_code == 400
+    assert post(c, 'exports', dict(base_auto, intent='share', quality='high', request_id='auto-share')).status_code == 400
+    assert post(c, 'exports', dict(base_auto, auto_slot=3, request_id='auto-bad-slot')).status_code == 400
+
+    # 2. Concurrent /exports race: 6 threads attempting to reserve auto-coach exports for the same clip -> exactly 2 succeed (201) and 4 conflict (409).
+    def try_reserve(idx):
+        client = app.test_client()
+        payload = dict(
+            base_auto,
+            start=0.1 + idx * 0.05,
+            end=1.2 + idx * 0.05,
+            auto_slot=1 if idx % 2 == 0 else 2,
+            request_id=f'auto-race-export-{idx:02d}',
+        )
+        res = post(client, 'exports', payload)
+        return idx, res.status_code, res.json
+
+    with ThreadPoolExecutor(6) as pool:
+        outcomes = list(pool.map(try_reserve, range(6)))
+
+    created = [o for o in outcomes if o[1] == 201]
+    rejected = [o for o in outcomes if o[1] == 409]
+    assert len(created) == 2
+    assert len(rejected) == 4
+    assert all('Auto coach is limited to 2 reviews per clip' in o[2]['error'] for o in rejected)
+
+    r1_idx, _, r1 = created[0]
+    r2_idx, _, r2 = created[1]
+
+    # 3. Idempotent retry of an already-accepted request_id succeeds (201) even while 2/2 slots are full, while a mutated payload for that request_id conflicts (409).
+    retry_r1 = post(
+        c,
+        'exports',
+        dict(
+            base_auto,
+            start=0.1 + r1_idx * 0.05,
+            end=1.2 + r1_idx * 0.05,
+            auto_slot=1 if r1_idx % 2 == 0 else 2,
+            request_id=f'auto-race-export-{r1_idx:02d}',
+        ),
+    )
+    assert retry_r1.status_code == 201 and retry_r1.json['id'] == r1['id']
+    conflict_r1 = post(
+        c,
+        'exports',
+        dict(
+            base_auto,
+            start=0.5,
+            end=1.9,
+            request_id=f'auto-race-export-{r1_idx:02d}',
+        ),
+    )
+    assert conflict_r1.status_code == 409 and 'Request ID already used' in conflict_r1.json['error']
+
+    # 4. Failed render job releases its slot so a new auto-coach export can take its place.
+    claim_r2 = post(c, 'worker/render/claim', {'worker_id': 'render-fail'}, 'test-worker-secret').json['job']
+    # Claim order is FIFO; complete whichever was claimed first, fail the second.
+    first_claimed, second_claimed = (r1, r2) if claim_r2['id'] == r1['id'] else (r2, r1)
+    assert post(
+        c,
+        'worker/jobs/' + first_claimed['id'] + '/fail',
+        {'token': claim_r2['token'], 'result': {'error': 'FFmpeg failed'}},
+        'test-worker-secret',
+    ).status_code == 200
+
+    # Now 1 slot is free! Complete second_claimed and transition it to an AI request.
+    _complete_render_job(app, c, second_claimed['id'])
+    ai1_res = post(
+        c,
+        'requests',
+        {
+            'export_id': second_claimed['id'],
+            'prompt': second_claimed['body']['question'],
+            'consent': True,
+            'auto_detect': True,
+            'request_id': 'auto-ai-' + second_claimed['id'],
+        },
+    )
+    assert ai1_res.status_code == 201
+    ai1 = ai1_res.json
+    assert ai1['body']['auto_detect'] is True
+
+    # Duplicate AI request with a different request_id for the same completed export is rejected.
+    dup_ai = post(
+        c,
+        'requests',
+        {
+            'export_id': second_claimed['id'],
+            'prompt': second_claimed['body']['question'],
+            'consent': True,
+            'auto_detect': True,
+            'request_id': 'auto-ai-duplicate-id',
+        },
+    )
+    assert dup_ai.status_code == 409
+
+    # 5. Reserve the 2nd slot again, complete render, then test pre-call AI failure vs post-calling failure / needs_review.
+    r3_res = post(c, 'exports', dict(base_auto, start=0.3, end=1.7, auto_slot=2, request_id='auto-export-slot2-retry'))
+    assert r3_res.status_code == 201
+    r3 = r3_res.json
+    # Cap is now 2/2 again (ai1 + r3).
+    assert post(c, 'exports', dict(base_auto, start=0.4, end=1.8, request_id='auto-export-over-cap')).status_code == 409
+
+    _complete_render_job(app, c, r3['id'])
+    ai2_res = post(
+        c,
+        'requests',
+        {
+            'export_id': r3['id'],
+            'prompt': r3['body']['question'],
+            'consent': True,
+            'auto_detect': True,
+            'request_id': 'auto-ai-' + r3['id'],
+        },
+    )
+    assert ai2_res.status_code == 201
+    ai2 = ai2_res.json
+
+    # Claim ai1 and fail it BEFORE calling (preflight failure while leased) -> releases slot!
+    claim_ai1 = post(
+        c,
+        'worker/ai/claim',
+        {'worker_id': 'ai-worker', 'capabilities': [CAPABILITY]},
+        'test-worker-secret',
+    ).json['job']
+    assert claim_ai1['id'] == ai1['id']
+    assert post(
+        c,
+        'worker/jobs/' + ai1['id'] + '/fail',
+        {'token': claim_ai1['token'], 'result': {'error': 'Preflight login missing'}},
+        'test-worker-secret',
+    ).status_code == 200
+    assert c.get('/api/coaching/jobs/' + ai1['id']).json['result'].get('provider_called') is None
+
+    # Because ai1 failed before calling, 1 slot is free again!
+    r4_res = post(c, 'exports', dict(base_auto, start=0.2, end=1.6, auto_slot=1, request_id='auto-export-after-preflight-fail'))
+    assert r4_res.status_code == 201
+    r4 = r4_res.json
+    # Cancel r4 after it completes (before AI request is created) -> also releases slot!
+    _complete_render_job(app, c, r4['id'])
+    r4_done = c.get('/api/coaching/jobs/' + r4['id']).json
+    cancel_r4 = c.put(
+        '/api/coaching/jobs/' + r4['id'],
+        json={'action': 'cancel', 'version': r4_done['version']},
+        headers={'X-Tennis-Request': '1'},
+    )
+    assert cancel_r4.status_code == 200 and cancel_r4.json['state'] == 'cancelled'
+
+    # Now claim ai2, register evidence, cross 'calling', and fail AFTER calling -> provider_called=True, permanently consumes slot!
+    claim_ai2 = post(
+        c,
+        'worker/ai/claim',
+        {'worker_id': 'ai-worker', 'capabilities': [CAPABILITY]},
+        'test-worker-secret',
+    ).json['job']
+    assert claim_ai2['id'] == ai2['id']
+    assert post(
+        c,
+        'worker/jobs/' + ai2['id'] + '/evidence',
+        {'token': claim_ai2['token'], 'result': evidence_manifest(claim_ai2)},
+        'test-worker-secret',
+    ).status_code == 200
+    assert post(
+        c,
+        'worker/jobs/' + ai2['id'] + '/calling',
+        {'token': claim_ai2['token']},
+        'test-worker-secret',
+    ).status_code == 200
+    assert post(
+        c,
+        'worker/jobs/' + ai2['id'] + '/fail',
+        {'token': claim_ai2['token'], 'result': {'error': 'Provider timeout after sending'}},
+        'test-worker-secret',
+    ).status_code == 200
+    assert c.get('/api/coaching/jobs/' + ai2['id']).json['result'].get('provider_called') is True
+
+    # Create r5 to fill the remaining 1 slot; a 3rd slot attempt must fail because ai2 (failed post-calling) + r5 = 2/2.
+    r5_res = post(c, 'exports', dict(base_auto, start=0.3, end=1.8, auto_slot=1, request_id='auto-export-r5'))
+    assert r5_res.status_code == 201
+    assert post(c, 'exports', dict(base_auto, start=0.5, end=1.9, request_id='auto-export-blocked-by-post-call-fail')).status_code == 409
+
+
+def test_auto_coach_player_and_publication_validation_and_manual_coexistence(setup):
+    app, root, data = enabled(setup)
+    c = app.test_client()
+    # Create a saved player and assign as clip main player
+    p_res = c.post('/api/players', json={'name': 'Alex', 'height_cm': 178, 'level': 'intermediate'}, headers={'X-Tennis-Request': '1'})
+    assert p_res.status_code == 201
+    player = p_res.json
+    assert c.put(
+        f'/api/sessions/{ID}/clips/{CLIP}/player',
+        json={'player_id': player['id'], 'version': 0, 'publication': data['published_at']},
+        headers={'X-Tennis-Request': '1'},
+    ).status_code == 200
+
+    base_auto = dict(
+        selection(data),
+        auto_detect=True,
+        consent=True,
+        question='Check my preparation',
+        player_id=player['id'],
+        player_profile_version=player['version'],
+    )
+    # Stale player_profile_version or publication is rejected on /exports immediately
+    assert post(c, 'exports', dict(base_auto, player_profile_version=player['version'] + 9, request_id='stale-player-ver')).status_code == 409
+    assert post(c, 'exports', dict(base_auto, publication=data['published_at'] - 1, request_id='stale-pub')).status_code == 409
+
+    # Fill 2/2 auto-coach slots for CLIP
+    for idx in (1, 2):
+        r = post(c, 'exports', dict(base_auto, start=0.1 * idx, end=1.4 + 0.1 * idx, auto_slot=idx, request_id=f'auto-full-{idx}'))
+        assert r.status_code == 201
+
+    assert post(c, 'exports', dict(base_auto, start=0.5, end=1.8, request_id='auto-full-3')).status_code == 409
+
+    # Manual coaching export and manual AI request on the SAME clip are completely unaffected by the 2/2 auto cap!
+    manual_exp = post(c, 'exports', dict(selection(data), question='Manual question', request_id='manual-while-auto-full'))
+    assert manual_exp.status_code == 201
+    # Complete the two auto exports first in FIFO order, then the manual export
+    with app.extensions['coaching'].db() as db:
+        queued_renders = [r['id'] for r in db.execute("SELECT id FROM jobs WHERE role='render' AND state='queued' ORDER BY updated").fetchall()]
+    for rid in queued_renders:
+        _complete_render_job(app, c, rid)
+
+    manual_ai = post(
+        c,
+        'requests',
+        {
+            'export_id': manual_exp.json['id'],
+            'prompt': 'Manual question',
+            'consent': True,
+            'player_id': player['id'],
+            'player_profile_version': player['version'],
+            'request_id': 'manual-ai-while-auto-full',
+        },
+    )
+    assert manual_ai.status_code == 201 and not manual_ai.json['body'].get('auto_detect')
+
+    # Another clip in the same session or a new publication has an independent 2-review cap.
+    clip2_id = 'c' * 24
+    (root / 'media' / ID / 'Clips/clip-002.mp4').write_bytes(b'video')
+    data['video']['duration_seconds'] = 12
+    data['kept_seconds'] = 12
+    data['removed_seconds'] = 8
+    data['clips'].append(
+        dict(
+            data['clips'][0],
+            id=clip2_id,
+            index=2,
+            file='Clips/clip-002.mp4',
+            duration_seconds=2,
+            original_start_seconds=16,
+            original_end_seconds=18,
+            playback_start_seconds=10,
+            playback_end_seconds=12,
+        )
+    )
+    (Path(app.config['LIBRARY_ROOT']) / 'metadata/sessions' / f'{ID}.json').write_text(json.dumps(data))
+    other_clip_auto = dict(
+        selection(data),
+        clip_id=clip2_id,
+        start=0.2,
+        end=1.8,
+        auto_detect=True,
+        consent=True,
+        question='Check clip 2',
+        request_id='auto-clip-2-slot-1',
+    )
+    assert post(c, 'exports', other_clip_auto).status_code == 201
+
+    # Reprocessing into a new publication resets the per-publication clip auto-coach cap while keeping old history intact.
+    data['published_at'] += 10
+    (Path(app.config['LIBRARY_ROOT']) / 'metadata/sessions' / f'{ID}.json').write_text(json.dumps(data))
+    new_pub_auto = dict(
+        selection(data),
+        publication=data['published_at'],
+        auto_detect=True,
+        consent=True,
+        question='Check new publication clip 1',
+        request_id='auto-new-pub-slot-1',
+    )
+    assert post(c, 'exports', new_pub_auto).status_code == 201
+

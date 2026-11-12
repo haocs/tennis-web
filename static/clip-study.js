@@ -176,6 +176,7 @@
     for (const id of ['study-capture', 'study-sample']) $(id).disabled = !frameReady;
     $('study-copy').disabled = !!context?.capturing;
     for (const button of document.querySelectorAll('#study-frames button')) button.disabled = !!context?.capturing;
+    window.dispatchEvent(new CustomEvent('study-capture-state', {detail: {capturing: !!context?.capturing}}));
   }
   function enforceIntervalPlayback() {
     if (!context || !ready() || context.capturing || video.paused) return;
@@ -452,6 +453,304 @@
   setInterval(start, end, changed = 'end') {
     setIntervalBounds(start, end, changed);
   },
+  isCapturing() {
+    return !!context?.capturing;
+  },
+  cancelScan() {
+    if (context?.captureController) context.captureController.abort();
+  },
+  async scanPlayerMoments({maxWindows = 2, onProgress} = {}) {
+    if (!context) throw new Error('Wait for the clip to load before scanning.');
+    if (context.capturing) throw new Error('Another frame scan is already in progress.');
+    if (
+      window.__TENNIS_AUTOFOCUS_FORCE_UNSUPPORTED ||
+      typeof Worker !== 'function' ||
+      typeof WebAssembly !== 'object' ||
+      !window.AutoFocusCore
+    ) {
+      const err = new Error('Auto detect is unavailable in this browser. Select an interval and click Ask coach.');
+      err.code = 'unsupported';
+      throw err;
+    }
+    const owner = context;
+    const controller = new AbortController();
+    const signal = controller.signal;
+    owner.capturing = true;
+    owner.captureReturnTime = video.currentTime || 0;
+    owner.captureController = controller;
+    const returnTime = owner.captureReturnTime;
+    const returnInterval = {
+      start: owner.intervalStart,
+      end: owner.intervalEnd,
+      defaultEnd: owner.intervalDefaultEnd,
+    };
+    video.pause();
+    setControls();
+    let worker = null;
+    const canvas = document.createElement('canvas');
+    let selectedWindows = null;
+    try {
+      if (!ready() || video.readyState < 2 || !video.videoWidth || !video.videoHeight) {
+        await new Promise((resolve, reject) => {
+          if (signal.aborted || context !== owner) {
+            reject(new DOMException('Cancelled', 'AbortError'));
+            return;
+          }
+          if (ready() && video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0) {
+            resolve();
+            return;
+          }
+          let timer;
+          const cleanup = () => {
+            clearTimeout(timer);
+            video.removeEventListener('loadeddata', check);
+            video.removeEventListener('canplay', check);
+            video.removeEventListener('error', fail);
+            signal.removeEventListener('abort', abort);
+          };
+          const check = () => {
+            if (ready() && video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0) {
+              cleanup();
+              resolve();
+            }
+          };
+          const fail = () => {
+            cleanup();
+            reject(new Error('Wait until the clip can be played before scanning.'));
+          };
+          const abort = () => {
+            cleanup();
+            reject(new DOMException('Cancelled', 'AbortError'));
+          };
+          video.addEventListener('loadeddata', check);
+          video.addEventListener('canplay', check);
+          video.addEventListener('error', fail, {once: true});
+          signal.addEventListener('abort', abort, {once: true});
+          timer = setTimeout(fail, 6000);
+        });
+      }
+      if (signal.aborted || context !== owner) throw new DOMException('Cancelled', 'AbortError');
+      const dur = duration();
+      const A = window.AutoFocusCore;
+      const sampleTimes = A.planAutoCoachSampleTimes(dur, 16);
+      if (!sampleTimes.length) throw new Error('This clip is too short for automatic detection.');
+      const dims = A.sampleDimensions(video.videoWidth, video.videoHeight, 384);
+      canvas.width = dims.width;
+      canvas.height = dims.height;
+      const painter = canvas.getContext('2d', {willReadFrequently: true});
+      if (!painter) {
+        const err = new Error('Auto detect is unavailable in this browser. Select an interval and click Ask coach.');
+        err.code = 'unsupported';
+        throw err;
+      }
+
+      const cfg = window.__TENNIS_AUTOFOCUS_CONFIG || {};
+      const initTimeoutMs = Number(cfg.initTimeoutMs) > 0 ? Number(cfg.initTimeoutMs) : 30000;
+      const detectTimeoutMs = Number(cfg.detectTimeoutMs) > 0 ? Number(cfg.detectTimeoutMs) : 8000;
+      video.dataset.autoCoachState = 'loading';
+      video.dataset.autoCoachCaptures = '0';
+      video.dataset.autoCoachDetections = '0';
+
+      worker = new Worker('/static/autofocus-worker.js');
+      await new Promise((resolve, reject) => {
+        if (signal.aborted || context !== owner) {
+          reject(new DOMException('Cancelled', 'AbortError'));
+          return;
+        }
+        let timer;
+        const cleanup = () => {
+          clearTimeout(timer);
+          signal.removeEventListener('abort', onAbort);
+        };
+        const onAbort = () => {
+          cleanup();
+          reject(new DOMException('Cancelled', 'AbortError'));
+        };
+        signal.addEventListener('abort', onAbort, {once: true});
+        timer = setTimeout(() => {
+          cleanup();
+          const err = new Error('Auto detect is unavailable in this browser. Select an interval and click Ask coach.');
+          err.code = 'init_timeout';
+          reject(err);
+        }, initTimeoutMs);
+        worker.onmessage = event => {
+          const data = event?.data || {};
+          if (data.type === 'ready') {
+            cleanup();
+            resolve();
+          } else if (data.type === 'unsupported') {
+            cleanup();
+            const err = new Error('Auto detect is unavailable in this browser. Select an interval and click Ask coach.');
+            err.code = data.code || 'worker_graphics_unavailable';
+            reject(err);
+          } else if (data.type === 'error') {
+            cleanup();
+            const err = new Error('Auto detect is unavailable in this browser. Select an interval and click Ask coach.');
+            err.code = data.code || 'detector_error';
+            reject(err);
+          }
+        };
+        worker.onerror = () => {
+          cleanup();
+          const err = new Error('Auto detect is unavailable in this browser. Select an interval and click Ask coach.');
+          err.code = 'worker_error';
+          reject(err);
+        };
+        worker.postMessage({type: 'init', config: cfg});
+      });
+
+      if (signal.aborted || context !== owner) throw new DOMException('Cancelled', 'AbortError');
+      video.dataset.autoCoachState = 'scanning';
+      const samples = [];
+      const epoch = owner.generation;
+
+      for (let i = 0; i < sampleTimes.length; i += 1) {
+        if (signal.aborted || context !== owner) throw new DOMException('Cancelled', 'AbortError');
+        const at = sampleTimes[i];
+        onProgress?.({index: i + 1, total: sampleTimes.length, time: at});
+        await seekFrame(owner, at, signal);
+        await new Promise(resolve => {
+          let settled = false;
+          const finish = () => {
+            if (!settled) {
+              settled = true;
+              signal.removeEventListener('abort', finish);
+              resolve();
+            }
+          };
+          signal.addEventListener('abort', finish, {once: true});
+          requestAnimationFrame(() => requestAnimationFrame(finish));
+          setTimeout(finish, 36);
+        });
+        if (signal.aborted || context !== owner) throw new DOMException('Cancelled', 'AbortError');
+        painter.drawImage(video, 0, 0, dims.width, dims.height);
+        const imageData = painter.getImageData(0, 0, dims.width, dims.height);
+        const seq = i + 1;
+        video.dataset.autoCoachCaptures = String(seq);
+
+        const detections = await new Promise((resolve, reject) => {
+          if (signal.aborted || context !== owner) {
+            reject(new DOMException('Cancelled', 'AbortError'));
+            return;
+          }
+          let timer;
+          const cleanup = () => {
+            clearTimeout(timer);
+            signal.removeEventListener('abort', onAbort);
+          };
+          const onAbort = () => {
+            cleanup();
+            reject(new DOMException('Cancelled', 'AbortError'));
+          };
+          signal.addEventListener('abort', onAbort, {once: true});
+          timer = setTimeout(() => {
+            cleanup();
+            const err = new Error('Auto detect is unavailable in this browser. Select an interval and click Ask coach.');
+            err.code = 'detect_timeout';
+            reject(err);
+          }, detectTimeoutMs);
+          worker.onmessage = event => {
+            const data = event?.data || {};
+            if (data.type === 'result' && data.epoch === epoch && data.seq === seq) {
+              cleanup();
+              resolve(Array.isArray(data.detections) ? data.detections : []);
+            } else if (data.type === 'unsupported') {
+              cleanup();
+              const err = new Error('Auto detect is unavailable in this browser. Select an interval and click Ask coach.');
+              err.code = data.code || 'worker_graphics_unavailable';
+              reject(err);
+            } else if (data.type === 'error') {
+              cleanup();
+              const err = new Error('Auto detect is unavailable in this browser. Select an interval and click Ask coach.');
+              err.code = data.code || 'detector_error';
+              reject(err);
+            }
+          };
+          worker.onerror = () => {
+            cleanup();
+            const err = new Error('Auto detect is unavailable in this browser. Select an interval and click Ask coach.');
+            err.code = 'worker_error';
+            reject(err);
+          };
+          worker.postMessage(
+            {
+              type: 'detect',
+              epoch,
+              seq,
+              width: dims.width,
+              height: dims.height,
+              buffer: imageData.data.buffer,
+              config: cfg,
+            },
+            [imageData.data.buffer]
+          );
+        });
+
+        video.dataset.autoCoachDetections = String(seq);
+        samples.push({
+          time: at,
+          detections,
+          frameWidth: dims.width,
+          frameHeight: dims.height,
+        });
+      }
+
+      if (signal.aborted || context !== owner) throw new DOMException('Cancelled', 'AbortError');
+      selectedWindows = A.selectAutoCoachWindows(samples, dur, {
+        maxWindows,
+        frameWidth: dims.width,
+        frameHeight: dims.height,
+        originalStartSeconds: owner.clip.original_start_seconds,
+        originalEndSeconds: owner.clip.original_end_seconds,
+      });
+      video.dataset.autoCoachState = selectedWindows.length ? 'detected' : 'empty';
+      return {windows: selectedWindows, sampleCount: samples.length};
+    } catch (error) {
+      if (
+        error?.code &&
+        ['unsupported', 'worker_graphics_unavailable', 'init_timeout', 'detect_timeout', 'detector_error', 'worker_error'].includes(
+          error.code
+        )
+      ) {
+        video.dataset.autoCoachState = 'unavailable';
+      } else if (error?.name === 'AbortError') {
+        video.dataset.autoCoachState = 'cancelled';
+      }
+      throw error;
+    } finally {
+      try {
+        worker?.postMessage({type: 'close'});
+      } catch (_) {}
+      try {
+        worker?.terminate();
+      } catch (_) {}
+      canvas.width = canvas.height = 1;
+      if (context === owner) {
+        owner.capturing = false;
+        owner.captureController = null;
+        delete owner.captureReturnTime;
+        const dur = fallbackDuration();
+        if (selectedWindows && selectedWindows.length > 0) {
+          setIntervalBounds(selectedWindows[0].start, selectedWindows[0].end, 'end');
+          if (video.readyState >= 1) {
+            video.currentTime = C.clamp(selectedWindows[0].start, 0, dur);
+          }
+          owner.lastTime = selectedWindows[0].start;
+        } else {
+          owner.intervalStart = returnInterval.start;
+          owner.intervalEnd = returnInterval.end;
+          owner.intervalDefaultEnd = returnInterval.defaultEnd;
+          syncIntervalUI();
+          if (video.readyState >= 1) {
+            video.currentTime = C.clamp(returnTime, 0, dur);
+          }
+          owner.lastTime = returnTime;
+        }
+        setControls();
+        syncTime();
+      }
+    }
+  },
   updateEntry(options) {
     const {button,clip}=options;
     if(!button)return;
@@ -478,6 +777,7 @@
     $('study-speed').value='0.5';
     $('study-loop').setAttribute('aria-pressed','false');
     video.loop=false;video.muted=player.muted;video.volume=player.volume;
+    video.dataset.autoCoachState='idle';video.dataset.autoCoachCaptures='0';video.dataset.autoCoachDetections='0';
     $('study-download-ready').hidden=true;$('study-download-ready').removeAttribute('href');
     $('study-download').href=url+'&download=1';$('study-download').textContent='Download clip '+String(clip.index).padStart(2,'0');
     $('study-frames').replaceChildren();$('study-export').disabled=true;$('study-export').textContent='Download frame package';$('study-cancel-capture').hidden=true;

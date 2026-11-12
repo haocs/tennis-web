@@ -2720,3 +2720,392 @@ def test_historical_preview_renewal_preserves_playhead_and_releases_on_switch(br
         assert any(call[2].get('method')=='DELETE' for call in server_api.calls)
         page.close()
     finally:server.shutdown();thread.join()
+
+
+def test_auto_coach_real_worker_smoke_and_fallback(browser, ui_server):
+    page = browser.new_page(viewport={'width': 1280, 'height': 900})
+    requests = []
+    errors = []
+    csp_violations = []
+    page.on('request', lambda req: requests.append((req.method, req.url)))
+    page.on('pageerror', lambda err: errors.append(str(err)))
+    page.add_init_script("""(() => {
+      window.__cspViolations = [];
+      document.addEventListener('securitypolicyviolation', e => {
+        window.__cspViolations.push({directive: e.violatedDirective, blocked: e.blockedURI});
+      });
+      const NativeWorker = window.Worker;
+      window.__autoCoachWorkerEvents = [];
+      window.Worker = function(...args) {
+        const worker = new NativeWorker(...args);
+        const record = (type, detail = {}) => window.__autoCoachWorkerEvents.push({type, at: Math.round(performance.now()), ...detail});
+        worker.addEventListener('message', ({data}) => record(data.type, {message: data.message, code: data.code}));
+        worker.addEventListener('error', event => record('worker_error', {message: event.message}));
+        const post = worker.postMessage.bind(worker), terminate = worker.terminate.bind(worker);
+        worker.postMessage = (data, ...rest) => { record('send:' + data.type); return post(data, ...rest); };
+        worker.terminate = () => { record('terminate'); return terminate(); };
+        return worker;
+      };
+    })()""")
+    page.goto(ui_server + f'/review/{ID}?clip={CLIP}')
+    page.get_by_role('button', name='Study clip', exact=True).click()
+    page.wait_for_function("() => document.querySelector('#study-video')?.readyState >= 2")
+    assert page.evaluate('window.__autoCoachWorkerEvents.length') == 0
+
+    auto_btn = page.locator('#coach-auto-ask')
+    expect(auto_btn).to_be_enabled()
+    expect(auto_btn).to_have_attribute('data-auto-coach-state', 'ready')
+    expect(auto_btn).to_have_attribute('data-auto-coach-remaining', '2')
+    auto_btn.click()
+
+    page.wait_for_function(
+        "() => ['detected', 'empty', 'unavailable'].includes(document.querySelector('#study-video')?.dataset.autoCoachState)",
+        timeout=45000,
+    )
+    events = page.evaluate('window.__autoCoachWorkerEvents')
+    assert any(e['type'] == 'send:init' for e in events)
+    assert any(e['type'] == 'terminate' for e in events)
+    unsupported = any(e['type'] == 'unsupported' and e.get('code') == 'worker_graphics_unavailable' for e in events)
+    if unsupported:
+        assert browser.browser_type.name != 'chromium', 'Reference Chromium must run real MediaPipe inference in Clip Study'
+        expect(auto_btn).to_have_attribute('data-auto-coach-state', 'unavailable')
+        expect(auto_btn).to_be_disabled()
+        expect(page.locator('#coach-status')).to_contain_text('Automatic detection is unavailable in this browser.')
+        expect(page.locator('#coach-ask')).to_be_enabled()
+    else:
+        assert int(page.locator('#study-video').get_attribute('data-auto-coach-detections') or '0') >= 1
+        assert any('/static/vendor/mediapipe/vision_wasm_internal.wasm' in url for _, url in requests)
+        assert any('/static/vendor/mediapipe/efficientdet_lite0.tflite' in url for _, url in requests)
+        expect(page.locator('#coach-ask')).to_be_enabled()
+
+    assert page.evaluate('window.__cspViolations') == []
+    assert all(url.startswith((ui_server + '/', 'data:', 'blob:')) for _, url in requests), requests
+    assert not errors
+    page.close()
+
+
+@pytest.mark.parametrize('width', [390, 1280])
+def test_clip_study_auto_coach_detection_cap_cancellation_and_manual_coexistence(browser, ui_server, width):
+    page = browser.new_page(viewport={'width': width, 'height': 844}, has_touch=width < 761)
+    errors = []
+    page.on('pageerror', lambda err: errors.append(str(err)))
+    page.add_init_script("""(() => {
+      window.__scanWorkers = [];
+      window.__scanScene = 'empty';
+      window.__scanDelayMs = 2;
+      window.Worker = class {
+        constructor(url) {
+          this.url = url;
+          this.terminated = false;
+          this.sent = [];
+          window.__scanWorkers.push(this);
+        }
+        postMessage(msg) {
+          if (this.terminated) return;
+          this.sent.push({type: msg.type, seq: msg.seq});
+          if (msg.type === 'init') {
+            setTimeout(() => {
+              if (!this.terminated) this.onmessage?.({data: {type: 'ready'}});
+            }, 2);
+          } else if (msg.type === 'detect') {
+            const w = msg.width || 320, h = msg.height || 180;
+            const v = document.getElementById('study-video');
+            const t = Number(v?.currentTime || 0);
+            const scene = window.__scanScene;
+            let detections = [];
+            const box = (nx, ny, nw, nh, score = 0.92) => ({
+              boundingBox: {originX: nx * w, originY: ny * h, width: nw * w, height: nh * h},
+              categories: [{categoryName: 'person', score}],
+            });
+            if (scene === 'two_bursts') {
+              if (t >= 1.5 && t <= 4.2) {
+                const shift = (t - 1.5) * 0.14;
+                detections = [box(0.28 + shift, 0.34, 0.16, 0.42)];
+              } else if (t >= 7.8 && t <= 10.5) {
+                const shift = (t - 7.8) * 0.14;
+                detections = [box(0.66 - shift, 0.32, 0.17, 0.44)];
+              } else {
+                detections = [box(0.45, 0.35, 0.16, 0.42)];
+              }
+            } else if (scene === 'one_burst') {
+              if (t >= 2.0 && t <= 4.5) {
+                const shift = (t - 2.0) * 0.14;
+                detections = [box(0.32 + shift, 0.34, 0.16, 0.42)];
+              } else {
+                detections = [box(0.45, 0.35, 0.16, 0.42)];
+              }
+            }
+            setTimeout(() => {
+              if (!this.terminated) {
+                this.onmessage?.({data: {type: 'result', epoch: msg.epoch, seq: msg.seq, detections}});
+              }
+            }, window.__scanDelayMs);
+          }
+        }
+        terminate() {
+          this.terminated = true;
+        }
+      };
+    })()""")
+
+    source = page.request.get(ui_server + f'/api/sessions/{ID}').json()
+    publication = source['published_at']
+    state = dict(enabled=True, jobs=[], annotations=[], workers=[])
+    export_calls = []
+    ai_calls = []
+    cancel_calls = []
+    fail_second_export = {'conflict': False}
+
+    def handle_sessions(route):
+        route.fulfill(json=state)
+
+    def handle_exports(route):
+        body = route.request.post_data_json
+        export_calls.append(body)
+        if body.get('auto_detect') and body.get('auto_slot') == 2 and fail_second_export['conflict']:
+            fail_second_export['conflict'] = False
+            route.fulfill(status=409, json={'error': 'Automatic coach review limit reached for this clip (2 of 2 used).'})
+            return
+        idx = len(export_calls)
+        job = dict(
+            id=f'exp-{idx}',
+            version=1,
+            role='render',
+            state='queued',
+            asked_at=1700010000.0 + idx,
+            updated=1700010000.0 + idx,
+            body=dict(
+                body,
+                original_start=body['start'],
+                original_end=body['end'],
+                player_context=dict(player_id=body.get('player_id'), profile_version=body.get('player_profile_version')) if body.get('player_id') else None,
+            ),
+            result={},
+        )
+        state['jobs'].append(job)
+        route.fulfill(status=201, json=job)
+
+    def handle_requests(route):
+        body = route.request.post_data_json
+        ai_calls.append(body)
+        render_job = next(j for j in state['jobs'] if j['id'] == body['export_id'])
+        idx = len(ai_calls)
+        job = dict(
+            id=f'ai-{idx}',
+            version=1,
+            role='ai',
+            state='completed',
+            asked_at=1700020000.0 + idx,
+            updated=1700020010.0 + idx,
+            body=dict(
+                render_job['body'],
+                **body,
+                evidence_frames=[],
+            ),
+            result=dict(
+                answer=f'Coach review {idx}',
+                structured=dict(summary=f'Auto summary {idx}', validation_warnings=[], parse_status='valid'),
+            ),
+        )
+        state['jobs'].append(job)
+        route.fulfill(status=201, json=job)
+
+    def handle_job_put(route):
+        job_id = route.request.url.rsplit('/', 1)[-1]
+        body = route.request.post_data_json
+        cancel_calls.append((job_id, body))
+        target = next(j for j in state['jobs'] if j['id'] == job_id)
+        target['state'] = 'cancelled'
+        target['version'] += 1
+        route.fulfill(json=target)
+
+    page.route('**/api/coaching/sessions/*', handle_sessions)
+    page.route('**/api/coaching/exports', handle_exports)
+    page.route('**/api/coaching/requests', handle_requests)
+    page.route('**/api/coaching/jobs/*', handle_job_put)
+
+    page.goto(ui_server + f'/review/{ID}?clip={CLIP}')
+    expect(page.locator('#video-seek')).to_be_enabled()
+    page.evaluate("""() => {
+      model.session.clips[0].duration_seconds = 12;
+      model.session.clips[0].original_end_seconds = 12;
+      const v = document.getElementById('study-video');
+      const proto = HTMLMediaElement.prototype;
+      const realCurrentTime = Object.getOwnPropertyDescriptor(proto, 'currentTime');
+      let logicalTime = 0;
+      Object.defineProperty(v, 'duration', {configurable: true, get: () => 12});
+      Object.defineProperty(v, 'currentTime', {
+        configurable: true,
+        get: () => logicalTime,
+        set: val => {
+          logicalTime = Number(val) || 0;
+          realCurrentTime.set.call(v, Math.min(1.95, Math.max(0, (logicalTime / 12) * 1.9)));
+        },
+      });
+    }""")
+    page.get_by_role('button', name='Study clip', exact=True).click()
+    page.wait_for_function("() => document.querySelector('#study-video')?.readyState >= 2")
+    if width < 761:
+        page.locator('#study-mode-coach').click()
+
+    # Zero background scanning on modal open.
+    assert page.evaluate('window.__scanWorkers.length') == 0
+    assert len(export_calls) == 0 and len(ai_calls) == 0
+
+    auto_btn = page.locator('#coach-auto-ask')
+    expect(auto_btn).to_be_visible()
+    expect(auto_btn).to_be_enabled()
+    expect(auto_btn).to_have_attribute('data-auto-coach-state', 'ready')
+    expect(auto_btn).to_have_attribute('data-auto-coach-remaining', '2')
+    expect(page.locator('#coach-auto-quota')).to_contain_text('2 of 2 automatic reviews remaining')
+
+    # 1. Empty court / static scene -> 0 windows selected, 0 jobs created, truthful guidance shown.
+    auto_btn.click()
+    expect(page.locator('#coach-status')).to_contain_text('No clear player motion detected in this clip. Adjust the interval and use Ask coach.')
+    assert len(export_calls) == 0 and len(ai_calls) == 0
+    expect(auto_btn).to_have_attribute('data-auto-coach-remaining', '2')
+    assert page.evaluate('window.__scanWorkers.at(-1).terminated') is True
+
+    # 2. Cancellation during scan restores previous playhead and interval without submitting exports.
+    page.evaluate("""() => {
+      window.ClipStudy.setInterval(0.3, 1.5);
+      const v = document.getElementById('study-video');
+      v.pause();
+      v.currentTime = 0.6;
+      window.__scanScene = 'two_bursts';
+      window.__scanDelayMs = 250;
+    }""")
+    auto_btn.click()
+    expect(auto_btn).to_have_attribute('data-auto-coach-state', 'scanning')
+    expect(page.locator('#coach-auto-cancel')).to_be_visible()
+    # Double-clicking while scanning must not spawn a second worker.
+    workers_during_scan = page.evaluate('window.__scanWorkers.length')
+    auto_btn.click(force=True)
+    assert page.evaluate('window.__scanWorkers.length') == workers_during_scan
+    page.locator('#coach-auto-cancel').click()
+    expect(page.locator('#coach-status')).to_contain_text('Auto-detect scan cancelled.')
+    expect(page.locator('#coach-auto-cancel')).to_be_hidden()
+    assert len(export_calls) == 0
+    sel_after_cancel = page.evaluate('window.ClipStudy.coachingSelection()')
+    assert sel_after_cancel['start'] == pytest.approx(0.3, abs=0.05)
+    assert sel_after_cancel['end'] == pytest.approx(1.5, abs=0.05)
+    assert page.locator('#study-video').evaluate('v => v.currentTime') == pytest.approx(0.6, abs=0.08)
+
+    # Closing Clip Study during an active scan also terminates the worker and submits 0 exports.
+    auto_btn.click()
+    expect(auto_btn).to_have_attribute('data-auto-coach-state', 'scanning')
+    page.get_by_role('button', name='← Back to review', exact=True).click()
+    page.wait_for_function('() => window.__scanWorkers.at(-1)?.terminated === true')
+    assert len(export_calls) == 0
+    page.get_by_role('button', name='Study clip', exact=True).click()
+    page.wait_for_function("() => document.querySelector('#study-video')?.readyState >= 2")
+    if width < 761:
+        page.locator('#study-mode-coach').click()
+
+    # 3. Two non-overlapping motion bursts: set custom question, speed 0.25x, and zoom crop, then run Auto detect & ask.
+    page.evaluate('() => { window.__scanDelayMs = 2; window.__scanScene = "two_bursts"; }')
+    if width < 761:
+        page.locator('#study-mode-watch').click()
+    page.locator('#study-speed').select_option('0.25')
+    zoom = page.get_by_role('slider', name='Video zoom', exact=True)
+    zoom.press('Home')
+    for _ in range(3):
+        zoom.press('ArrowRight')
+    if width < 761:
+        page.locator('#study-mode-coach').click()
+    page.get_by_role('textbox', name='Question for coach', exact=True).fill('Check split step and recovery on auto moments')
+    auto_btn.click()
+
+    page.wait_for_function('() => document.querySelectorAll("#coach-history .coach-note").length === 2')
+    assert len(export_calls) == 2
+    assert export_calls[0]['auto_detect'] is True and export_calls[1]['auto_detect'] is True
+    assert export_calls[0]['consent'] is True and export_calls[1]['consent'] is True
+    assert export_calls[0]['auto_slot'] == 1 and export_calls[1]['auto_slot'] == 2
+    assert export_calls[0]['speed'] == 0.25 and export_calls[1]['speed'] == 0.25
+    assert export_calls[0]['question'] == 'Check split step and recovery on auto moments'
+    assert 0 < min(export_calls[0]['crop'][2:]) < 1
+    assert export_calls[0]['crop'] == export_calls[1]['crop']
+    assert export_calls[0]['request_id'] != export_calls[1]['request_id']
+    # Non-overlapping windows in chronological order.
+    w1, w2 = sorted(export_calls[:2], key=lambda c: c['start'])
+    assert w1['end'] <= w2['start'] + 1e-6
+
+    # Both render jobs are queued: auto button is disabled in 'submitting' state with 0 remaining.
+    expect(auto_btn).to_have_attribute('data-auto-coach-state', 'submitting')
+    expect(auto_btn).to_have_attribute('data-auto-coach-remaining', '0')
+    expect(auto_btn).to_be_disabled()
+    expect(page.locator('#coach-history')).to_contain_text('Preparing clip… · Auto-detected')
+
+    # Complete exp-1 and fail exp-2 pre-call: exp-1 advances to POST /api/coaching/requests, while exp-2 releases its slot!
+    state['jobs'][0].update(state='completed', version=2, result={'artifact_directory': 'f1'})
+    state['jobs'][1].update(state='failed', version=2, result={'error': 'Render worker interrupted'})
+    page.evaluate('() => window.Coach.open(model.session, model.session.clips[0])')
+    if width < 761:
+        page.locator('#study-mode-coach').click()
+    page.wait_for_function('() => document.querySelector("#coach-auto-ask")?.dataset.autoCoachState === "ready"')
+    assert len(ai_calls) == 1
+    assert ai_calls[0]['export_id'] == 'exp-1'
+    assert ai_calls[0]['auto_detect'] is True
+    assert ai_calls[0]['request_id'] == 'auto-ai-exp-1'
+    expect(auto_btn).to_have_attribute('data-auto-coach-remaining', '1')
+    expect(page.locator('#coach-auto-quota')).to_contain_text('1 of 2 automatic review remaining')
+    expect(page.locator('#coach-history')).to_contain_text('Auto summary 1')
+    expect(page.locator('#coach-history')).to_contain_text('Ready · Auto-detected')
+
+    # 4. With 1 slot remaining, clicking Auto detect & ask requests at most 1 window and reaches the 2/2 cap.
+    auto_btn.click()
+    page.wait_for_function('() => document.querySelector("#coach-history")?.innerText.includes("Preparing clip…")')
+    assert len(export_calls) == 3
+    # Complete exp-3 -> advances to ai-2 -> reaches 2 of 2 cap.
+    state['jobs'][-1].update(state='completed', version=2, result={'artifact_directory': 'f3'})
+    page.evaluate('() => window.Coach.open(model.session, model.session.clips[0])')
+    if width < 761:
+        page.locator('#study-mode-coach').click()
+    page.wait_for_function('() => document.querySelector("#coach-auto-ask")?.dataset.autoCoachState === "capped"')
+    assert len(ai_calls) == 2
+    expect(auto_btn).to_have_attribute('data-auto-coach-state', 'capped')
+    expect(auto_btn).to_have_attribute('data-auto-coach-remaining', '0')
+    expect(auto_btn).to_be_disabled()
+    expect(page.locator('#coach-auto-quota')).to_contain_text('0 of 2 remaining for this clip')
+
+    # Reopening Clip Study preserves the capped state.
+    page.get_by_role('button', name='← Back to review', exact=True).click()
+    page.get_by_role('button', name='Study clip', exact=True).click()
+    if width < 761:
+        page.locator('#study-mode-coach').click()
+    expect(auto_btn).to_have_attribute('data-auto-coach-state', 'capped')
+    expect(auto_btn).to_be_disabled()
+
+    # 5. Manual Ask coach remains enabled and functional when the automatic cap is full.
+    expect(page.locator('#coach-ask')).to_be_enabled()
+    page.get_by_role('textbox', name='Question for coach', exact=True).fill('Manual question after auto cap reached')
+    page.locator('#coach-ask').click()
+    assert len(export_calls) == 4
+    assert not export_calls[-1].get('auto_detect')
+
+    # 6. Another clip in the same recording has its own 2-review quota, and a 409 conflict on the 2nd window preserves the 1st submission with a partial-success notice.
+    fail_second_export['conflict'] = True
+    page.evaluate("""() => {
+      model.session.clips[1].duration_seconds = 12;
+      model.session.clips[1].original_start_seconds = 20;
+      model.session.clips[1].original_end_seconds = 32;
+      window.Coach.open(model.session, model.session.clips[1]);
+    }""")
+    if width < 761:
+        page.locator('#study-mode-coach').click()
+    expect(auto_btn).to_have_attribute('data-auto-coach-state', 'ready')
+    expect(auto_btn).to_have_attribute('data-auto-coach-remaining', '2')
+    auto_btn.click()
+    expect(page.locator('#coach-status')).to_contain_text('Submitted 1 automatic review')
+    expect(page.locator('#coach-status')).to_contain_text('Automatic coach review limit reached for this clip (2 of 2 used).')
+    assert len(export_calls) == 6
+    assert export_calls[-2]['clip_id'] == 'c' * 24 and export_calls[-2]['auto_slot'] == 1
+    assert export_calls[-1]['clip_id'] == 'c' * 24 and export_calls[-1]['auto_slot'] == 2
+
+    for check_w in (320, 390, 1280):
+        page.set_viewport_size({'width': check_w, 'height': 844})
+        assert not page.evaluate('document.documentElement.scrollWidth > innerWidth'), f'Horizontal overflow at {check_w}px'
+        assert page.locator('#clip-study').evaluate('d => d.scrollWidth <= d.clientWidth'), f'Dialog overflow at {check_w}px'
+    assert not errors
+    page.close()
+

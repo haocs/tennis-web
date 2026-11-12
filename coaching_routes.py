@@ -45,6 +45,13 @@ def register_coaching(app,library,session):
             if b.get('publication')!=data['published_at']:abort(409,'Recording changed. Refresh before exporting')
             clip=next(c for c in data['clips'] if c['id']==b.get('clip_id'))
             spec=recipe(b,data,clip)
+            if spec.get('auto_detect') or 'player_id' in b or 'player_profile_version' in b:
+                context=coaching_player(data,clip['id'],app.extensions['state'].all())
+                if ('player_id' in b and b['player_id'] != (context['player_id'] if context else None)
+                        or 'player_profile_version' in b and b['player_profile_version'] != (context['profile_version'] if context else None)):
+                    abort(409,'Main player or profile changed. Refresh the review before asking.')
+                if spec.get('auto_detect'):
+                    spec['player_context']=context
             return jsonify(queue.create('render',spec,b.get('request_id'))),201
         except QueueConflict:raise
         except (ValueError,TypeError,KeyError,StopIteration) as e:abort(400,str(e) or 'Invalid selection')
@@ -62,15 +69,32 @@ def register_coaching(app,library,session):
         if b.get('consent') is not True:abort(400,'Confirm sending selected frames and your question to OpenAI')
         spec=render['body'];data=session(spec['source_id'])
         if spec['publication']!=data['published_at']:abort(409,'Recording changed; prepare a fresh excerpt')
+        parent_id=b.get('follow_up_of')
+        raw_auto=b.get('auto_detect',bool(spec.get('auto_detect')) and parent_id is None)
+        if type(raw_auto) is not bool:abort(400,'Invalid auto_detect flag')
+        if spec.get('auto_detect') and not raw_auto and parent_id is None:
+            abort(400,'Automatic coaching exports must be submitted as automatic coaching requests')
+        auto_slot=b.get('auto_slot',spec.get('auto_slot'))
+        if auto_slot is not None and (type(auto_slot) is not int or auto_slot not in (1,2)):
+            abort(400,'Invalid auto coach slot')
         body=dict(spec,export_id=render['id'],artifact_directory=render['result']['artifact_directory'],prompt=prompt.strip(),provider='chatgpt-codex',consent=True)
+        body.pop('auto_detect',None)
+        body.pop('auto_slot',None)
         body['player_context']=coaching_player(data,spec['clip_id'],app.extensions['state'].all())
         context=body['player_context']
         if ('player_id' in b and b['player_id'] != (context['player_id'] if context else None)
                 or 'player_profile_version' in b and b['player_profile_version'] != (context['profile_version'] if context else None)):
             abort(409,'Main player or profile changed. Refresh the review before asking.')
+        if 'player_context' in spec and spec.get('player_context') != context:
+            abort(409,'Main player or profile changed. Refresh the review before asking.')
         try:
-            parent_id=b.get('follow_up_of')
-            if parent_id is not None:
+            if raw_auto:
+                if parent_id is not None:
+                    raise ValueError('Automatic coaching requests cannot be follow-ups')
+                body['auto_detect']=True
+                if auto_slot is not None:
+                    body['auto_slot']=auto_slot
+            elif parent_id is not None:
                 if not isinstance(parent_id,str):raise ValueError('Invalid previous coaching response')
                 parent=get(parent_id)
                 if parent['role']!='ai' or parent['state']!='completed' or parent['body'].get('export_id')!=render['id'] or parent['body'].get('publication')!=spec['publication']:

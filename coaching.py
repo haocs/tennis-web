@@ -11,6 +11,8 @@ import uuid
 from coaching_annotations import Annotations
 from worker.tennis_coach.annotations import RENDER_SHARE_CAPABILITY
 
+MAX_AUTO_REVIEWS_PER_CLIP = 2
+
 
 class QueueConflict(ValueError):
     pass
@@ -24,6 +26,11 @@ def recipe(body, data, clip):
     intent = body.get('intent', 'coaching')
     if intent not in ('coaching', 'share'):
         raise ValueError('Invalid export intent')
+    auto_detect = body.get('auto_detect', False)
+    if type(auto_detect) is not bool:
+        raise ValueError('Invalid auto_detect flag')
+    if auto_detect and intent != 'coaching':
+        raise ValueError('Auto detect is only supported for coaching exports')
     start, end = body.get('start'), body.get('end')
     max_seconds = 120 if intent == 'share' else 30
     if not number(start) or not number(end) or not 0 <= start < end <= clip['duration_seconds'] + .05 or end-start > max_seconds:
@@ -42,6 +49,14 @@ def recipe(body, data, clip):
     question=body.get('question','')
     if not isinstance(question,str) or len(question)>4000:
         raise ValueError('Question must be at most 4000 characters')
+    if auto_detect:
+        if not question.strip():
+            raise ValueError('Enter a question up to 4000 characters')
+        if body.get('consent') is not True:
+            raise ValueError('Confirm sending selected frames and your question to OpenAI')
+    auto_slot = body.get('auto_slot')
+    if auto_slot is not None and (type(auto_slot) is not int or auto_slot not in (1, 2)):
+        raise ValueError('Invalid auto coach slot')
     quality = body.get('quality', 'high' if intent == 'share' else 'balanced')
     if intent == 'share':
         if quality != 'high':
@@ -60,6 +75,11 @@ def recipe(body, data, clip):
                 analysis_mode='none' if intent == 'share' else 'timestamped_frames',
                 renderer_version=3 if intent == 'share' else 1,
                 source_sha256=data.get('source',{}).get('sha256',data['id']),processing=data.get('processing'))
+    if auto_detect:
+        spec['auto_detect'] = True
+        spec['consent'] = True
+        if auto_slot is not None:
+            spec['auto_slot'] = auto_slot
     if intent == 'share':
         spec.update(intent='share', required_capability=RENDER_SHARE_CAPABILITY)
     return spec
@@ -100,6 +120,42 @@ class Coaching(Annotations):
             d.pop('token',None); d.pop('fingerprint',None);d.pop('request_id',None)
         return d
 
+    def active_auto_coach_slots(self, db, source_id, publication, clip_id, exclude_export_id=None):
+        ai_count = db.execute(
+            """
+            SELECT COUNT(*) FROM jobs
+            WHERE role = 'ai'
+              AND json_extract(body, '$.source_id') = ?
+              AND json_extract(body, '$.publication') = ?
+              AND json_extract(body, '$.clip_id') = ?
+              AND json_extract(body, '$.auto_detect') = 1
+              AND (
+                state IN ('queued', 'leased', 'calling', 'completed', 'needs_review')
+                OR (state = 'failed' AND json_extract(result, '$.provider_called') = 1)
+              )
+            """,
+            (source_id, publication, clip_id),
+        ).fetchone()[0]
+        render_count = db.execute(
+            """
+            SELECT COUNT(*) FROM jobs AS r
+            WHERE r.role = 'render'
+              AND json_extract(r.body, '$.source_id') = ?
+              AND json_extract(r.body, '$.publication') = ?
+              AND json_extract(r.body, '$.clip_id') = ?
+              AND json_extract(r.body, '$.auto_detect') = 1
+              AND r.state IN ('queued', 'leased', 'completed')
+              AND (? IS NULL OR r.id != ?)
+              AND NOT EXISTS (
+                SELECT 1 FROM jobs AS a
+                WHERE a.role = 'ai'
+                  AND json_extract(a.body, '$.export_id') = r.id
+              )
+            """,
+            (source_id, publication, clip_id, exclude_export_id, exclude_export_id),
+        ).fetchone()[0]
+        return ai_count + render_count
+
     def create(self,role,body,request_id):
         if not isinstance(request_id,str) or not 8 <= len(request_id) <= 100:
             raise ValueError('A request ID is required')
@@ -110,6 +166,30 @@ class Coaching(Annotations):
             if row:
                 if row['fingerprint']!=fingerprint: raise QueueConflict('Request ID already used for a different selection')
                 return self.decode(row)
+            if body.get('auto_detect'):
+                source_id=body.get('source_id')
+                publication=body.get('publication')
+                clip_id=body.get('clip_id')
+                export_id=body.get('export_id') if role=='ai' else None
+                if role=='ai' and export_id:
+                    existing_ai=db.execute(
+                        """
+                        SELECT id FROM jobs
+                        WHERE role = 'ai'
+                          AND json_extract(body, '$.export_id') = ?
+                          AND json_extract(body, '$.auto_detect') = 1
+                          AND (
+                            state IN ('queued', 'leased', 'calling', 'completed', 'needs_review')
+                            OR (state = 'failed' AND json_extract(result, '$.provider_called') = 1)
+                          )
+                        """,
+                        (export_id,),
+                    ).fetchone()
+                    if existing_ai:
+                        raise QueueConflict('An automatic coaching request already exists for this excerpt')
+                used=self.active_auto_coach_slots(db,source_id,publication,clip_id,exclude_export_id=export_id)
+                if used>=MAX_AUTO_REVIEWS_PER_CLIP:
+                    raise QueueConflict(f'Auto coach is limited to {MAX_AUTO_REVIEWS_PER_CLIP} reviews per clip')
             identity=uuid.uuid4().hex
             now=self.clock()
             db.execute('INSERT INTO jobs(id,role,state,body,request_id,fingerprint,worker,token,expires,version,updated,result,asked_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',(identity,role,'queued',encoded,request_id,fingerprint,None,None,0,1,now,None,now))
@@ -169,7 +249,10 @@ class Coaching(Annotations):
                 if row['role']!='ai' or state!='leased' or body.get('purpose')=='learning_plan':raise QueueConflict('Evidence can only be registered before the provider call')
                 self.pin_evidence(db,self.decode(row),result)
                 result=None
-            elif action=='fail':state='failed'
+            elif action=='fail':
+                if row['role']=='ai' and state=='calling':
+                    result=dict(result or {},provider_called=True)
+                state='failed'
             elif action!='heartbeat':raise ValueError('Invalid worker action')
             db.execute('UPDATE jobs SET state=?,result=?,expires=?,updated=?,version=version+1 WHERE id=?',(state,json.dumps(result) if result is not None else row['result'],self.clock()+90,self.clock(),identity))
             db.execute('UPDATE workers SET updated=?,status=? WHERE id=?',(self.clock(),state,row['worker']))
@@ -183,8 +266,17 @@ class Coaching(Annotations):
             if type(version)!=int or row['version']!=version:raise QueueConflict('This request changed. Reload its latest state')
             state=row['state'];body=json.loads(row['body']);result=json.loads(row['result']) if row['result'] else {}
             if action=='cancel':
-                if state not in ('queued','leased'):raise QueueConflict('A provider call already started; wait for its result')
-                state='cancelled'
+                if state in ('queued','leased'):
+                    state='cancelled'
+                elif (
+                    row['role']=='render'
+                    and state=='completed'
+                    and body.get('auto_detect')
+                    and not db.execute("SELECT 1 FROM jobs WHERE role='ai' AND json_extract(body,'$.export_id')=?",(identity,)).fetchone()
+                ):
+                    state='cancelled'
+                else:
+                    raise QueueConflict('A provider call already started; wait for its result')
             elif action=='cue':
                 if body.get('purpose')=='learning_plan' or result.get('structured') or result.get('structured_plan') or state!='completed' or row['role']!='ai' or not isinstance(cue,str) or len(cue)>400:raise ValueError('Invalid coaching cue')
                 result['cue']=cue.strip();result['cue_reviewed']=bool(cue.strip())
