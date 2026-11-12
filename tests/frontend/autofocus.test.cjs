@@ -372,3 +372,91 @@ test('selectAutoCoachWindows returns 0 windows on empty court or static person, 
   assert.equal(ultraShortWin[0].start, 0);
   assert.equal(ultraShortWin[0].end, 2.0);
 });
+
+test('long clips (41s, 60s, 90s) retain bounded paired motion sampling, reject static/empty scenes, and detect late activity', () => {
+  // Moving foreground player across 12s, 30s, 40s, 41s, 60s, and 90s clips
+  for (const dur of [12, 30, 40, 41, 60, 90]) {
+    const times = planAutoCoachSampleTimes(dur, 16);
+    assert.ok(times.length <= 16, `Expected <= 16 samples for ${dur}s, got ${times.length}`);
+    assert.ok(times.every((t, i) => t > 0 && t < dur && (i === 0 || t > times[i - 1])));
+
+    const movingSamples = times.map((time, idx) => ({
+      time,
+      detections: [
+        {
+          x: 0.25 + ((idx % 4) * 0.11),
+          y: 0.36 + ((idx % 2) * 0.04),
+          width: 0.16,
+          height: 0.4,
+          score: 0.92,
+          categoryName: 'person',
+        },
+      ],
+    }));
+    const windows = selectAutoCoachWindows(movingSamples, dur, {
+      maxWindows: 2,
+      originalStartSeconds: 100,
+      originalEndSeconds: 100 + dur,
+    });
+    assert.equal(windows.length, 2, `Expected 2 non-overlapping windows on moving ${dur}s clip, got ${JSON.stringify(windows)}`);
+    assert.ok(windows[0].end <= windows[1].start, `Expected non-overlapping windows on ${dur}s clip`);
+    assert.ok(windows[0].peakMotion > 0 && windows[1].peakMotion > 0, `Expected positive motion on ${dur}s clip`);
+
+    // Static foreground person on long clip -> 0 windows
+    const staticSamples = times.map(time => ({
+      time,
+      detections: [{x: 0.42, y: 0.38, width: 0.16, height: 0.4, score: 0.92, categoryName: 'person'}],
+    }));
+    assert.deepEqual(
+      selectAutoCoachWindows(staticSamples, dur, {maxWindows: 2}),
+      [],
+      `Expected 0 windows on static ${dur}s clip`
+    );
+
+    // Empty court on long clip -> 0 windows
+    const emptySamples = times.map(time => ({time, detections: []}));
+    assert.deepEqual(
+      selectAutoCoachWindows(emptySamples, dur, {maxWindows: 2}),
+      [],
+      `Expected 0 windows on empty ${dur}s clip`
+    );
+  }
+
+  // Late-only activity on 60s and 90s clips selects the late window
+  for (const dur of [60, 90]) {
+    const times = planAutoCoachSampleTimes(dur, 16);
+    const lateStart = dur * 0.78;
+    const lateSamples = times.map((time, idx) => {
+      if (time >= lateStart) {
+        return {
+          time,
+          detections: [
+            {
+              x: 0.3 + ((idx % 2) * 0.16),
+              y: 0.36,
+              width: 0.17,
+              height: 0.42,
+              score: 0.93,
+              categoryName: 'person',
+            },
+          ],
+        };
+      }
+      // Static player earlier in the clip
+      return {
+        time,
+        detections: [{x: 0.45, y: 0.36, width: 0.16, height: 0.4, score: 0.88, categoryName: 'person'}],
+      };
+    });
+    const lateWin = selectAutoCoachWindows(lateSamples, dur, {
+      maxWindows: 2,
+      originalStartSeconds: 300,
+      originalEndSeconds: 300 + dur,
+    });
+    assert.ok(lateWin.length >= 1, `Expected late activity window on ${dur}s clip`);
+    assert.ok(
+      lateWin[lateWin.length - 1].start >= dur * 0.65,
+      `Expected late window near end of ${dur}s clip, got ${JSON.stringify(lateWin)}`
+    );
+  }
+});

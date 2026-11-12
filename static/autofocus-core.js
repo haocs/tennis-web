@@ -329,11 +329,26 @@
   function planAutoCoachSampleTimes(duration, maxSamples = 16) {
     if (!finite(duration) || duration <= 0) return [];
     const cap = clamp(Math.floor(finite(maxSamples) ? maxSamples : 16), 2, 16);
-    const count =
-      duration < 1.0
-        ? clamp(Math.floor(duration / 0.2), 2, Math.min(4, cap))
-        : clamp(Math.round(duration / 1.5), 4, cap);
-    return Array.from({length: count}, (_, i) => round3((duration * (i + 0.5)) / count));
+    if (duration < 1.0) {
+      const count = clamp(Math.floor(duration / 0.2), 2, Math.min(4, cap));
+      return Array.from({length: count}, (_, i) => round3((duration * (i + 0.5)) / count));
+    }
+    const count = clamp(Math.round(duration / 1.5), 4, cap);
+    if (duration / count <= 2.2 || count < 4) {
+      return Array.from({length: count}, (_, i) => round3((duration * (i + 0.5)) / count));
+    }
+    const pairCount = Math.max(2, Math.floor(count / 2));
+    const pairDelta = 1.0;
+    const margin = Math.min(0.1, duration * 0.02);
+    const times = [];
+    for (let p = 0; p < pairCount; p += 1) {
+      const center = (duration * (p + 0.5)) / pairCount;
+      const t1 = round3(clamp(center - pairDelta * 0.5, margin, duration - margin));
+      const t2 = round3(clamp(center + pairDelta * 0.5, margin, duration - margin));
+      times.push(t1);
+      if (t2 > t1 + 0.02) times.push(t2);
+    }
+    return times;
   }
 
   function scoreAutoCoachSamples(rawSamples, frameWidth = 1, frameHeight = 1, options = {}) {
@@ -410,7 +425,7 @@
         next.hasMotionContext &&
         next.time - cur.time <= 2.5
       ) {
-        cur.motionScore = Math.max(cur.motionScore, next.motionScore * 0.85);
+        cur.motionScore = Math.max(cur.motionScore, next.motionScore);
         cur.hasMotionContext = true;
       }
     }
@@ -444,7 +459,7 @@
     if (!scored.length) return [];
 
     const maxAllowedSpan = Math.min(30, duration);
-    const targetSpan = duration < 2.5 ? duration : clamp(duration * 0.35, 2.5, 8.0);
+    const targetSpan = duration < 2.5 ? duration : clamp(duration * 0.3, 2.5, 8.0);
     const windowSpan = clamp(targetSpan, Math.min(0.1, maxAllowedSpan), maxAllowedSpan);
     const maxStart = Math.max(0, duration - windowSpan);
 

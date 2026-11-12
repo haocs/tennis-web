@@ -661,3 +661,162 @@ def test_auto_coach_player_and_publication_validation_and_manual_coexistence(set
     )
     assert post(c, 'exports', new_pub_auto).status_code == 201
 
+
+def test_auto_coach_cancel_create_race_and_listing_retention_beyond_limit_100(setup):
+    app, root, data = enabled(setup)
+    c = app.test_client()
+    queue = app.extensions['coaching']
+    base_auto = dict(
+        selection(data),
+        auto_detect=True,
+        consent=True,
+        question='Check my auto-detected clip moment',
+    )
+
+    # 1. Ordering A: completed auto render is cancelled after route precheck but immediately before queue.create('ai') enters BEGIN IMMEDIATE.
+    exp_a = post(
+        c,
+        'exports',
+        dict(base_auto, start=0.2, end=1.4, auto_slot=1, request_id='race-exp-a'),
+    ).json
+    _complete_render_job(app, c, exp_a['id'])
+    completed_a = c.get(f"/api/coaching/jobs/{exp_a['id']}").json
+    assert completed_a['state'] == 'completed'
+
+    original_create = queue.create
+
+    def cancel_before_ai_create(role, body, request_id):
+        if role == 'ai' and body.get('export_id') == exp_a['id']:
+            latest = queue.get(exp_a['id'])
+            if latest['state'] == 'completed':
+                queue.edit(exp_a['id'], latest['version'], 'cancel')
+        return original_create(role, body, request_id)
+
+    queue.create = cancel_before_ai_create
+    try:
+        r_ai_a = post(
+            c,
+            'requests',
+            {
+                'export_id': exp_a['id'],
+                'prompt': 'Race A prompt',
+                'consent': True,
+                'auto_detect': True,
+                'request_id': 'race-ai-a',
+            },
+        )
+        assert r_ai_a.status_code == 409
+        assert 'Prepare an excerpt first' in r_ai_a.json['error']
+        # Idempotent replay with same request_id also rejects with 409 because no AI job was inserted.
+        r_ai_a_replay = post(
+            c,
+            'requests',
+            {
+                'export_id': exp_a['id'],
+                'prompt': 'Race A prompt',
+                'consent': True,
+                'auto_detect': True,
+                'request_id': 'race-ai-a',
+            },
+        )
+        assert r_ai_a_replay.status_code == 409
+    finally:
+        queue.create = original_create
+
+    assert queue.get(exp_a['id'])['state'] == 'cancelled'
+    with queue.db() as db:
+        assert db.execute("SELECT COUNT(*) FROM jobs WHERE role='ai' AND json_extract(body,'$.export_id')=?", (exp_a['id'],)).fetchone()[0] == 0
+        assert queue.active_auto_coach_slots(db, ID, data['published_at'], CLIP) == 0
+
+    # 2. Ordering B: AI creation commits immediately before cancel enters BEGIN IMMEDIATE; cancel must reject with 409 and AI stays queued.
+    exp_b = post(
+        c,
+        'exports',
+        dict(base_auto, start=0.3, end=1.5, auto_slot=1, request_id='race-exp-b'),
+    ).json
+    _complete_render_job(app, c, exp_b['id'])
+    completed_b = c.get(f"/api/coaching/jobs/{exp_b['id']}").json
+
+    original_edit = queue.edit
+
+    def create_ai_before_cancel(identity, version, action, cue=None):
+        if identity == exp_b['id'] and action == 'cancel':
+            res = post(
+                c,
+                'requests',
+                {
+                    'export_id': exp_b['id'],
+                    'prompt': 'Race B prompt',
+                    'consent': True,
+                    'auto_detect': True,
+                    'request_id': 'race-ai-b',
+                },
+            )
+            assert res.status_code == 201
+        return original_edit(identity, version, action, cue)
+
+    queue.edit = create_ai_before_cancel
+    try:
+        r_cancel_b = c.put(
+            f"/api/coaching/jobs/{exp_b['id']}",
+            json={'action': 'cancel', 'version': completed_b['version']},
+            headers={'X-Tennis-Request': '1'},
+        )
+        assert r_cancel_b.status_code == 409
+    finally:
+        queue.edit = original_edit
+
+    assert queue.get(exp_b['id'])['state'] == 'completed'
+    # Idempotent replay of the winning AI request returns the same queued AI job.
+    r_ai_b_replay = post(
+        c,
+        'requests',
+        {
+            'export_id': exp_b['id'],
+            'prompt': 'Race B prompt',
+            'consent': True,
+            'auto_detect': True,
+            'request_id': 'race-ai-b',
+        },
+    )
+    assert r_ai_b_replay.status_code == 201
+    assert r_ai_b_replay.json['state'] == 'queued'
+
+    # Cancel the queued AI job to free the slot before testing >100 listing retention.
+    ai_b = r_ai_b_replay.json
+    assert (
+        c.put(
+            f"/api/coaching/jobs/{ai_b['id']}",
+            json={'action': 'cancel', 'version': ai_b['version']},
+            headers={'X-Tennis-Request': '1'},
+        ).status_code
+        == 200
+    )
+
+    # 3. Retained auto-detect render reservations older than 100 newer render jobs remain visible in listing(ID).
+    old_auto_1 = post(
+        c,
+        'exports',
+        dict(base_auto, start=0.1, end=1.1, auto_slot=1, request_id='old-auto-retain-1'),
+    ).json
+    old_auto_2 = post(
+        c,
+        'exports',
+        dict(base_auto, start=1.2, end=2.2, auto_slot=2, request_id='old-auto-retain-2'),
+    ).json
+    _complete_render_job(app, c, old_auto_1['id'])
+    # Insert 105 newer share/manual render jobs on the same recording ID so old_auto_1 and old_auto_2 fall outside the top 100 by timestamp.
+    for i in range(105):
+        r_share = post(
+            c,
+            'exports',
+            dict(selection(data), intent='share', quality='high', start=0.1, end=0.5, request_id=f'bulk-share-{i:03d}'),
+        )
+        assert r_share.status_code == 201
+
+    listed = c.get(f'/api/coaching/sessions/{ID}').json
+    listed_ids = {j['id'] for j in listed['jobs']}
+    assert old_auto_1['id'] in listed_ids, 'Completed unsubmitted auto_detect render must remain visible beyond LIMIT 100'
+    assert old_auto_2['id'] in listed_ids, 'Queued unsubmitted auto_detect render must remain visible beyond LIMIT 100'
+
+

@@ -166,12 +166,48 @@ class Coaching(Annotations):
             if row:
                 if row['fingerprint']!=fingerprint: raise QueueConflict('Request ID already used for a different selection')
                 return self.decode(row)
+            export_id=body.get('export_id') if role=='ai' else None
+            render_body={}
+            if role=='ai' and export_id is not None:
+                render_row=db.execute('SELECT * FROM jobs WHERE id=?',(export_id,)).fetchone()
+                if render_row is not None or body.get('auto_detect') or 'artifact_directory' in body:
+                    if not render_row or render_row['role']!='render' or render_row['state']!='completed':
+                        raise QueueConflict('Prepare an excerpt first')
+                    render_body=json.loads(render_row['body'])
+                    render_result=json.loads(render_row['result']) if render_row['result'] else {}
+                    if render_body.get('intent')=='share':
+                        raise ValueError('Share downloads cannot be used as coaching evidence')
+                    if (
+                        render_body.get('source_id')!=body.get('source_id')
+                        or render_body.get('publication')!=body.get('publication')
+                        or render_body.get('clip_id')!=body.get('clip_id')
+                        or ('artifact_directory' in body and render_result.get('artifact_directory')!=body.get('artifact_directory'))
+                    ):
+                        raise QueueConflict('Excerpt identity mismatch; prepare a fresh excerpt')
+                    if 'player_context' in render_body and render_body.get('player_context')!=body.get('player_context'):
+                        raise QueueConflict('Main player or profile changed. Refresh the review before asking.')
+                    if render_body.get('auto_detect') and not body.get('auto_detect') and body.get('follow_up_of') is None:
+                        raise ValueError('Automatic coaching exports must be submitted as automatic coaching requests')
+            if role=='ai' and body.get('follow_up_of') is not None:
+                parent_row=db.execute('SELECT * FROM jobs WHERE id=?',(body.get('follow_up_of'),)).fetchone()
+                if not parent_row or parent_row['role']!='ai' or parent_row['state']!='completed':
+                    raise QueueConflict('Follow-ups must refer to a completed response for this excerpt')
+                parent_body=json.loads(parent_row['body'])
+                if (
+                    parent_body.get('export_id')!=export_id
+                    or parent_body.get('publication')!=body.get('publication')
+                    or parent_body.get('player_context')!=body.get('player_context')
+                ):
+                    raise QueueConflict('Follow-ups must refer to a completed response for this excerpt')
             if body.get('auto_detect'):
                 source_id=body.get('source_id')
                 publication=body.get('publication')
                 clip_id=body.get('clip_id')
-                export_id=body.get('export_id') if role=='ai' else None
-                if role=='ai' and export_id:
+                if role=='ai':
+                    if not export_id:
+                        raise ValueError('Automatic coaching requests require a completed automatic export')
+                    if not render_body.get('auto_detect'):
+                        raise ValueError('Automatic coaching requests require an automatic coaching export')
                     existing_ai=db.execute(
                         """
                         SELECT id FROM jobs
@@ -204,7 +240,33 @@ class Coaching(Annotations):
 
     def listing(self,source):
         with self.db() as db:
-            rows=db.execute("SELECT * FROM jobs WHERE json_extract(body,'$.source_id')=? AND (role='ai' OR id IN (SELECT id FROM jobs WHERE json_extract(body,'$.source_id')=? ORDER BY COALESCE(asked_at,updated) DESC, id DESC LIMIT 100)) ORDER BY COALESCE(asked_at,updated) DESC, id DESC",(source,source)).fetchall()
+            rows=db.execute(
+                """
+                SELECT * FROM jobs
+                WHERE json_extract(body,'$.source_id')=?
+                  AND (
+                    role='ai'
+                    OR (
+                      role='render'
+                      AND json_extract(body,'$.auto_detect')=1
+                      AND state IN ('queued','leased','completed')
+                      AND NOT EXISTS (
+                        SELECT 1 FROM jobs AS a
+                        WHERE a.role='ai'
+                          AND json_extract(a.body,'$.export_id')=jobs.id
+                      )
+                    )
+                    OR id IN (
+                      SELECT id FROM jobs
+                      WHERE json_extract(body,'$.source_id')=?
+                      ORDER BY COALESCE(asked_at,updated) DESC, id DESC
+                      LIMIT 100
+                    )
+                  )
+                ORDER BY COALESCE(asked_at,updated) DESC, id DESC
+                """,
+                (source,source),
+            ).fetchall()
             workers=[dict(r) for r in db.execute('SELECT * FROM workers')]
         jobs=[self.decode(r) for r in rows]
         for job in jobs:

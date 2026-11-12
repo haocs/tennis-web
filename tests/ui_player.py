@@ -3109,3 +3109,277 @@ def test_clip_study_auto_coach_detection_cap_cancellation_and_manual_coexistence
     assert not errors
     page.close()
 
+
+def test_clip_study_auto_coach_long_clip_watchdog_and_stale_abort_regressions(browser, ui_server):
+    page = browser.new_page(viewport={'width': 1280, 'height': 844})
+    errors = []
+    page.on('pageerror', lambda err: errors.append(str(err)))
+    page.add_init_script("""(() => {
+      window.__scanWorkers = [];
+      window.__scanScene = 'long_60s_two_bursts';
+      window.__scanDelayMs = 2;
+      window.__workerMode = 'normal';
+      window.Worker = class {
+        constructor(url) {
+          this.url = url;
+          this.terminated = false;
+          this.sent = [];
+          window.__scanWorkers.push(this);
+        }
+        postMessage(msg) {
+          if (this.terminated) return;
+          this.sent.push({type: msg.type, seq: msg.seq});
+          if (msg.type === 'init') {
+            setTimeout(() => {
+              if (this.terminated) return;
+              if (window.__workerMode === 'detector_error') {
+                this.onmessage?.({data: {type: 'error', code: 'detector_error'}});
+              } else if (window.__workerMode === 'unsupported') {
+                this.onmessage?.({data: {type: 'unsupported', code: 'worker_graphics_unavailable'}});
+              } else {
+                this.onmessage?.({data: {type: 'ready'}});
+              }
+            }, 2);
+          } else if (msg.type === 'detect') {
+            const w = msg.width || 320, h = msg.height || 180;
+            const v = document.getElementById('study-video');
+            const t = Number(v?.currentTime || 0);
+            const scene = window.__scanScene;
+            let detections = [];
+            const box = (nx, ny, nw, nh, score = 0.92) => ({
+              boundingBox: {originX: nx * w, originY: ny * h, width: nw * w, height: nh * h},
+              categories: [{categoryName: 'person', score}],
+            });
+            if (scene === 'long_60s_two_bursts') {
+              // Paired samples on 60s clip: active player movement in [5s, 20s] and [40s, 55s].
+              if (t >= 5.0 && t <= 20.0) {
+                const shift = ((t % 2.0) / 2.0) * 0.18;
+                detections = [box(0.28 + shift, 0.34, 0.16, 0.42)];
+              } else if (t >= 40.0 && t <= 55.0) {
+                const shift = ((t % 2.0) / 2.0) * 0.18;
+                detections = [box(0.66 - shift, 0.32, 0.17, 0.44)];
+              } else {
+                detections = [box(0.45, 0.35, 0.16, 0.42)];
+              }
+            }
+            setTimeout(() => {
+              if (!this.terminated) {
+                this.onmessage?.({data: {type: 'result', epoch: msg.epoch, seq: msg.seq, detections}});
+              }
+            }, window.__scanDelayMs);
+          }
+        }
+        terminate() {
+          this.terminated = true;
+        }
+      };
+    })()""")
+
+    source = page.request.get(ui_server + f'/api/sessions/{ID}').json()
+    publication = source['published_at']
+    state = dict(enabled=True, jobs=[], annotations=[], workers=[])
+    export_calls = []
+    ai_calls = []
+    stale_switch_on_first_ai = {'active': False}
+
+    def handle_sessions(route):
+        route.fulfill(json=state)
+
+    def handle_exports(route):
+        body = route.request.post_data_json
+        export_calls.append(body)
+        idx = len(export_calls)
+        job = dict(
+            id=f'exp-long-{idx}',
+            version=1,
+            role='render',
+            state='queued',
+            asked_at=1700010000.0 + idx,
+            updated=1700010000.0 + idx,
+            body=dict(
+                body,
+                original_start=body['start'],
+                original_end=body['end'],
+                player_context=None,
+            ),
+            result={},
+        )
+        state['jobs'].append(job)
+        route.fulfill(status=201, json=job)
+
+    def handle_requests(route):
+        body = route.request.post_data_json
+        ai_calls.append(body)
+        if stale_switch_on_first_ai['active'] and body.get('export_id') == 'exp-stale-1':
+            stale_switch_on_first_ai['active'] = False
+            # Switch clip (or close) while first request is in flight, then reject the first request!
+            page.evaluate('() => window.Coach.open(model.session, model.session.clips[1])')
+            route.fulfill(status=409, json={'error': 'First auto export was cancelled before AI submission'})
+            return
+        render_job = next(j for j in state['jobs'] if j['id'] == body['export_id'])
+        idx = len(ai_calls)
+        job = dict(
+            id=f'ai-long-{idx}',
+            version=1,
+            role='ai',
+            state='completed',
+            asked_at=1700020000.0 + idx,
+            updated=1700020010.0 + idx,
+            body=dict(render_job['body'], **body, evidence_frames=[]),
+            result=dict(
+                answer=f'Coach review {idx}',
+                structured=dict(summary=f'Auto summary {idx}', validation_warnings=[], parse_status='valid'),
+            ),
+        )
+        state['jobs'].append(job)
+        route.fulfill(status=201, json=job)
+
+    page.route('**/api/coaching/sessions/*', handle_sessions)
+    page.route('**/api/coaching/exports', handle_exports)
+    page.route('**/api/coaching/requests', handle_requests)
+
+    page.goto(ui_server + f'/review/{ID}?clip={CLIP}')
+    expect(page.locator('#video-seek')).to_be_enabled()
+    # Configure 60s clip duration to verify >40s clips select 2 non-overlapping moments in Clip Study.
+    page.evaluate("""() => {
+      model.session.clips[0].duration_seconds = 60;
+      model.session.clips[0].original_end_seconds = 60;
+      const v = document.getElementById('study-video');
+      const proto = HTMLMediaElement.prototype;
+      const realCurrentTime = Object.getOwnPropertyDescriptor(proto, 'currentTime');
+      let logicalTime = 0;
+      Object.defineProperty(v, 'duration', {configurable: true, get: () => 60});
+      Object.defineProperty(v, 'currentTime', {
+        configurable: true,
+        get: () => logicalTime,
+        set: val => {
+          logicalTime = Number(val) || 0;
+          realCurrentTime.set.call(v, Math.min(1.95, Math.max(0, (logicalTime / 60) * 1.9)));
+        },
+      });
+    }""")
+    page.get_by_role('button', name='Study clip', exact=True).click()
+    page.wait_for_function("() => document.querySelector('#study-video')?.readyState >= 2")
+
+    auto_btn = page.locator('#coach-auto-ask')
+    expect(auto_btn).to_have_attribute('data-auto-coach-state', 'ready')
+
+    # 1. Total scan watchdog: each sample takes 55ms (< detectTimeoutMs=2000ms), but cumulative scan exceeds scanTimeoutMs=160ms.
+    page.evaluate("""() => {
+      window.ClipStudy.setInterval(4.0, 12.0);
+      const v = document.getElementById('study-video');
+      v.pause();
+      v.currentTime = 6.5;
+      window.__scanDelayMs = 55;
+      window.__TENNIS_AUTOFOCUS_CONFIG = {detectTimeoutMs: 2000, scanTimeoutMs: 160};
+    }""")
+    auto_btn.click()
+    expect(page.locator('#coach-status')).to_contain_text('Auto-detect scan timed out. Try again or select an interval and use Ask coach.')
+    expect(page.locator('#study-video')).to_have_attribute('data-auto-coach-state', 'error')
+    expect(auto_btn).to_have_attribute('data-auto-coach-state', 'ready')
+    expect(auto_btn).to_be_enabled()
+    assert page.evaluate('window.__scanWorkers.at(-1).terminated') is True
+    assert len(export_calls) == 0
+    sel_after_timeout = page.evaluate('window.ClipStudy.coachingSelection()')
+    assert sel_after_timeout['start'] == pytest.approx(4.0, abs=0.05)
+    assert sel_after_timeout['end'] == pytest.approx(12.0, abs=0.05)
+    assert page.locator('#study-video').evaluate('v => v.currentTime') == pytest.approx(6.5, abs=0.08)
+
+    # 2. Runtime detector_error stays recoverable ('ready'), whereas worker_graphics_unavailable becomes 'unavailable'.
+    page.evaluate("""() => {
+      window.__scanDelayMs = 2;
+      window.__TENNIS_AUTOFOCUS_CONFIG = {detectTimeoutMs: 8000, scanTimeoutMs: 45000};
+      window.__workerMode = 'detector_error';
+    }""")
+    auto_btn.click()
+    expect(page.locator('#coach-status')).to_contain_text('Automatic detection failed on this clip. Try again or select an interval and use Ask coach.')
+    expect(page.locator('#study-video')).to_have_attribute('data-auto-coach-state', 'error')
+    expect(auto_btn).to_have_attribute('data-auto-coach-state', 'ready')
+    expect(auto_btn).to_be_enabled()
+
+    page.evaluate("() => { window.__workerMode = 'unsupported'; }")
+    auto_btn.click()
+    expect(page.locator('#coach-status')).to_contain_text('Automatic detection is unavailable in this browser. Select an interval and use Ask coach.')
+    expect(page.locator('#study-video')).to_have_attribute('data-auto-coach-state', 'unavailable')
+    expect(auto_btn).to_have_attribute('data-auto-coach-state', 'unavailable')
+    expect(auto_btn).to_be_disabled()
+    expect(page.locator('#coach-ask')).to_be_enabled()
+
+    # Re-open with normal worker mode to test 60s clip auto-detection (2 non-overlapping windows from <=16 paired samples).
+    page.evaluate("""() => {
+      window.__workerMode = 'normal';
+      window.Coach.open(model.session, model.session.clips[0]);
+    }""")
+    expect(auto_btn).to_have_attribute('data-auto-coach-state', 'ready')
+    auto_btn.click()
+    page.wait_for_function('() => document.querySelectorAll("#coach-history .coach-note").length === 2')
+    assert len(export_calls) == 2
+    assert int(page.locator('#study-video').get_attribute('data-auto-coach-detections') or '0') == 16
+    w1, w2 = sorted(export_calls, key=lambda c: c['start'])
+    assert w1['end'] <= w2['start']
+    assert w1['start'] < 20.0 and w2['start'] >= 35.0
+
+    # 3. Stale rejected submission in advancePendingAutoExports after clip switch must NOT post the 2nd export!
+    state['jobs'] = [
+        dict(
+            id='exp-stale-1',
+            version=1,
+            role='render',
+            state='completed',
+            asked_at=1700030001.0,
+            updated=1700030002.0,
+            body=dict(
+                source_id=ID,
+                publication=publication,
+                clip_id=CLIP,
+                start=2.0,
+                end=6.0,
+                original_start=2.0,
+                original_end=6.0,
+                speed=0.5,
+                crop=[0, 0, 1, 1],
+                quality='balanced',
+                question='Stale export 1',
+                auto_detect=True,
+                auto_slot=1,
+                player_context=None,
+            ),
+            result={'artifact_directory': 'f-stale-1'},
+        ),
+        dict(
+            id='exp-stale-2',
+            version=1,
+            role='render',
+            state='completed',
+            asked_at=1700030003.0,
+            updated=1700030004.0,
+            body=dict(
+                source_id=ID,
+                publication=publication,
+                clip_id=CLIP,
+                start=10.0,
+                end=14.0,
+                original_start=10.0,
+                original_end=14.0,
+                speed=0.5,
+                crop=[0, 0, 1, 1],
+                quality='balanced',
+                question='Stale export 2',
+                auto_detect=True,
+                auto_slot=2,
+                player_context=None,
+            ),
+            result={'artifact_directory': 'f-stale-2'},
+        ),
+    ]
+    ai_calls.clear()
+    stale_switch_on_first_ai['active'] = True
+    page.evaluate('() => window.Coach.open(model.session, model.session.clips[0])')
+    page.wait_for_function('() => document.querySelector("#coach-auto-ask")?.dataset.autoCoachRemaining === "2"')
+    # Wait briefly to confirm no trailing second POST occurs after the rejected first POST.
+    page.wait_for_timeout(150)
+    assert [c['export_id'] for c in ai_calls] == ['exp-stale-1'], f'Expected only first stale export to be attempted before switch, got {ai_calls}'
+    assert not errors
+    page.close()
+
+

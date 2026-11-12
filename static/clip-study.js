@@ -473,8 +473,17 @@
       throw err;
     }
     const owner = context;
+    const cfg = window.__TENNIS_AUTOFOCUS_CONFIG || {};
+    const initTimeoutMs = Number(cfg.initTimeoutMs) > 0 ? Number(cfg.initTimeoutMs) : 30000;
+    const detectTimeoutMs = Number(cfg.detectTimeoutMs) > 0 ? Number(cfg.detectTimeoutMs) : 8000;
+    const scanTimeoutMs = Number(cfg.scanTimeoutMs) > 0 ? Number(cfg.scanTimeoutMs) : 45000;
     const controller = new AbortController();
     const signal = controller.signal;
+    let scanTimedOut = false;
+    const scanWatchdog = setTimeout(() => {
+      scanTimedOut = true;
+      controller.abort();
+    }, scanTimeoutMs);
     owner.capturing = true;
     owner.captureReturnTime = video.currentTime || 0;
     owner.captureController = controller;
@@ -544,9 +553,6 @@
         throw err;
       }
 
-      const cfg = window.__TENNIS_AUTOFOCUS_CONFIG || {};
-      const initTimeoutMs = Number(cfg.initTimeoutMs) > 0 ? Number(cfg.initTimeoutMs) : 30000;
-      const detectTimeoutMs = Number(cfg.detectTimeoutMs) > 0 ? Number(cfg.detectTimeoutMs) : 8000;
       video.dataset.autoCoachState = 'loading';
       video.dataset.autoCoachCaptures = '0';
       video.dataset.autoCoachDetections = '0';
@@ -569,7 +575,7 @@
         signal.addEventListener('abort', onAbort, {once: true});
         timer = setTimeout(() => {
           cleanup();
-          const err = new Error('Auto detect is unavailable in this browser. Select an interval and click Ask coach.');
+          const err = new Error('Automatic detection timed out while starting. Try again or select an interval and use Ask coach.');
           err.code = 'init_timeout';
           reject(err);
         }, initTimeoutMs);
@@ -585,14 +591,14 @@
             reject(err);
           } else if (data.type === 'error') {
             cleanup();
-            const err = new Error('Auto detect is unavailable in this browser. Select an interval and click Ask coach.');
+            const err = new Error('Automatic detection failed on this clip. Try again or select an interval and use Ask coach.');
             err.code = data.code || 'detector_error';
             reject(err);
           }
         };
         worker.onerror = () => {
           cleanup();
-          const err = new Error('Auto detect is unavailable in this browser. Select an interval and click Ask coach.');
+          const err = new Error('Automatic detection failed on this clip. Try again or select an interval and use Ask coach.');
           err.code = 'worker_error';
           reject(err);
         };
@@ -611,16 +617,18 @@
         await seekFrame(owner, at, signal);
         await new Promise(resolve => {
           let settled = false;
+          let settleTimer = null;
           const finish = () => {
             if (!settled) {
               settled = true;
+              clearTimeout(settleTimer);
               signal.removeEventListener('abort', finish);
               resolve();
             }
           };
           signal.addEventListener('abort', finish, {once: true});
           requestAnimationFrame(() => requestAnimationFrame(finish));
-          setTimeout(finish, 36);
+          settleTimer = setTimeout(finish, 36);
         });
         if (signal.aborted || context !== owner) throw new DOMException('Cancelled', 'AbortError');
         painter.drawImage(video, 0, 0, dims.width, dims.height);
@@ -645,7 +653,7 @@
           signal.addEventListener('abort', onAbort, {once: true});
           timer = setTimeout(() => {
             cleanup();
-            const err = new Error('Auto detect is unavailable in this browser. Select an interval and click Ask coach.');
+            const err = new Error('Automatic detection timed out on a video frame. Try again or select an interval and use Ask coach.');
             err.code = 'detect_timeout';
             reject(err);
           }, detectTimeoutMs);
@@ -661,14 +669,14 @@
               reject(err);
             } else if (data.type === 'error') {
               cleanup();
-              const err = new Error('Auto detect is unavailable in this browser. Select an interval and click Ask coach.');
+              const err = new Error('Automatic detection failed on this clip. Try again or select an interval and use Ask coach.');
               err.code = data.code || 'detector_error';
               reject(err);
             }
           };
           worker.onerror = () => {
             cleanup();
-            const err = new Error('Auto detect is unavailable in this browser. Select an interval and click Ask coach.');
+            const err = new Error('Automatic detection failed on this clip. Try again or select an interval and use Ask coach.');
             err.code = 'worker_error';
             reject(err);
           };
@@ -706,18 +714,24 @@
       video.dataset.autoCoachState = selectedWindows.length ? 'detected' : 'empty';
       return {windows: selectedWindows, sampleCount: samples.length};
     } catch (error) {
-      if (
-        error?.code &&
-        ['unsupported', 'worker_graphics_unavailable', 'init_timeout', 'detect_timeout', 'detector_error', 'worker_error'].includes(
-          error.code
-        )
-      ) {
+      let caught = error;
+      if (scanTimedOut && context === owner) {
+        caught = new Error('Auto-detect scan timed out. Try again or select an interval and use Ask coach.');
+        caught.code = 'scan_timeout';
+      }
+      if (caught?.code && ['unsupported', 'worker_graphics_unavailable'].includes(caught.code)) {
         video.dataset.autoCoachState = 'unavailable';
-      } else if (error?.name === 'AbortError') {
+      } else if (
+        caught?.code &&
+        ['init_timeout', 'detect_timeout', 'scan_timeout', 'detector_error', 'worker_error'].includes(caught.code)
+      ) {
+        video.dataset.autoCoachState = 'error';
+      } else if (caught?.name === 'AbortError') {
         video.dataset.autoCoachState = 'cancelled';
       }
-      throw error;
+      throw caught;
     } finally {
+      clearTimeout(scanWatchdog);
       try {
         worker?.postMessage({type: 'close'});
       } catch (_) {}

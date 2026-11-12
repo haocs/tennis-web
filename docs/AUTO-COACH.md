@@ -38,10 +38,12 @@ The browser worker runs the vendored `@mediapipe/tasks-vision@0.10.14` `ObjectDe
 All sampling and window-ranking math lives in pure functions in `static/autofocus-core.js` shared with Node unit tests:
 
 1. **Bounded sample schedule (`planAutoCoachSampleTimes(duration, maxSamples = 16)`)**:
-   - For clip duration $D > 0$: selects $N = \text{clamp}(\text{round}(D / 1.5), 4, 16)$ interior timestamps $t_i = D \cdot \frac{i + 0.5}{N}$ (for very short clips $D < 1.0\text{ s}$, $N = \text{clamp}(\text{floor}(D / 0.2), 2, 4)$).
+   - For clip duration $D > 0$: selects $N = \text{clamp}(\text{round}(D / 1.5), 4, 16)$ interior timestamps (for very short clips $D < 1.0\text{ s}$, $N = \text{clamp}(\text{floor}(D / 0.2), 2, 4)$).
+   - For clips where uniform spacing $D / N \le 2.2\text{ s}$ ($D \le 35.2\text{ s}$ at $N = 16$), places $N$ uniform interior timestamps $t_i = D \cdot \frac{i + 0.5}{N}$.
+   - For longer clips where uniform spacing would exceed the $2.5\text{ s}$ motion-continuity horizon ($D / N > 2.2\text{ s}$, e.g. $41\text{ s}, 60\text{ s}, 90\text{ s}$), places $\lfloor N / 2 \rfloor \le 8$ two-sample probes ($\le 16$ total samples) across the clip with a bounded $1.0\text{ s}$ intra-pair interval ($\Delta t \le 2.5\text{ s}$) so every probe measures true primary-player velocity without exceeding the 16-frame scan budget.
    - Hard ceiling of **16 frames per scan**, avoiding `0` and `D` boundary black/undecodable edge frames.
 2. **Candidate window construction and 0 / 1 / 2 selection (`selectAutoCoachWindows(samples, duration, options)`)**:
-   - **Window span**: $W = \text{clamp}(D \times 0.35, 2.5, 8.0)$ seconds, clamped to $[0.1, \min(30, D)]$ (if $D < 2.5\text{ s}$, $W = D$).
+   - **Window span**: $W = \text{clamp}(D \times 0.30, 2.5, 8.0)$ seconds, clamped to $[0.1, \min(30, D)]$ (if $D < 2.5\text{ s}$, $W = D$).
    - **Eligibility thresholds (never manufacturing windows without evidence)**:
      - Evaluates candidate windows $[s, e] \subseteq [0, D]$ of length $W$ anchored around sample timestamps and activity peaks.
      - Requires at least `minDetectedSamples` ($\ge 2$ detected primary-person samples when $N \ge 4$ and $D \ge 1.5\text{ s}$; $\ge 1$ high-prominence sample when $D < 1.5\text{ s}$).
@@ -67,8 +69,9 @@ All sampling and window-ranking math lives in pure functions in `static/autofocu
 - **Clean cancellation and state restoration**:
   - Before scanning, captures the user's pre-scan playback position (`returnTime = video.currentTime`) and interval (`returnInterval = {start, end}`).
   - Clicking **Cancel scan** (`#coach-auto-cancel`), changing clips, closing `#clip-study`, or navigating away aborts the scan controller, increments the coaching generation fence, terminates the worker, restores `video.currentTime` and `[start, end]` to their pre-scan values, and suppresses any further export or AI submissions from the cancelled scan.
-- **Unsupported browsers and manual fallback**:
-  - If `Worker`, `WebAssembly`, or worker `OffscreenCanvas` WebGL2 (`worker_graphics_unavailable`) is unavailable, the scanner terminates cleanly, marks `#coach-auto-ask` with `data-auto-coach-state="unavailable"`, and displays: `Auto detect is unavailable in this browser. Select an interval and click Ask coach.` Manual interval selection and **Ask coach** remain fully available.
+- **Unsupported browsers vs recoverable runtime/timeout errors**:
+  - If `Worker`, `WebAssembly`, or worker `OffscreenCanvas` WebGL2 (`unsupported` / `worker_graphics_unavailable`) is unavailable, the scanner terminates cleanly, marks `#study-video` and `#coach-auto-ask` with `data-auto-coach-state="unavailable"`, and displays: `Automatic detection is unavailable in this browser. Select an interval and use Ask coach.`
+  - If a transient runtime or timeout error occurs during scanning (`init_timeout`, `detect_timeout`, `scan_timeout`, `detector_error`, `worker_error`), the scanner terminates its worker, restores the prior interval and playhead, marks `#study-video` with `data-auto-coach-state="error"`, keeps `#coach-auto-ask` in recoverable `ready` state so the user can retry, and displays a truthful failure message in `#coach-status`. Manual interval selection and **Ask coach** remain fully available in all cases.
 
 ## Clip Study UX, privacy/consent, and immutable context
 
@@ -98,7 +101,7 @@ All sampling and window-ranking math lives in pure functions in `static/autofocu
        - Plus `render` jobs for `(source_id, publication, clip_id)` with `auto_detect = true` whose state is `'queued'`, `'leased'`, or `'completed'`, whose `id != exclude_export_id`, and for which **no** `ai` job exists with `body.export_id = render.id`.
     3. **Atomic reservation and transition**:
        - On `POST /api/coaching/exports` with `auto_detect: true`: if active slots $\ge 2$, raises `QueueConflict('Auto coach is limited to 2 reviews per clip')` (`409`). Otherwise inserts the `render` job (`auto_detect: true`), reserving 1 slot immediately.
-       - On `POST /api/coaching/requests` with `auto_detect: true` (or when `render.body.auto_detect` is true): passes `exclude_export_id = render.id` into the `BEGIN IMMEDIATE` check and verifies no active/completed/post-call `ai` job already references `render.id`. This atomically transfers the reserved slot from `render.id` to the new `ai` job while still enforcing the `< 2` cap if a manual export was reused.
+       - On `POST /api/coaching/requests`: inside `Coaching.create`'s `BEGIN IMMEDIATE` transaction, re-reads the parent `render` job row and verifies it still exists with `role == 'render'`, `state == 'completed'`, and matching `source_id`, `publication`, `clip_id`, `artifact_directory`, `player_context`, and `auto_detect` (preventing a concurrent `cancel` vs `requests` race from queuing an `ai` job against a cancelled export). When `auto_detect: true`, passes `exclude_export_id = render.id` into `active_auto_coach_slots` and verifies no active/completed/post-call `ai` job already references `render.id`, atomically transferring the reserved slot from `render.id` to the new `ai` job.
 
 ### Failure, cancellation, reopen, and `needs_review` semantics
 
@@ -111,6 +114,6 @@ All sampling and window-ranking math lives in pure functions in `static/autofocu
 | `ai` job enters `calling`, `needs_review`, `completed`, or fails after `calling` (`provider_called: true`) | **1 slot permanently consumed** | Provider boundary was crossed; never auto-retry a paid call. |
 
 - **Reopen and multi-tab recovery**:
-  - `GET /api/coaching/sessions/<source_id>` returns all `ai` jobs and recent `render` jobs (including `auto_detect`, `auto_slot`, `original_start`, `original_end`, and `player_context`).
+  - `GET /api/coaching/sessions/<source_id>` returns all `ai` jobs, all active/unsubmitted `auto_detect` `render` reservations (`state IN ('queued', 'leased', 'completed')` without a linked `ai` job, even if older than the 100-row general render history cap), and the 100 most recent other jobs.
   - `#coach-history` renders in-flight and failed automatic `render` jobs that do not yet have an `ai` job, alongside `ai` jobs, so closing and reopening Clip Study preserves truthful progress and cancellation controls.
-  - When `refresh()` observes a `completed` automatic `render` job for the current clip and publication with no corresponding `ai` job (and matching current player context), it automatically submits `POST /api/coaching/requests` with deterministic `request_id = 'auto-ai-' + render.id`, ensuring idempotent completion across reopen or multiple open tabs.
+  - When `refresh()` observes a `completed` automatic `render` job for the current clip and publication with no corresponding `ai` job, `advancePendingAutoExports` checks `owner === current && gen === generation` before each submission and on every resolved or rejected async boundary (with `failedAutoExports` and `submittingAutoExports` scoped per active `owner` instance), and submits `POST /api/coaching/requests` with deterministic `request_id = 'auto-ai-' + render.id`.
