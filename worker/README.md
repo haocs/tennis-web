@@ -10,9 +10,27 @@ python3 -m venv ~/.venvs/tennis-coach
 The install copies the package; the source checkout can subsequently move. For a
 GitHub install after release, use the worker subdirectory at a reviewed commit.
 Windows uses the venv's `Scripts` directory. Python 3.11+, FFmpeg (libx264 and
-zscale/tonemap filters) and Codex CLI are required. Sign in using `codex login` on
-the worker machine. The AI adapter requires ChatGPT sign-in and removes API-key
-environment variables from its subprocess; it does not move tokens to NAS.
+zscale/tonemap filters) and at least one configured AI provider are required:
+
+- **Codex / ChatGPT (`"codex"`)**: Install Codex CLI and sign in using `codex login` on
+  the worker machine. Ambient API-key environment variables are stripped so requests use
+  the signed-in ChatGPT account without moving tokens to NAS.
+- **Google Antigravity (`"antigravity"`)**: Install Antigravity CLI (`brew install --cask antigravity-cli`,
+  providing `agy`) and sign in with your Google Account (`agy` in Terminal). Ambient
+  API-key environment variables are stripped so requests run in `--sandbox` using your
+  Antigravity account.
+- **Gemini API (`"gemini"`)**: Set `"gemini_api_key"` in private `config.json` or export
+  `GEMINI_API_KEY` in the worker environment. Requests call the HTTPS Gemini
+  `generateContent` endpoint directly with `x-goog-api-key` header and structured JSON
+  schema output (default `"gemini_model": "gemini-2.5-flash"`).
+
+Set `"providers"` as an ordered fallback array (for example
+`["antigravity", "codex", "gemini"]` or `["codex", "antigravity", "gemini"]`) or set
+`"provider"` to a single backend. When omitted, `"providers"` defaults to `["codex"]`
+for backward compatibility. If an earlier provider is unconfigured, signed out, or
+returns a non-timeout error (such as an expired login or quota error), the worker
+records a redacted attempt entry locally and automatically falls back to the next
+provider without repeating an ambiguous timed-out request.
 
 Copy `config.example.json` to a private configuration directory. Set mounted paths
 for the published library media (read-only) and **separate coaching artifacts**
@@ -141,4 +159,22 @@ read-only mount. These content-addressed snapshots are retained separately from 
 prepared videos. Keep them with coaching database backups; never apply export TTLs
 to evidence. See [the contract](../docs/COACHING-ANNOTATIONS.md) for review, retention,
 reprocessing and recovery rules. The worker verifies/prepares evidence before
-marking a provider call started and uses Codex structured output for new requests.
+marking a provider call started and uses structured JSON output across Codex,
+Antigravity (`agy`), and Gemini (`generateContent`) for new requests.
+
+## Multi-provider AI coaching and ordered fallback (worker 0.5.0)
+
+Worker `0.5.0` adds first-class support for Google Antigravity (`"antigravity"` via
+`agy`) and the Gemini API (`"gemini"` via `gemini_api_key` or `GEMINI_API_KEY`) alongside
+Codex (`"codex"`), for both frame-based Clip Study coaching (`coaching-annotations-v1`)
+and text-only player learning plans (`learning-plan-v1`), without requiring any NAS
+website container changes:
+
+- Optional per-provider model overrides: `"codex_model"` (or legacy `"model"`),
+  `"antigravity_model"`, and `"gemini_model"` (default `"gemini-2.5-flash"`).
+- Schema normalization (`gemini_compatible_schema`) automatically adapts numeric `enum`
+  fields and strips `additionalProperties` for Antigravity and Gemini while preserving
+  exact server-side schema validation (`schema_version: 2` for clip coaching and
+  `schema_version: 1` for learning plans).
+- Evidence pinning and `/calling` state transitions occur at most once per job before
+  the first provider call starts; timed-out provider calls never trigger a fallback call.

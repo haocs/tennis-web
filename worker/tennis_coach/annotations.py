@@ -81,6 +81,33 @@ def response_schema():
                 required=['schema_version', 'summary', 'suggestions'])
 
 
+def gemini_compatible_schema(schema):
+    """Convert internal JSON Schema to the OpenAPI Schema subset accepted by Gemini and Antigravity."""
+    if isinstance(schema, list):
+        return [gemini_compatible_schema(item) for item in schema]
+    if not isinstance(schema, dict):
+        return schema
+    converted = {
+        key: gemini_compatible_schema(value)
+        for key, value in schema.items()
+        if key != 'additionalProperties'
+    }
+    if converted.get('type') in ('integer', 'number') and isinstance(converted.get('enum'), list):
+        values = [v for v in converted.pop('enum') if finite(v)]
+        if len(values) == 1:
+            only = values[0]
+            converted['minimum'] = only
+            converted['maximum'] = only
+            note = f'Must equal {only}'
+            converted['description'] = f"{converted['description']}; {note}" if converted.get('description') else note
+        elif values:
+            converted['minimum'] = min(values)
+            converted['maximum'] = max(values)
+            note = 'Allowed values: ' + ', '.join(str(v) for v in values)
+            converted['description'] = f"{converted['description']}; {note}" if converted.get('description') else note
+    return converted
+
+
 def coaching_prompt(body, manifest):
     profile=body.get('player_context')
     profile_heading='Selected-player profile' if body.get('subject_mode')=='selected_player' else 'Main-player profile'

@@ -5,5 +5,8 @@
   "artifact_root": "/mounted/coaching-media",
   "local_state": "~/.local/state/tennis-coach",
   "ffmpeg": "/path/to/ffmpeg",
-  "codex": "/path/to/codex"
+  "providers": ["codex", "antigravity", "gemini"],
+  "codex": "/path/to/codex",
+  "antigravity": "/path/to/agy",
+  "gemini_model": "gemini-2.5-flash"
 }
