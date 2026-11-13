@@ -2665,36 +2665,59 @@ def test_cut_rerun_requires_selected_revision_and_confirmed_command(browser,tmp_
     shutil.copyfile(Path(__file__).parent/'fixtures/clip.mp4',root/'media'/ID/'Clips/clip-001.mp4')
     server=make_server('127.0.0.1',0,app,threaded=True);thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start();base=f'http://127.0.0.1:{server.server_port}'
     try:
-        page=browser.new_page(viewport={'width':390,'height':844});page.goto(base+f'/review/{ID}/cuts');page.locator('#cut-rerun-panel summary').click()
-        page.locator('#cut-rerun-evidence input').check();page.locator('#cut-rerun-preview').click()
-        expect(page.locator('#cut-rerun-commands')).to_contain_text('Confirm commands')
-        expect(page.get_by_label('Confirm command 1',exact=True)).not_to_be_checked()
+        page=browser.new_page(viewport={'width':390,'height':844});page.goto(base+f'/review/{ID}/cuts')
+        expect(page.locator('#cut-rerun-panel h2')).to_have_text('Reprocess with cut feedback')
+        page.locator('.cut-how-it-works summary').click()
+        expect(page.locator('.cut-how-it-works p')).to_be_visible()
+        expect(page.locator('#cut-rerun-evidence-summary')).to_have_text('Included cut reviews (1 of 1)')
+        expect(page.locator('#cut-rerun-commands h3')).to_have_text('Confirm reprocess rules')
+        expect(page.get_by_label('Confirm command 1',exact=True)).to_be_checked()
+        page.get_by_label('Confirm command 1',exact=True).uncheck()
         page.locator('#cut-rerun-submit').click();expect(page.locator('#cut-rerun-status')).to_have_text('Confirm at least one exact command.')
         assert not server_api.calls
         page.get_by_label('Confirm command 1',exact=True).check();page.locator('#cut-rerun-submit').click()
         expect(page.locator('#cut-rerun-status')).to_contain_text('Candidate task created')
         snapshot=server_api.calls[1][1];assert snapshot['confirmed_commands']['override_clip_bounds_ms'][0]['original_end_ms']==16000
         assert server_api.calls[-1][1]['publication_policy']=='never'
+        expect(page.locator('#cut-rerun-next')).to_be_visible()
+        expect(page.locator('#cut-rerun-next a[href="/processing"]')).to_have_text('Open Processing Room')
+        expect(page.locator('#cut-rerun-next a[href*="/compare?"]')).to_have_text('Compare versions')
         page.get_by_role('button',name='Prepare another task',exact=True).click()
-        expect(page.locator('#cut-rerun-preview')).to_be_enabled()
+        expect(page.locator('#cut-rerun-submit')).to_be_enabled()
         page.evaluate("async () => await NoteUI.cuts(await api('/api/sessions/"+ID+"'))")
-        expect(page.locator('#cut-rerun-panel summary')).to_have_text('Prepare reprocess task')
-        page.locator('#cut-rerun-panel summary').click()
         expect(page.locator('#cut-rerun-evidence input')).to_have_count(1)
-        gap=page.request.post(base+'/api/processing-annotations',headers={'X-Tennis-Request':'1'},data=dict(source_id=ID,publication=data['published_at'],kind='cut_feedback',target=dict(scope='interval',start_seconds=0,end_seconds=4),body=dict(text='Gap review',reasons=['missed_play']),request_id='second-gap-review'))
+        poor_clip=data['clips'][1] if len(data.get('clips',[]))>1 else data['clips'][0]
+        poor=page.request.post(base+'/api/processing-annotations',headers={'X-Tennis-Request':'1'},data=dict(source_id=ID,publication=data['published_at'],kind='cut_feedback',target=dict(scope='clip',clip_id=poor_clip['id'],start_seconds=poor_clip['original_start_seconds'],end_seconds=poor_clip['original_end_seconds']),body=dict(verdict='poor_cut',text='No play clip',reasons=['no_play']),request_id='second-poor-review'))
+        assert poor.status==201
+        gap=page.request.post(base+'/api/processing-annotations',headers={'X-Tennis-Request':'1'},data=dict(source_id=ID,publication=data['published_at'],kind='cut_feedback',target=dict(scope='interval',start_seconds=0,end_seconds=4),body=dict(text='Gap review',reasons=['missed_play']),request_id='third-gap-review'))
         assert gap.status==201
-        page.evaluate('async () => await NoteUI.refresh(true)')
-        for checkbox in page.locator('#cut-rerun-evidence input').all():checkbox.check()
-        with page.expect_response(lambda r:'/reprocess-preview' in r.url) as response:page.locator('#cut-rerun-preview').click()
-        chosen=response.value.json()['evidence'][1]
-        page.locator('#cut-command-evidence').select_option('1');page.locator('#cut-command-add').click()
+        with page.expect_response(lambda r:'/reprocess-preview' in r.url) as response:page.evaluate('async () => await NoteUI.refresh(true)')
+        preview_json=response.value.json()
+        expect(page.locator('#cut-rerun-evidence-summary')).to_have_text('Included cut reviews (3 of 3)')
+        # All 3 active reviews draft checked rules: override_clip_bounds_ms [5,16], exclude_intervals_ms [5,15], and keep_intervals_ms [0,4].
+        expect(page.locator('#cut-rerun-commands [data-command]')).to_have_count(3)
+        assert {s.input_value() for s in page.locator('#cut-rerun-commands [data-command] select').all()} == {'override_clip_bounds_ms', 'exclude_intervals_ms', 'keep_intervals_ms'}
+        page.locator('#cut-rerun-submit').click()
+        expect(page.locator('#cut-rerun-status')).to_contain_text('Keep and exclude commands overlap')
+        for cmd_row in page.locator('#cut-rerun-commands [data-command]').all():
+            if cmd_row.locator('select').input_value() == 'override_clip_bounds_ms':
+                cmd_row.locator('input[type=checkbox]').uncheck()
+        gap_idx=next(i for i,e in enumerate(preview_json['evidence']) if e['target']['scope']=='interval')
+        chosen=preview_json['evidence'][gap_idx]
+        page.locator('#cut-command-evidence').select_option(str(gap_idx));page.locator('#cut-command-add').click()
         row=page.locator('#cut-rerun-commands [data-command]').last
         expect(row.locator('[data-start]')).to_have_value(str(int(chosen['target']['start_seconds'])))
         expect(row.locator('[data-end]')).to_have_value(str(int(chosen['target']['end_seconds'])))
-        row.locator('input[type=checkbox]').check();page.locator('#cut-rerun-submit').click()
+        expect(row.locator('input[type=checkbox]')).to_be_checked()
+        row.locator('input[type=checkbox]').uncheck()
+        page.locator('#cut-rerun-submit').click()
         expect(page.locator('#cut-rerun-status')).to_contain_text('Candidate task created')
-        assert server_api.calls[-2][1]['confirmed_commands']['keep_intervals_ms'][0]['source_annotation_id']==chosen['annotation_id']
-        assert not page.evaluate('document.documentElement.scrollWidth>innerWidth')
+        cmds=server_api.calls[-2][1]['confirmed_commands']
+        assert len(cmds['exclude_intervals_ms'])==1
+        assert cmds['keep_intervals_ms'][0]['source_annotation_id']==chosen['annotation_id']
+        for check_w in (320, 390, 1280):
+            page.set_viewport_size({'width': check_w, 'height': 844})
+            assert not page.evaluate('document.documentElement.scrollWidth>innerWidth'), f'Overflow at {check_w}px'
         page.close()
     finally:server.shutdown();thread.join()
 

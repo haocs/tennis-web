@@ -933,7 +933,7 @@ const NoteUI=(()=>{
     </form>
    </section>
   </div>
-  <details class="notes-panel" id="cut-rerun-panel"></details>
+  <section class="notes-panel cut-rerun-panel" id="cut-rerun-panel" aria-label="Reprocess with cut feedback"></section>
   <details class="notes-panel" id="cut-hints-panel"><summary>Detector hints</summary><div id="cut-hints" role="status"></div></details>
   <section class="notes-panel" id="cut-reviews-panel">
    <div class="cut-reviews-header"><h2>Cut reviews</h2><div class="notes-toolbar"><label class="check-label"><input id="notes-archived" type="checkbox">Show archived</label><label class="check-label"><input id="cut-all-versions" type="checkbox">All versions</label></div></div>

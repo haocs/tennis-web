@@ -2,7 +2,19 @@ const test=require('node:test'),assert=require('node:assert/strict'),C=require('
 const manifest={source:{duration_seconds:30},clips:[{id:'one',original_start_seconds:5,original_end_seconds:10}]};
 const review=(body,target={scope:'clip',clip_id:'one'})=>({id:'r',version:2,kind:'cut_feedback',status:'active',body,target});
 test('judgments and direction-only evidence do not create cut commands',()=>{
- for(const body of [{verdict:'good_cut'},{reasons:['wrong_player']},{reasons:['too_short']},{reasons:['start_early']}])assert.equal(C.draft([review(body)],manifest).rows.length,0);
+ for(const body of [{verdict:'good_cut'},{verdict:'needs_adjustment',reasons:['no_play']},{reasons:['wrong_player']},{reasons:['too_short']},{reasons:['start_early']}])assert.equal(C.draft([review(body)],manifest).rows.length,0);
+});
+test('poor_cut or non-play clip feedback drafts exclude_intervals_ms without suggested bounds',()=>{
+ for(const body of [{verdict:'poor_cut'},{reasons:['no_play']},{reasons:['downtime']}]){
+  const d=C.draft([review(body)],manifest);
+  assert.equal(d.rows.length,1);
+  assert.equal(d.rows[0].type,'exclude_intervals_ms');
+  assert.equal(d.rows[0].confirmed,false);
+  assert.equal(d.rows[0].start_ms,5000);
+  assert.equal(d.rows[0].end_ms,10000);
+  d.rows[0].confirmed=true;
+  assert.equal(C.commands(d.rows).exclude_intervals_ms.length,1);
+ }
 });
 test('exact bounds create unconfirmed preview rows; only confirmation yields commands',()=>{
  const d=C.draft([review({suggested_end_ms:12000})],manifest);assert.equal(d.rows[0].original_start_ms,5000);assert.equal(C.commands(d.rows).override_clip_bounds_ms.length,0);d.rows[0].confirmed=true;assert.equal(C.commands(d.rows).override_clip_bounds_ms[0].source_revision,2);

@@ -2,6 +2,12 @@
 /* Pure preview helpers. Review evidence never becomes an executable command implicitly. */
 const CutConstraints=(()=>{
  const overlap=(a,b)=>Math.max(a.start_ms,b.start_ms)<Math.min(a.end_ms,b.end_ms);
+ function shouldExcludeClip(body){
+  const verdict=body.verdict??null,reasons=Array.isArray(body.reasons)?body.reasons:[];
+  if(verdict==='poor_cut')return true;
+  if(verdict==='good_cut'||verdict==='needs_adjustment')return false;
+  return reasons.includes('no_play')||reasons.includes('downtime');
+ }
  function draft(reviews,manifest){
   const clips=new Map(manifest.clips.map(c=>[c.id,c])),rows=[],advisory=[];
   for(const r of reviews){
@@ -11,6 +17,7 @@ const CutConstraints=(()=>{
    else{
     const c=clips.get(r.target.clip_id),b=r.body||{};
     if(c&&(Number.isInteger(b.suggested_start_ms)||Number.isInteger(b.suggested_end_ms)))rows.push({type:'override_clip_bounds_ms',confirmed:false,clip_id:c.id,original_start_ms:b.suggested_start_ms??Math.round(c.original_start_seconds*1000),original_end_ms:b.suggested_end_ms??Math.round(c.original_end_seconds*1000),...evidence});
+    else if(c&&shouldExcludeClip(b))rows.push({type:'exclude_intervals_ms',confirmed:false,start_ms:Math.round(c.original_start_seconds*1000),end_ms:Math.round(c.original_end_seconds*1000),...evidence});
     else advisory.push({annotation_id:r.id,version:r.version,text:b.text||'',reasons:b.reasons||[],verdict:b.verdict??null});
    }
   }
