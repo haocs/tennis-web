@@ -2466,10 +2466,13 @@ def test_cut_review_timeline_versions_gaps_and_portal_handoff(browser, tmp_path)
         errors = []
         page.on('pageerror', lambda err: errors.append(str(err)))
 
-        # 1. Local /processing route preserves status, shows external portal handoff, and launches Review cut
-        page.goto(base_url + '/processing')
+        # 1. Top nav Processing opens local /processing, shows Worker Portal handoff, and launches Review cut
+        page.goto(base_url + '/')
+        expect(page.locator('#nav-processing')).to_have_attribute('href', '/processing')
+        page.locator('#nav-processing').click()
         expect(page.get_by_role('heading', name='Processing Room', exact=True)).to_be_visible()
         expect(page.locator('#processing-portal-link')).to_have_attribute('href', 'http://processor.example:8089/')
+        expect(page.locator('#processing-portal-link')).to_have_text('Open Worker Portal ↗')
         expect(page.locator('#processing-cut-reviews')).to_be_visible()
         page.locator('#processing-cut-reviews').get_by_role('link', name='Review cut', exact=True).click()
 
@@ -2479,6 +2482,7 @@ def test_cut_review_timeline_versions_gaps_and_portal_handoff(browser, tmp_path)
         expect(page.locator('#cut-timeline-bar [data-seg-kind="kept_clip"]')).to_have_count(2)
         expect(page.locator('#cut-timeline-bar [data-seg-kind="removed_gap"]')).to_have_count(3)
         expect(page.locator('#cut-portal-handoff')).to_have_attribute('href', 'http://processor.example:8089/')
+        expect(page.locator('#cut-portal-handoff')).to_have_text('Worker Portal ↗')
 
         # 3. Step playhead, capture suggested start from playhead, nudge end, and save clip cut review
         page.wait_for_function("() => document.querySelector('#cut-video')?.readyState >= 1")

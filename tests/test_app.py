@@ -389,7 +389,9 @@ def test_processing_room_route_and_configured_portal_link(setup):
     assert b'data-processing-url="/processing"' in client.get('/').data
     configured=create_app({'LIBRARY_ROOT':str(root),'DATA_ROOT':app.config['DATA_ROOT'],
                            'PROCESSING_ROOM_URL':'http://processor.example:8089/'})
-    assert b'data-processing-url="http://processor.example:8089/"' in configured.test_client().get('/').data
+    home_html=configured.test_client().get('/').data
+    assert b'href="/processing" id="nav-processing"' in home_html
+    assert b'data-processing-url="http://processor.example:8089/"' in home_html
 
 
 @pytest.mark.parametrize('url',['javascript:alert(1)','//example.invalid','http://user:password@example.invalid','',None])

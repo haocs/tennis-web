@@ -884,7 +884,7 @@ const NoteUI=(()=>{
    if(matchedGap){cutState.mode='gap';cutState.gapId=matchedGap.id;}
   }
   const portalUrl=$('#main')?.dataset.processingUrl||'/processing';
-  const portalLink=portalUrl!=='/processing'?`<span>·</span><a href="${esc(portalUrl)}" id="cut-portal-handoff">Processing Server Portal ↗</a>`:'';
+  const portalLink=portalUrl!=='/processing'?`<span>·</span><a href="${esc(portalUrl)}" id="cut-portal-handoff">Worker Portal ↗</a>`:'';
   const recOptions=(model.sessions.length?model.sessions:[s]).map(r=>`<option value="${esc(r.id)}"${r.id===s.id?' selected':''}>${esc(r.title)}</option>`).join('');
   $('#main').innerHTML=`<div class="review-breadcrumb"><a href="/review/${s.id}" id="cut-back-review">Back to review</a><span>/</span><a href="/processing">Processing Room</a>${portalLink}<span>/</span><span>Review cut</span><a class="button small" href="/review/${s.id}/compare">Compare versions</a></div>
   <header class="cut-header"><div><h1>Review cut</h1></div><div class="cut-context-selectors"><label>Recording<select id="cut-recording" aria-label="Recording">${recOptions}</select></label><label>Reviewed version<select id="cut-version" aria-label="Reviewed version"></select></label></div></header>

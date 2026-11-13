@@ -16,6 +16,25 @@ from worker.tennis_coach.annotations import RENDER_SHARE_CAPABILITY
 
 MAX_AUTO_REVIEWS_PER_CLIP = 2
 
+_DIAGNOSTIC_PATH_RE = re.compile(r'(?:/|[A-Za-z]:\\)(?:Users|volume\d*|private|var|tmp|home|etc)[/\\][^\s,;\)\'\"]+')
+_DIAGNOSTIC_TOKEN_RE = re.compile(r'(?i)(?:bearer\s+\S+|sk-[A-Za-z0-9_-]{8,}|AIza[0-9A-Za-z_-]{10,})')
+
+
+def redact_diagnostic(text):
+    """Strip local/NAS paths, tokens, and excess whitespace from worker errors."""
+    if text is None:
+        return ''
+    cleaned = _DIAGNOSTIC_TOKEN_RE.sub('[redacted]', str(text))
+    cleaned = _DIAGNOSTIC_PATH_RE.sub('[path]', cleaned)
+    return ' '.join(cleaned.split())
+
+
+def _fmt_mmss(sec):
+    if isinstance(sec, bool) or not isinstance(sec, (int, float)) or not math.isfinite(sec) or sec < 0:
+        return None
+    whole = int(sec)
+    return f'{whole // 60}:{whole % 60:02d}'
+
 VALID_PROVIDERS = ('codex', 'antigravity', 'gemini')
 PROVIDER_GROUPS = {
     'antigravity': 'Antigravity',
@@ -743,3 +762,159 @@ class Coaching(Annotations):
                     except ValueError:
                         pass
         return {'deleted': identity, 'deleted_export_id': deleted_export_id, 'deleted_annotations': ann_ids}
+
+    def portal_snapshot(self, session_lookup=None, deleted=None, limit=200):
+        """Return sanitized workers and tasks for mirroring into the Worker Portal."""
+        limit = max(1, min(int(limit), 250))
+        with self.db() as db:
+            now = self.clock()
+            ai_cfg = self.worker_ai_config(db)
+            worker_rows = db.execute('SELECT * FROM workers ORDER BY role, id').fetchall()
+            job_rows = db.execute(
+                'SELECT * FROM jobs ORDER BY COALESCE(updated, asked_at) DESC, id DESC LIMIT ?',
+                (limit + 1,),
+            ).fetchall()
+        complete = len(job_rows) <= limit
+        job_rows = job_rows[:limit]
+
+        workers = []
+        for r in worker_rows:
+            w = self._decode_worker(r, now, include_available_models=False)
+            meta = w.get('meta') or {}
+            role = w['role']
+            item = {
+                'id': w['id'],
+                'role': role,
+                'label': 'AI coach' if role == 'ai' else 'Media & clip export',
+                'last_seen': w['updated'] or now,
+                'online': bool(w['online']),
+                'ttl_seconds': 90.0,
+                'busy': w['status'] in ('leased', 'calling'),
+                'status_text': 'Working' if w['status'] in ('leased', 'calling') else ('Ready' if w['online'] else 'Offline'),
+            }
+            if role == 'ai':
+                item['provider'] = meta.get('active_selection') or ai_cfg.get('selection')
+                item['default_model'] = ai_cfg.get('selection')
+                if isinstance(meta.get('providers'), list) and all(isinstance(p, str) for p in meta['providers']):
+                    item['providers'] = meta['providers'][:20]
+            if isinstance(w.get('capabilities'), list) and all(isinstance(c, str) for c in w['capabilities']):
+                item['capabilities'] = w['capabilities'][:20]
+            workers.append({k: v for k, v in item.items() if v is not None})
+
+        status_map = {
+            'queued': 'queued',
+            'leased': 'running',
+            'calling': 'running',
+            'completed': 'succeeded',
+            'failed': 'failed',
+            'needs_review': 'failed',
+            'cancelled': 'cancelled',
+        }
+        session_cache = {}
+        tasks = []
+        for r in job_rows:
+            body = json.loads(r['body'])
+            result = json.loads(r['result']) if r['result'] else None
+            role = r['role']
+            state = r['state']
+            if role == 'ai' and body.get('purpose') == 'learning_plan':
+                kind = 'learning_plan'
+            elif role == 'ai':
+                kind = 'ai_coach'
+            elif body.get('intent') == 'share':
+                kind = 'clip_interval_export'
+            else:
+                kind = 'coaching_excerpt_render'
+
+            s_start = _fmt_mmss(body.get('original_start'))
+            s_end = _fmt_mmss(body.get('original_end'))
+            span = f'{s_start}–{s_end}' if s_start and s_end else None
+
+            if kind == 'learning_plan':
+                title = 'Learning plan'
+            elif kind == 'ai_coach':
+                base = 'AI coach · Auto' if body.get('auto_detect') else ('AI coach · Follow-up' if body.get('follow_up_of') else 'AI coach')
+                title = f'{base} · {span}' if span else base
+            elif kind == 'clip_interval_export':
+                title = f'Clip interval · {span}' if span else 'Clip interval export'
+            else:
+                title = f'Coaching render · {span}' if span else 'Coaching render'
+
+            session_id = body.get('source_id') if isinstance(body.get('source_id'), str) else None
+            if session_id and callable(session_lookup):
+                if session_id not in session_cache:
+                    try:
+                        session_cache[session_id] = session_lookup(session_id)
+                    except Exception:
+                        session_cache[session_id] = None
+                session_name = session_cache[session_id]
+            else:
+                session_name = None
+
+            summary_parts = []
+            clip_id = body.get('clip_id')
+            if isinstance(clip_id, str) and clip_id:
+                summary_parts.append(f'Clip {clip_id}')
+            if result and kind in ('clip_interval_export', 'coaching_excerpt_render'):
+                out_sec = result.get('output_seconds')
+                if isinstance(out_sec, (int, float)) and math.isfinite(out_sec):
+                    summary_parts.append(f'{out_sec:.1f}s')
+                if kind == 'clip_interval_export' and body.get('hdr'):
+                    summary_parts.append('HDR')
+            elif result and kind in ('ai_coach', 'learning_plan'):
+                elapsed = result.get('elapsed_seconds')
+                if isinstance(elapsed, (int, float)) and math.isfinite(elapsed):
+                    summary_parts.append(f'Elapsed {elapsed:.1f}s')
+            elif kind == 'learning_plan' and not summary_parts:
+                summary_parts.append('Learning plan generation')
+
+            model = result.get('model') if (role == 'ai' and isinstance(result, dict) and isinstance(result.get('model'), str)) else None
+            provider = None
+            if role == 'ai':
+                if isinstance(result, dict) and isinstance(result.get('provider'), str):
+                    provider = result['provider']
+                elif state in ('queued', 'leased', 'calling'):
+                    provider = ai_cfg.get('provider')
+
+            stage = 'calling_provider' if state == 'calling' else ('leased' if state == 'leased' else None)
+            task = {
+                'identity': r['id'],
+                'kind': kind,
+                'status': status_map.get(state, 'failed'),
+                'raw_status': state,
+                'title': title,
+                'summary': ' · '.join(summary_parts) if summary_parts else None,
+                'worker_id': r['worker'],
+                'worker_role': role,
+                'session_id': session_id,
+                'session_name': session_name if isinstance(session_name, str) and session_name else None,
+                'provider': provider,
+                'model': model,
+                'stage': stage,
+                'created': r['asked_at'] if r['asked_at'] is not None else r['updated'],
+                'updated': r['updated'],
+            }
+            if state == 'failed':
+                err = redact_diagnostic((result or {}).get('error') or 'Worker failed')[:500]
+                task['error'] = err or 'Worker failed'
+                if isinstance(result, dict):
+                    ec = result.get('error_code')
+                    if isinstance(ec, str) and ec:
+                        task['error_code'] = ec[:80]
+                    ed = result.get('error_detail')
+                    if isinstance(ed, str) and ed:
+                        task['error_detail'] = redact_diagnostic(ed)[:800]
+            elif state == 'needs_review':
+                err = redact_diagnostic((result or {}).get('error') or 'Provider call lease expired before completion; review before retrying')[:500]
+                task['error'] = err
+                task['error_code'] = 'needs_review'
+            tasks.append({k: v for k, v in task.items() if v is not None})
+
+        return {
+            'domain': 'coaching',
+            'snapshot': True,
+            'complete': complete,
+            'workers': workers,
+            'tasks': tasks,
+            'deleted': list(deleted or []),
+        }

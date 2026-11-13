@@ -40,7 +40,7 @@ function workerStatusHTML(){
  const s=model.status, info=processingStatusInfo(s), warning=info.color!=='green';
  const title=!s?'Checking worker status…':info.color==='red'?'Worker attention needed':warning?(s.stale&&s.available?'Worker status is stale':'Worker status unavailable'):s.service==='Stopped'?'Worker paused':s.stage==='Idle'?'Worker ready':s.stage||'Worker online';
  const detail=s?.current_video||(!warning&&s?.progress?.total?`${s.progress.current} / ${s.progress.total} ${s.progress.unit||''}`:'');
- return `<a class="worker-status${warning?' warning':''}" href="${esc($('#main').dataset.processingUrl)}" aria-label="${esc(title)} — Open Processing Room"><span class="status-orb status-${info.color}${warning?' warning':''}${info.color==='red'?' danger':''}" aria-hidden="true"><span class="dot"></span></span><span class="worker-status-copy"><strong>${esc(title)}</strong>${detail?`<span>${esc(detail)}</span>`:''}</span><span class="worker-status-link">Processing Room ↗</span></a>`;
+ return `<a class="worker-status${warning?' warning':''}" href="/processing" aria-label="${esc(title)} — Open Processing Room"><span class="status-orb status-${info.color}${warning?' warning':''}${info.color==='red'?' danger':''}" aria-hidden="true"><span class="dot"></span></span><span class="worker-status-copy"><strong>${esc(title)}</strong>${detail?`<span>${esc(detail)}</span>`:''}</span><span class="worker-status-link">Processing Room ↗</span></a>`;
 }
 function providerDisplayName(p){ return ({antigravity:'Antigravity',codex:'ChatGPT',gemini:'Gemini'})[p]||p; }
 function workerClock(epoch){ return epoch?new Date(epoch*1000).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}):'Unavailable'; }
@@ -73,8 +73,8 @@ function aiWorkerCardHTML(){
  const color=q.needs_review>0||(online.length&&online.every(w=>w.status==='failed'))?'red':online.length?'green':'yellow';
  const warning=color!=='green';
  const working=online.some(w=>w.status==='leased'||w.status==='calling')||q.active>0;
- const badge=!cw?'CHECKING':cw.error?'STATUS UNAVAILABLE':!cw.enabled?'NOT CONFIGURED':working?'WORKING':online.length?'ONLINE':latest?'OFFLINE':'WAITING FOR WORKER';
- const title=q.needs_review>0?'Needs review':working?'Working':online.length?'Ready':!cw?'Checking…':cw.error?'Unavailable':!cw.enabled?'Not configured':latest?'Offline':'Waiting for worker';
+ const badge=!cw?'CHECKING':cw.error?'STATUS UNAVAILABLE':!cw.enabled?'NOT ENABLED':working?'WORKING':online.length?'ONLINE':latest?'OFFLINE':'STANDING BY';
+ const title=q.needs_review>0?'Needs review':working?'Working':online.length?'Ready':!cw?'Checking…':cw.error?'Unavailable':!cw.enabled?'Not enabled':latest?'Offline':'Standing by';
  const subParts=[];
  if(workers.length>1)subParts.push(`${online.length}/${workers.length} online`);
  if(q.needs_review>0)subParts.push(`${q.needs_review} request${q.needs_review===1?'':'s'} need review`);
@@ -83,9 +83,9 @@ function aiWorkerCardHTML(){
   if(q.active)bits.push(`${q.active} active`);
   if(q.queued)bits.push(`${q.queued} queued`);
   subParts.push(bits.join(' · '));
- }else if(!cw?.enabled&&cw&&!cw.error)subParts.push('Set COACH_WORKER_TOKEN');
- else if(!online.length&&latest)subParts.push('Check the AI coaching worker.');
- else if(!online.length&&cw&&!cw.error)subParts.push('No AI worker connected yet.');
+ }else if(!cw?.enabled&&cw&&!cw.error)subParts.push('Coaching service is not enabled on this server.');
+ else if(!online.length&&latest)subParts.push('Check your coaching assistant connection.');
+ else if(!online.length&&cw&&!cw.error)subParts.push('Waiting for the coaching assistant to connect.');
  const primary=online[0]||latest;
  const providers=Array.isArray(primary?.meta?.providers)?primary.meta.providers:[];
  if(providers.length)subParts.push(providers.map(providerDisplayName).join(' → '));
@@ -104,8 +104,8 @@ function renderWorkerCardHTML(){
  const color=online.length&&online.every(w=>w.status==='failed')?'red':online.length?'green':'yellow';
  const warning=color!=='green';
  const working=online.some(w=>w.status==='leased')||q.active>0;
- const badge=!cw?'CHECKING':cw.error?'STATUS UNAVAILABLE':!cw.enabled?'NOT CONFIGURED':working?'WORKING':online.length?'ONLINE':latest?'OFFLINE':'WAITING FOR WORKER';
- const title=working?'Working':online.length?'Ready':!cw?'Checking…':cw.error?'Unavailable':!cw.enabled?'Not configured':latest?'Offline':'Waiting for worker';
+ const badge=!cw?'CHECKING':cw.error?'STATUS UNAVAILABLE':!cw.enabled?'NOT ENABLED':working?'WORKING':online.length?'ONLINE':latest?'OFFLINE':'STANDING BY';
+ const title=working?'Working':online.length?'Ready':!cw?'Checking…':cw.error?'Unavailable':!cw.enabled?'Not enabled':latest?'Offline':'Standing by';
  const subParts=[];
  if(workers.length>1)subParts.push(`${online.length}/${workers.length} online`);
  if(q.active||q.queued){
@@ -113,9 +113,9 @@ function renderWorkerCardHTML(){
   if(q.active)bits.push(`${q.active} active`);
   if(q.queued)bits.push(`${q.queued} queued`);
   subParts.push(bits.join(' · '));
- }else if(!cw?.enabled&&cw&&!cw.error)subParts.push('Set COACH_WORKER_TOKEN');
- else if(!online.length&&latest)subParts.push('Check the media export worker.');
- else if(!online.length&&cw&&!cw.error)subParts.push('No media export worker connected yet.');
+ }else if(!cw?.enabled&&cw&&!cw.error)subParts.push('Media export service is not enabled on this server.');
+ else if(!online.length&&latest)subParts.push('Check your media exporter connection.');
+ else if(!online.length&&cw&&!cw.error)subParts.push('Waiting for the media exporter to connect.');
  const hasShareV2=workers.some(w=>Array.isArray(w.capabilities)&&w.capabilities.includes('share-export-v2'));
  if(workers.length)subParts.push(hasShareV2?'Coaching frames · HDR interval download':'Clip study exports · coaching frames');
  const heartbeat=latest?.updated?`Heartbeat ${esc(workerClock(latest.updated))}`:'No heartbeat';
@@ -127,7 +127,7 @@ function processingShelvesHTML(){
 function processingRoom(){
  model.session=null;nav();document.title='Processing Room — Courtside';
  const portalUrl=$('#main')?.dataset.processingUrl||'/processing';
- const externalHandoff=portalUrl!=='/processing'?`<div class="processing-portal-handoff"><a class="button small" id="processing-portal-link" href="${esc(portalUrl)}">Open Processing Server Portal ↗</a></div>`:'';
+ const externalHandoff=portalUrl!=='/processing'?`<div class="processing-portal-handoff"><a class="button small" id="processing-portal-link" href="${esc(portalUrl)}">Open Worker Portal ↗</a></div>`:'';
  const recordingsHTML=model.sessions.length?`<div class="processing-cut-list">${model.sessions.map(s=>`<article class="processing-cut-item" data-session-id="${esc(s.id)}"><div><strong><a href="/review/${s.id}">${esc(s.title)}</a></strong><span class="processing-cut-meta">${esc(dateText(s))} · ${s.clips.length} ${s.clips.length===1?'clip':'clips'} · ${time(s.video.duration_seconds)} kept · ${time(s.removed_seconds)} removed</span></div><a class="button small" href="/review/${s.id}/cuts">Review cut</a></article>`).join('')}</div>`:'<p class="note-empty">No processed recordings yet.</p>';
  $('#main').innerHTML=`<div class="review-breadcrumb"><a href="/">Library</a><span>/</span>Processing Room</div><div class="processing-room-header"><h1>Processing Room</h1>${externalHandoff}</div><section id="processing-status" aria-label="Worker status">${processingShelvesHTML()}</section><section id="processing-cut-reviews" class="notes-panel" aria-label="Review cut"><h2>Review cut</h2>${recordingsHTML}</section>`;applyBars();
 }

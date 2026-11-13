@@ -352,6 +352,8 @@ def register_annotations(app, library, session):
         player_profile=require_learning_player(b.get('player_id',''))
         try:
             job=queue.queue_learning_plan(player_profile['id'],player_profile,b,learning_source_loader)
+            from portal_mirror import notify_portal_mirror
+            notify_portal_mirror(app)
             return jsonify(job),201
         except ValueError as error:
             from coaching import QueueConflict

@@ -5,7 +5,8 @@ import json
 from pathlib import Path
 import re
 from flask import Blueprint, abort, jsonify, request, send_file
-from coaching import Coaching, QueueConflict, recipe
+from coaching import Coaching, QueueConflict, recipe, redact_diagnostic
+from portal_mirror import notify_portal_mirror
 from storage import inside
 from players import coaching_player, resolve_coaching_subject
 from worker.tennis_coach.annotations import CAPABILITY, PROMPT_VERSION, expected_frames, evidence_manifest, coaching_prompt, response_schema
@@ -32,6 +33,7 @@ def register_coaching(app,library,session):
 
     @routes.get('/api/coaching/workers')
     def list_workers():
+        notify_portal_mirror(app, stale_only=True)
         return jsonify(queue.worker_overview(enabled=bool(app.config['COACH_WORKER_TOKEN'])))
 
     @routes.get('/api/coaching/config')
@@ -43,7 +45,10 @@ def register_coaching(app,library,session):
         b=request.get_json()
         if not isinstance(b,dict) or not set(b)<= {'selection','version'}:
             abort(400,'Expected a selection and version')
-        try:return jsonify(queue.update_ai_config(b.get('selection'),b.get('version')))
+        try:
+            updated=queue.update_ai_config(b.get('selection'),b.get('version'))
+            notify_portal_mirror(app)
+            return jsonify(updated)
         except QueueConflict as e:return jsonify(error=str(e),current=queue.ai_config()),409
         except ValueError as e:abort(400,str(e))
 
@@ -73,7 +78,9 @@ def register_coaching(app,library,session):
                         spec['subject_mode']=subject_mode
                     if subject_hint:
                         spec['subject_hint']=subject_hint
-            return jsonify(queue.create('render',spec,b.get('request_id'))),201
+            created=queue.create('render',spec,b.get('request_id'))
+            notify_portal_mirror(app)
+            return jsonify(created),201
         except QueueConflict:raise
         except (ValueError,TypeError,KeyError,StopIteration) as e:abort(400,str(e) or 'Invalid selection')
 
@@ -140,7 +147,9 @@ def register_coaching(app,library,session):
                 body.update(follow_up_of=parent_id,previous_question=parent['body']['prompt'],previous_answer=answer[:12000],previous_answer_truncated=len(answer)>12000)
             body.update(evidence_frames=expected_frames(render),required_capability=CAPABILITY,prompt_version=PROMPT_VERSION,source_sha256=data.get('source',{}).get('sha256',data['id']),processing=data.get('processing'))
             body.update(submitted_prompt=coaching_prompt(body,{'frames':body['evidence_frames']}),response_contract=response_schema())
-            return jsonify(queue.create('ai',body,b.get('request_id'))),201
+            created=queue.create('ai',body,b.get('request_id'))
+            notify_portal_mirror(app)
+            return jsonify(created),201
         except QueueConflict:raise
         except ValueError as e:abort(400,str(e))
 
@@ -151,7 +160,10 @@ def register_coaching(app,library,session):
     def edit_job(identity):
         b=request.get_json()
         if not isinstance(b,dict):abort(400,'Expected an object')
-        try:return jsonify(queue.edit(identity,b.get('version'),b.get('action'),b.get('cue')))
+        try:
+            edited=queue.edit(identity,b.get('version'),b.get('action'),b.get('cue'))
+            notify_portal_mirror(app)
+            return jsonify(edited)
         except KeyError:abort(404,'Coaching request not found')
         except QueueConflict:raise
         except ValueError as e:abort(400,str(e))
@@ -159,7 +171,12 @@ def register_coaching(app,library,session):
     @routes.delete('/api/coaching/jobs/<identity>')
     def delete_job(identity):
         try:
-            return jsonify(queue.delete_job(identity, media_root=root))
+            deleted=queue.delete_job(identity, media_root=root)
+            removed=[deleted['deleted']]
+            if deleted.get('deleted_export_id'):
+                removed.append(deleted['deleted_export_id'])
+            notify_portal_mirror(app, deleted_ids=removed)
+            return jsonify(deleted)
         except KeyError:
             abort(404, 'Coaching request not found')
         except QueueConflict:
@@ -193,6 +210,7 @@ def register_coaching(app,library,session):
             if b.get('worker_id') and b.get('role'):
                 try:
                     queue.touch_worker_meta(b.get('role'), b.get('worker_id'), b.get('meta'))
+                    notify_portal_mirror(app)
                 except ValueError as e:
                     abort(400, str(e))
         return jsonify(ai_config=queue.worker_ai_config())
@@ -203,6 +221,7 @@ def register_coaching(app,library,session):
         if not isinstance(b,dict):abort(400,'Expected an object')
         try:
             claimed = queue.claim(role,b.get('worker_id'),b.get('capabilities'),b.get('meta'))
+            notify_portal_mirror(app, stale_only=(claimed is None))
             return jsonify(job=claimed, config_version=queue.worker_ai_config()['version'])
         except QueueConflict:raise
         except ValueError as e:abort(400,str(e))
@@ -262,9 +281,18 @@ def register_coaching(app,library,session):
                 # Explicitly whitelist public result fields; no paths/tokens/provider logs.
                 result={k:result[k] for k in ('answer','analysis_mode','model','elapsed_seconds','usage') if k in result}
         elif action=='fail':
-            result={'error':str((result or {}).get('error','Worker failed'))[:500]}
+            raw_res=result if isinstance(result,dict) else {}
+            fail_payload={'error':redact_diagnostic(raw_res.get('error') or 'Worker failed')[:500] or 'Worker failed'}
+            ec=raw_res.get('error_code')
+            if isinstance(ec,str) and re.fullmatch(r'[A-Za-z0-9_.:-]{1,80}',ec):
+                fail_payload['error_code']=ec
+            ed=raw_res.get('error_detail')
+            if isinstance(ed,str) and ed.strip():
+                fail_payload['error_detail']=redact_diagnostic(ed)[:800]
+            result=fail_payload
         try:
             updated = queue.worker_update(identity,b.get('token'),action,result,b.get('meta'))
+            notify_portal_mirror(app, stale_only=(action=='heartbeat'))
             return jsonify(**updated, config_version=queue.worker_ai_config()['version'])
         except QueueConflict:raise
         except ValueError as e:abort(400,str(e))

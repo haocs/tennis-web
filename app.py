@@ -86,6 +86,8 @@ def create_app(config=None):
     register_reprocess(app, session)
     from cut_comparisons import register as register_comparisons
     register_comparisons(app, session)
+    from portal_mirror import register as register_portal_mirror
+    register_portal_mirror(app, library, state)
 
     def require_publication(data, parameter):
         expected = request.args.get(parameter)
