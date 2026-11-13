@@ -54,3 +54,64 @@ test('interval bounds clamp start and end pins and enforce strict interval playb
   assert.deepEqual(C.resolveIntervalPlayback(1.2,0.4,1.2,false),{action:'pause',time:1.2});
   assert.deepEqual(C.resolveIntervalPlayback(1.2,0.4,1.2,true),{action:'loop',time:0.4});
 });
+
+test('coaching subject options order main player, recording players, saved players, and no-profile cleanly',()=>{
+  const alex={id:'a'.repeat(32),name:'Alex',version:1,height_cm:172,level:'beginner'};
+  const blair={id:'b'.repeat(32),name:'Blair',version:1,height_cm:180,level:'experienced'};
+  const casey={id:'c'.repeat(32),name:'Casey',version:2,height_cm:168,level:'intermediate'};
+  const alexFresh={...alex,version:3,level:'intermediate'};
+  const assignedClip={...clip,main_player:alex};
+  const session={recording_players:[alex,blair],players:[alex,blair]};
+
+  const cat=C.coachingSubjectOptions({clip:assignedClip,session,players:[casey,alexFresh,blair]});
+  assert.equal(cat.defaultValue,alex.id);
+  assert.deepEqual(cat.options.map(o=>[o.value,o.label,o.role]),[
+    [alex.id,'Alex (clip main player)','main_player'],
+    [blair.id,'Blair (in recording)','recording_player'],
+    [casey.id,'Casey','saved_player'],
+    ['','No player profile','none'],
+  ]);
+  assert.equal(cat.byId[alex.id].version,3,'Higher profile version from refreshed players list supersedes stale clip snapshot');
+
+  // Authoritative list omits soft-deleted profiles.
+  const catRemoved=C.coachingSubjectOptions({clip:assignedClip,session,players:[alexFresh],authoritativePlayers:true});
+  assert.deepEqual(catRemoved.options.map(o=>o.value),[alex.id,'']);
+
+  // Unassigned clip defaults to empty no-profile option.
+  const unassignedCat=C.coachingSubjectOptions({clip:{...clip,main_player:null},session:{recording_players:[blair],players:[blair]},players:[blair,casey]});
+  assert.equal(unassignedCat.defaultValue,'');
+  assert.equal(unassignedCat.options.at(-1).label,'No player profile (unassigned)');
+});
+
+test('resolveCoachingSubject, normalizeSubjectHint, and describeCoachingSubject enforce request-local semantics',()=>{
+  const alex={id:'a'.repeat(32),name:'Alex',version:2,height_cm:172,level:'beginner'};
+  const blair={id:'b'.repeat(32),name:'Blair',version:4,height_cm:180,level:'experienced'};
+  const assignedClip={...clip,main_player:alex};
+  const players=[alex,blair];
+
+  assert.equal(C.normalizeSubjectHint('  far court\n\tin   blue  '),'far court in blue');
+  assert.equal(C.normalizeSubjectHint('x'.repeat(200)).length,160);
+  assert.equal(C.normalizeSubjectHint(null),'');
+
+  const mainRes=C.resolveCoachingSubject({selectedPlayerId:alex.id,clip:assignedClip,players,subjectHint:'   '});
+  assert.equal(mainRes.subjectMode,'main_player');
+  assert.equal(mainRes.playerId,alex.id);
+  assert.equal(mainRes.playerProfileVersion,2);
+  assert.equal(mainRes.subjectHint,null);
+  assert.match(C.describeCoachingSubject({selectedPlayerId:alex.id,clip:assignedClip,players}),/For Alex \(clip main player\)/);
+
+  const otherRes=C.resolveCoachingSubject({selectedPlayerId:blair.id,clip:assignedClip,players,subjectHint:'far court dark shirt'});
+  assert.equal(otherRes.subjectMode,'selected_player');
+  assert.equal(otherRes.playerId,blair.id);
+  assert.equal(otherRes.playerProfileVersion,4);
+  assert.equal(otherRes.subjectHint,'far court dark shirt');
+  const otherDesc=C.describeCoachingSubject({selectedPlayerId:blair.id,clip:assignedClip,players});
+  assert.match(otherDesc,/For Blair \(this request only; clip player unchanged\)/);
+  assert.match(otherDesc,/Auto detect scans foreground motion, not player identity/);
+
+  const noneRes=C.resolveCoachingSubject({selectedPlayerId:'',clip:assignedClip,players});
+  assert.deepEqual(noneRes,{subjectMode:'none',playerId:null,playerProfileVersion:null,player:null,subjectHint:null});
+  assert.match(C.describeCoachingSubject({selectedPlayerId:'',clip:assignedClip,players}),/clip player stays Alex/);
+
+  assert.throws(()=>C.resolveCoachingSubject({selectedPlayerId:'f'.repeat(32),clip:assignedClip,players}),/Choose a saved player/);
+});

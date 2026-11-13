@@ -10,6 +10,7 @@ from state import Conflict
 
 PLAYER_ID = re.compile(r'[a-f0-9]{32}')
 LEVELS = {'kids', 'beginner', 'intermediate', 'experienced', 'pro'}
+SUBJECT_MODES = {'main_player', 'selected_player', 'none'}
 EMPTY = {'value': None, 'version': 0}
 
 
@@ -86,6 +87,59 @@ def coaching_player(data, clip_id, shared):
     return dict(player_id=player['id'], profile_version=player['version'], height_cm=player['height_cm'],
                 level=player['level'], original_start=clip['original_start_seconds'],
                 original_end=clip['original_end_seconds'], assignment=clip['player_assignment'])
+
+
+def resolve_coaching_subject(body, data, clip_id, shared, conflict_cls=ValueError):
+    raw_mode = body.get('subject_mode')
+    if raw_mode is not None and (not isinstance(raw_mode, str) or raw_mode not in SUBJECT_MODES):
+        raise ValueError('Invalid coaching subject mode')
+    raw_hint = body.get('subject_hint')
+    if raw_hint is not None:
+        if not isinstance(raw_hint, str):
+            raise ValueError('Invalid visible target cue')
+        normalized_hint = re.sub(r'\s+', ' ', raw_hint).strip()
+        if len(normalized_hint) > 160:
+            raise ValueError('Visible target cue must be at most 160 characters')
+        subject_hint = normalized_hint or None
+    else:
+        subject_hint = None
+
+    if raw_mode in (None, 'main_player'):
+        context = coaching_player(data, clip_id, shared)
+        if ('player_id' in body and body['player_id'] != (context['player_id'] if context else None)
+                or 'player_profile_version' in body and body['player_profile_version'] != (context['profile_version'] if context else None)):
+            raise conflict_cls('Main player or profile changed. Refresh the review before asking.')
+        return raw_mode, context, subject_hint
+
+    if raw_mode == 'none':
+        if body.get('player_id') is not None or body.get('player_profile_version') is not None:
+            raise ValueError('No-profile coaching requests cannot specify a player ID')
+        return 'none', None, subject_hint
+
+    pid = body.get('player_id')
+    if not isinstance(pid, str) or not PLAYER_ID.fullmatch(pid) or 'player:' + pid not in shared:
+        raise ValueError('Choose a saved player')
+    rec = shared['player:' + pid]
+    if not rec.get('value'):
+        raise conflict_cls('Selected player was removed. Choose another player.')
+    ver = body.get('player_profile_version')
+    if type(ver) is not int or ver < 1:
+        raise ValueError('A current player profile version is required')
+    if ver != rec['version']:
+        raise conflict_cls('Selected player profile changed. Refresh the review before asking.')
+    clip = next((c for c in data['clips'] if c['id'] == clip_id), None)
+    if clip is None:
+        raise ValueError('Clip not found')
+    val = rec['value']
+    context = dict(
+        player_id=pid,
+        profile_version=rec['version'],
+        height_cm=val['height_cm'],
+        level=val['level'],
+        original_start=clip['original_start_seconds'],
+        original_end=clip['original_end_seconds'],
+    )
+    return 'selected_player', context, subject_hint
 
 
 def register_players(app, library, session, gap_minutes):

@@ -184,8 +184,13 @@ class Coaching(Annotations):
                         or ('artifact_directory' in body and render_result.get('artifact_directory')!=body.get('artifact_directory'))
                     ):
                         raise QueueConflict('Excerpt identity mismatch; prepare a fresh excerpt')
-                    if 'player_context' in render_body and render_body.get('player_context')!=body.get('player_context'):
-                        raise QueueConflict('Main player or profile changed. Refresh the review before asking.')
+                    if 'player_context' in render_body:
+                        if render_body.get('player_context')!=body.get('player_context'):
+                            raise QueueConflict('Selected player profile changed. Refresh the review before asking.' if (render_body.get('subject_mode') or body.get('subject_mode'))=='selected_player' else 'Main player or profile changed. Refresh the review before asking.')
+                        if 'subject_mode' in render_body and render_body.get('subject_mode')!=body.get('subject_mode'):
+                            raise QueueConflict('Coaching subject changed. Refresh the review before asking.')
+                        if body.get('follow_up_of') is None and render_body.get('subject_hint')!=body.get('subject_hint'):
+                            raise QueueConflict('Coaching subject changed. Refresh the review before asking.')
                     if render_body.get('auto_detect') and not body.get('auto_detect') and body.get('follow_up_of') is None:
                         raise ValueError('Automatic coaching exports must be submitted as automatic coaching requests')
             if role=='ai' and body.get('follow_up_of') is not None:
@@ -193,10 +198,13 @@ class Coaching(Annotations):
                 if not parent_row or parent_row['role']!='ai' or parent_row['state']!='completed':
                     raise QueueConflict('Follow-ups must refer to a completed response for this excerpt')
                 parent_body=json.loads(parent_row['body'])
+                parent_eff_mode=parent_body.get('subject_mode') or ('main_player' if parent_body.get('player_context') else 'none')
+                curr_eff_mode=body.get('subject_mode') or ('main_player' if body.get('player_context') else 'none')
                 if (
                     parent_body.get('export_id')!=export_id
                     or parent_body.get('publication')!=body.get('publication')
                     or parent_body.get('player_context')!=body.get('player_context')
+                    or parent_eff_mode!=curr_eff_mode
                 ):
                     raise QueueConflict('Follow-ups must refer to a completed response for this excerpt')
             if body.get('auto_detect'):

@@ -114,7 +114,7 @@ def register_annotations(app, library, session):
                 value=dict(id='coach-response:'+row['id'],schema_version=1,source_id=source,kind='coach',target=target,
                     body=dict(text=answer.get('answer','')[:12000],response=True,timing_verified=False,text_truncated=len(answer.get('answer',''))>12000),
                     context=dict(publication=body['publication']),origin=dict(type='ai',reference=row['id'],job_id=row['id'],asked_at=row['asked_at'],
-                    provenance={**{k:body.get(k) for k in ('clip_id','publication','export_id','player_context')},'asked_at':row['asked_at']}),
+                    provenance={**{k:body.get(k) for k in ('clip_id','publication','export_id','player_context','subject_mode','subject_hint')},'asked_at':row['asked_at']}),
                     player_id=(body.get('player_context') or {}).get('player_id'),status='active',version=row['version'],
                     asked_at=row['asked_at'],updated_at=row['updated'],read_only=True,edit_url='/api/coaching/jobs/'+row['id'])
                 value=project(value,data);value['playback_eligible']=False;result.append(value)
@@ -268,7 +268,7 @@ def register_annotations(app, library, session):
                 "WHERE role='ai' AND state='completed' "
                 "AND COALESCE(json_extract(body,'$.purpose'),'coaching_frames')='coaching_frames' "
                 "AND json_extract(body,'$.source_id') IS NOT NULL "
-                "AND id>? AND (json_extract(body,'$.player_context.player_id')=? OR json_extract(body,'$.player_context.player_id') IS NULL) "
+                "AND id>? AND (json_extract(body,'$.player_context.player_id')=? OR (json_extract(body,'$.player_context.player_id') IS NULL AND COALESCE(json_extract(body,'$.subject_mode'),'main_player')!='none')) "
                 "ORDER BY id LIMIT ?",
                 (after,pid,limit+1),
             ).fetchall()
@@ -290,9 +290,12 @@ def register_annotations(app, library, session):
         entries={};sources={}
         for row in rows[:limit]:
             body=json.loads(row['body']);result=json.loads(row['result']);sid=body['source_id']
+            subject_mode=body.get('subject_mode')
+            if subject_mode=='none':continue
             if sid not in sources:sources[sid]=learning_source_loader(sid)
             data=sources[sid]
             profile=body.get('player_context') or {};explicit=profile.get('player_id')==pid
+            is_selected_subject=explicit and subject_mode=='selected_player'
             start,end=body['original_start'],body['original_end']
             clips=[c for c in data['clips'] if max(start,c['original_start_seconds'])<min(end,c['original_end_seconds'])] if data else []
             # Never attribute an unlabelled legacy review from a recording roster:
@@ -303,7 +306,8 @@ def register_annotations(app, library, session):
                 cid=clip['id'] if clip else body.get('clip_id','unavailable')
                 key=sid+':'+cid
                 historical=data is None or body['publication']!=data['published_at']
-                mismatch=bool(clip and explicit and (clip.get('main_player') or {}).get('id')!=pid)
+                mismatch=bool(clip and explicit and not is_selected_subject and (clip.get('main_player') or {}).get('id')!=pid)
+                selected_override=bool(is_selected_subject and (not clip or (clip.get('main_player') or {}).get('id')!=pid))
                 entry=entries.setdefault(key,dict(id=key,source_id=sid,clip_id=cid,clip_index=clip['index'] if clip else None,
                     title=data['title'] if data else 'Recording unavailable',recorded_at=data.get('source',{}).get('recorded_at') if data else None,
                     original_start=clip['original_start_seconds'] if clip else start,original_end=clip['original_end_seconds'] if clip else end,
@@ -313,7 +317,10 @@ def register_annotations(app, library, session):
                     summary=(result.get('structured') or {}).get('summary','') or result.get('answer','')[:400],
                     answer=result.get('answer','')[:12000],answer_truncated=len(result.get('answer',''))>12000,
                     suggestions=annots_by_job.get(row['id'],[]),
-                    historical=historical,player_mismatch=mismatch,association='review' if explicit else 'current_clip',
+                    historical=historical,player_mismatch=mismatch,selected_override=selected_override,
+                    subject_mode=subject_mode or ('main_player' if explicit else 'current_clip'),
+                    subject_hint=body.get('subject_hint'),
+                    association='review' if explicit else 'current_clip',
                     response_url='/api/coaching/jobs/'+row['id']))
                 entry['reviews'].sort(key=lambda r: (-(r['asked_at'] if r.get('asked_at') is not None else (r.get('updated_at') or 0)), r['id']))
         ordered_entries=sorted(

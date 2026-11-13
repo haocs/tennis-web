@@ -818,3 +818,308 @@ def test_auto_coach_cancel_create_race_and_listing_retention_beyond_limit_100(se
     listed_ids = {j['id'] for j in listed['jobs']}
     assert old_auto_1['id'] in listed_ids, 'Completed unsubmitted auto_detect render must remain visible beyond LIMIT 100'
     assert old_auto_2['id'] in listed_ids, 'Queued unsubmitted auto_detect render must remain visible beyond LIMIT 100'
+
+
+def test_request_local_coaching_subject_validation_privacy_followup_and_auto_quota(setup):
+    import json as _json
+    from test_players import create as make_player, roster, focus, current as current_session
+    from test_coaching_annotations import claimed, pin, complete, suggestion, annotations, review as review_annot
+    from test_app import put
+
+    app, root, data = enabled(setup)
+    c = app.test_client()
+
+    alex = make_player(c, 'AlexPrivate', 172, 'beginner')
+    blair = make_player(c, 'BlairPrivate', 183, 'experienced')
+    casey = make_player(c, 'CaseyPrivate', 165, 'intermediate')
+
+    # Assign ONLY Alex to the recording roster and clip main_player; Blair & Casey stay unlisted on the recording/clip.
+    assert roster(c, [alex['id']]).status_code == 200
+    assert focus(c, data, alex['id']).status_code == 200
+    before_session = current_session(c)
+    assert before_session['clips'][0]['main_player']['id'] == alex['id']
+    assert [p['id'] for p in before_session['recording_players']] == [alex['id']]
+
+    # 1. Manual Ask coach for Blair (selected_player) with a visible target cue does NOT mutate clip/recording players
+    #    and keeps player names/IDs strictly out of submitted_prompt.
+    exp_manual = post(
+        c,
+        'exports',
+        dict(
+            selection(data),
+            subject_mode='selected_player',
+            player_id=blair['id'],
+            player_profile_version=blair['version'],
+            subject_hint='  far-court player\nin dark shirt  ',
+            request_id='subj-manual-exp-1',
+        ),
+    )
+    assert exp_manual.status_code == 201
+    exp_id = exp_manual.json['id']
+    assert 'player_context' not in exp_manual.json['body'], 'Manual render spec stays media-only so excerpts remain reusable'
+    _complete_render_job(app, c, exp_id)
+
+    req_blair = post(
+        c,
+        'requests',
+        dict(
+            export_id=exp_id,
+            prompt='Check my split-step timing.',
+            consent=True,
+            subject_mode='selected_player',
+            player_id=blair['id'],
+            player_profile_version=blair['version'],
+            subject_hint='  far-court player\nin dark shirt  ',
+            request_id='subj-ai-blair-1',
+        ),
+    )
+    assert req_blair.status_code == 201
+    ai_blair = req_blair.json
+    assert ai_blair['body']['subject_mode'] == 'selected_player'
+    assert ai_blair['body']['subject_hint'] == 'far-court player in dark shirt'
+    assert ai_blair['body']['player_context']['player_id'] == blair['id']
+    assert ai_blair['body']['player_context']['height_cm'] == 183
+    assert ai_blair['body']['player_context']['level'] == 'experienced'
+
+    prompt_blair = ai_blair['body']['submitted_prompt']
+    for secret in ('BlairPrivate', 'AlexPrivate', blair['id'], alex['id']):
+        assert secret not in prompt_blair
+    assert 'Selected-player profile' in prompt_blair
+    assert '183' in prompt_blair and 'experienced' in prompt_blair
+    assert 'Target player visual cue' in prompt_blair and 'far-court player in dark shirt' in prompt_blair
+
+    # Persistent clip and recording assignments are completely untouched.
+    after_session = current_session(c)
+    assert after_session['clips'][0]['main_player']['id'] == alex['id']
+    assert [p['id'] for p in after_session['recording_players']] == [alex['id']]
+
+    # Complete Blair's structured review and verify Use in playback works even though clip.main_player is Alex.
+    folder = Path(app.config['COACH_MEDIA_ROOT']) / exp_id / ai_blair['body']['artifact_directory']
+    job_claim = claimed(c)
+    assert job_claim['id'] == ai_blair['id']
+    manifest = pin(app, c, job_claim, folder)
+    complete(c, job_claim, _json.dumps(dict(schema_version=2, summary='Blair split step', suggestions=[suggestion(manifest)])))
+    blair_annot = annotations(c)[0]
+    assert blair_annot['provenance']['subject_mode'] == 'selected_player'
+    assert blair_annot['provenance']['subject_hint'] == 'far-court player in dark shirt'
+    assert blair_annot['player_matches_current'] is True
+    accepted = review_annot(c, blair_annot, data['published_at']).json
+    assert accepted['playback_eligible'] is True
+
+    # 2. Reusing the exact same completed manual export for Alex (main_player) and No player profile (none).
+    req_alex = post(
+        c,
+        'requests',
+        dict(
+            export_id=exp_id,
+            prompt='Check my unit turn.',
+            consent=True,
+            subject_mode='main_player',
+            player_id=alex['id'],
+            player_profile_version=alex['version'],
+            request_id='subj-ai-alex-1',
+        ),
+    )
+    assert req_alex.status_code == 201
+    assert req_alex.json['body']['subject_mode'] == 'main_player'
+    assert req_alex.json['body']['player_context']['player_id'] == alex['id']
+    assert 'Main-player profile' in req_alex.json['body']['submitted_prompt']
+
+    req_none = post(
+        c,
+        'requests',
+        dict(
+            export_id=exp_id,
+            prompt='General rally observation.',
+            consent=True,
+            subject_mode='none',
+            player_id=None,
+            player_profile_version=None,
+            request_id='subj-ai-none-1',
+        ),
+    )
+    assert req_none.status_code == 201
+    assert req_none.json['body']['subject_mode'] == 'none'
+    assert req_none.json['body']['player_context'] is None
+    assert 'profile (anonymous' not in req_none.json['body']['submitted_prompt']
+
+    # 3. Validation of invalid modes, hints, share exports, unknown/stale/removed profiles.
+    assert post(c, 'requests', dict(export_id=exp_id, prompt='Q', consent=True, subject_mode='invalid', request_id='bad-mode')).status_code == 400
+    assert post(c, 'requests', dict(export_id=exp_id, prompt='Q', consent=True, subject_mode='none', player_id=alex['id'], request_id='bad-none-pid')).status_code == 400
+    assert post(c, 'requests', dict(export_id=exp_id, prompt='Q', consent=True, subject_mode='selected_player', player_id='f' * 32, player_profile_version=1, request_id='bad-unknown-pid')).status_code == 400
+    assert post(c, 'requests', dict(export_id=exp_id, prompt='Q', consent=True, subject_mode='selected_player', player_id=casey['id'], request_id='bad-missing-ver')).status_code == 400
+    assert post(c, 'requests', dict(export_id=exp_id, prompt='Q', consent=True, subject_mode='main_player', subject_hint='x' * 161, request_id='bad-long-hint')).status_code == 400
+    assert post(c, 'exports', dict(selection(data), intent='share', quality='high', subject_mode='selected_player', player_id=casey['id'], player_profile_version=1, request_id='bad-share-subj')).status_code == 400
+
+    # Edit Casey (v1 -> v2) and verify stale v1 conflicts (409) on both /exports and /requests.
+    assert put(c, '/api/players/' + casey['id'], dict(name='CaseyPrivate', height_cm=166, level='experienced', version=1)).status_code == 200
+    assert post(c, 'exports', dict(selection(data), subject_mode='selected_player', player_id=casey['id'], player_profile_version=1, request_id='stale-casey-exp')).status_code == 409
+    assert post(c, 'requests', dict(export_id=exp_id, prompt='Q', consent=True, subject_mode='selected_player', player_id=casey['id'], player_profile_version=1, request_id='stale-casey-req')).status_code == 409
+
+    # Soft-remove Casey and verify 409 on both /exports and /requests.
+    app.extensions['state'].update('player:' + casey['id'], None, 2)
+    assert post(c, 'exports', dict(selection(data), subject_mode='selected_player', player_id=casey['id'], player_profile_version=3, request_id='removed-casey-exp')).status_code == 409
+    assert post(c, 'requests', dict(export_id=exp_id, prompt='Q', consent=True, subject_mode='selected_player', player_id=casey['id'], player_profile_version=3, request_id='removed-casey-req')).status_code == 409
+
+    # 4. Follow-up provenance validation: preserves original subject, rejects subject/version switches, never rewrites parent.
+    fu_ok = post(
+        c,
+        'requests',
+        dict(
+            export_id=exp_id,
+            prompt='Follow up for Blair.',
+            consent=True,
+            follow_up_of=ai_blair['id'],
+            subject_mode='selected_player',
+            player_id=blair['id'],
+            player_profile_version=blair['version'],
+            request_id='subj-fu-blair-ok',
+        ),
+    )
+    assert fu_ok.status_code == 201
+    assert fu_ok.json['body']['follow_up_of'] == ai_blair['id']
+
+    # Switching subject while still passing follow_up_of is rejected.
+    assert post(
+        c,
+        'requests',
+        dict(
+            export_id=exp_id,
+            prompt='Try follow-up as Alex.',
+            consent=True,
+            follow_up_of=ai_blair['id'],
+            subject_mode='main_player',
+            player_id=alex['id'],
+            player_profile_version=alex['version'],
+            request_id='subj-fu-wrong-player',
+        ),
+    ).status_code == 400
+
+    # Editing Blair's profile (v1 -> v2) rejects follow_up_of on v1 review, while independent v2 review succeeds and keeps v1 immutable.
+    orig_asked_at = c.get('/api/coaching/jobs/' + ai_blair['id']).json['asked_at']
+    assert put(c, '/api/players/' + blair['id'], dict(name='BlairPrivate', height_cm=184, level='pro', version=1)).status_code == 200
+    assert post(
+        c,
+        'requests',
+        dict(
+            export_id=exp_id,
+            prompt='Follow-up after profile edit.',
+            consent=True,
+            follow_up_of=ai_blair['id'],
+            subject_mode='selected_player',
+            player_id=blair['id'],
+            player_profile_version=2,
+            request_id='subj-fu-blair-v2-reject',
+        ),
+    ).status_code == 400
+    indep_v2 = post(
+        c,
+        'requests',
+        dict(
+            export_id=exp_id,
+            prompt='Fresh independent review for Blair v2.',
+            consent=True,
+            subject_mode='selected_player',
+            player_id=blair['id'],
+            player_profile_version=2,
+            request_id='subj-indep-blair-v2',
+        ),
+    )
+    assert indep_v2.status_code == 201
+    assert 'follow_up_of' not in indep_v2.json['body']
+    parent_after = c.get('/api/coaching/jobs/' + ai_blair['id']).json
+    assert parent_after['body']['player_context']['profile_version'] == 1
+    assert parent_after['asked_at'] == orig_asked_at
+
+    # 5. #87 Auto-detect frozen subject handoff & per-clip 2-review cap across alternating subjects.
+    auto_1 = post(
+        c,
+        'exports',
+        dict(
+            selection(data),
+            start=0.1,
+            end=1.0,
+            question='Check motion',
+            consent=True,
+            auto_detect=True,
+            auto_slot=1,
+            subject_mode='main_player',
+            player_id=alex['id'],
+            player_profile_version=alex['version'],
+            request_id='subj-auto-exp-1',
+        ),
+    )
+    assert auto_1.status_code == 201
+    auto_2 = post(
+        c,
+        'exports',
+        dict(
+            selection(data),
+            start=1.0,
+            end=1.9,
+            question='Check motion',
+            consent=True,
+            auto_detect=True,
+            auto_slot=2,
+            subject_mode='selected_player',
+            player_id=blair['id'],
+            player_profile_version=2,
+            subject_hint='near-court server',
+            request_id='subj-auto-exp-2',
+        ),
+    )
+    assert auto_2.status_code == 201
+    _complete_render_job(app, c, auto_1.json['id'])
+    _complete_render_job(app, c, auto_2.json['id'])
+
+    # Attempting to retarget auto_2's AI handoff to Alex or a different hint fails with 409.
+    assert post(
+        c,
+        'requests',
+        dict(
+            export_id=auto_2.json['id'],
+            prompt='Retargeted prompt',
+            consent=True,
+            auto_detect=True,
+            auto_slot=2,
+            subject_mode='main_player',
+            player_id=alex['id'],
+            player_profile_version=alex['version'],
+            request_id='subj-auto-ai-retarget',
+        ),
+    ).status_code == 409
+
+    # Submitting auto_2 with its frozen Blair subject succeeds.
+    auto_2_ai = post(
+        c,
+        'requests',
+        dict(
+            export_id=auto_2.json['id'],
+            prompt='Frozen Blair auto prompt',
+            consent=True,
+            auto_detect=True,
+            auto_slot=2,
+            subject_mode='selected_player',
+            player_id=blair['id'],
+            player_profile_version=2,
+            subject_hint='near-court server',
+            request_id='subj-auto-ai-2',
+        ),
+    )
+    assert auto_2_ai.status_code == 201
+    assert auto_2_ai.json['body']['subject_mode'] == 'selected_player'
+    assert auto_2_ai.json['body']['player_context']['player_id'] == blair['id']
+
+    # Switching dropdown to Alex, Blair, or No player profile cannot evade the 2-review per-clip cap.
+    for suffix, extra in [
+        ('alex', dict(subject_mode='main_player', player_id=alex['id'], player_profile_version=alex['version'])),
+        ('blair', dict(subject_mode='selected_player', player_id=blair['id'], player_profile_version=2)),
+        ('none', dict(subject_mode='none', player_id=None, player_profile_version=None)),
+    ]:
+        capped = post(
+            c,
+            'exports',
+            dict(selection(data), start=0.2, end=1.1, question='Check motion', consent=True, auto_detect=True, auto_slot=1, request_id=f'subj-auto-cap-{suffix}', **extra),
+        )
+        assert capped.status_code == 409
+        assert '2 reviews per clip' in capped.json['error']

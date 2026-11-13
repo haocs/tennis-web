@@ -7,14 +7,14 @@ import re
 from flask import Blueprint, abort, jsonify, request, send_file
 from coaching import Coaching, QueueConflict, recipe
 from storage import inside
-from players import coaching_player
+from players import coaching_player, resolve_coaching_subject
 from worker.tennis_coach.annotations import CAPABILITY, PROMPT_VERSION, expected_frames, evidence_manifest, coaching_prompt, response_schema
 
 
 def register_coaching(app,library,session):
     routes=Blueprint('coaching',__name__)
     queue=Coaching(Path(app.config['DATA_ROOT'])/'coaching.sqlite3')
-    queue.player_exists=lambda pid:isinstance(pid,str) and ('player:'+pid) in app.extensions['state'].all()
+    queue.player_exists=lambda pid:isinstance(pid,str) and bool((app.extensions['state'].all().get('player:'+pid) or {}).get('value'))
     app.extensions['coaching']=queue
     root=Path(app.config['COACH_MEDIA_ROOT']).resolve()
 
@@ -45,13 +45,17 @@ def register_coaching(app,library,session):
             if b.get('publication')!=data['published_at']:abort(409,'Recording changed. Refresh before exporting')
             clip=next(c for c in data['clips'] if c['id']==b.get('clip_id'))
             spec=recipe(b,data,clip)
-            if spec.get('auto_detect') or 'player_id' in b or 'player_profile_version' in b:
-                context=coaching_player(data,clip['id'],app.extensions['state'].all())
-                if ('player_id' in b and b['player_id'] != (context['player_id'] if context else None)
-                        or 'player_profile_version' in b and b['player_profile_version'] != (context['profile_version'] if context else None)):
-                    abort(409,'Main player or profile changed. Refresh the review before asking.')
+            has_subject_fields=any(k in b for k in ('subject_mode','player_id','player_profile_version','subject_hint'))
+            if spec.get('intent')=='share' and has_subject_fields:
+                raise ValueError('Share downloads do not accept coaching player subjects')
+            if spec.get('auto_detect') or has_subject_fields:
+                subject_mode,context,subject_hint=resolve_coaching_subject(b,data,clip['id'],app.extensions['state'].all(),conflict_cls=QueueConflict)
                 if spec.get('auto_detect'):
                     spec['player_context']=context
+                    if subject_mode is not None:
+                        spec['subject_mode']=subject_mode
+                    if subject_hint:
+                        spec['subject_hint']=subject_hint
             return jsonify(queue.create('render',spec,b.get('request_id'))),201
         except QueueConflict:raise
         except (ValueError,TypeError,KeyError,StopIteration) as e:abort(400,str(e) or 'Invalid selection')
@@ -78,16 +82,28 @@ def register_coaching(app,library,session):
         if auto_slot is not None and (type(auto_slot) is not int or auto_slot not in (1,2)):
             abort(400,'Invalid auto coach slot')
         body=dict(spec,export_id=render['id'],artifact_directory=render['result']['artifact_directory'],prompt=prompt.strip(),provider='chatgpt-codex',consent=True)
-        body.pop('auto_detect',None)
-        body.pop('auto_slot',None)
-        body['player_context']=coaching_player(data,spec['clip_id'],app.extensions['state'].all())
-        context=body['player_context']
-        if ('player_id' in b and b['player_id'] != (context['player_id'] if context else None)
-                or 'player_profile_version' in b and b['player_profile_version'] != (context['profile_version'] if context else None)):
-            abort(409,'Main player or profile changed. Refresh the review before asking.')
-        if 'player_context' in spec and spec.get('player_context') != context:
-            abort(409,'Main player or profile changed. Refresh the review before asking.')
+        for inherited in ('auto_detect','auto_slot','subject_mode','subject_hint','player_context'):
+            body.pop(inherited,None)
         try:
+            req_input=dict(b)
+            if raw_auto:
+                if 'subject_mode' not in req_input and 'subject_mode' in spec:
+                    req_input['subject_mode']=spec['subject_mode']
+                if 'subject_hint' not in req_input and 'subject_hint' in spec:
+                    req_input['subject_hint']=spec['subject_hint']
+            subject_mode,context,subject_hint=resolve_coaching_subject(req_input,data,spec['clip_id'],app.extensions['state'].all(),conflict_cls=QueueConflict)
+            body['player_context']=context
+            if subject_mode is not None:
+                body['subject_mode']=subject_mode
+            if subject_hint:
+                body['subject_hint']=subject_hint
+            if 'player_context' in spec:
+                if spec.get('player_context')!=context:
+                    raise QueueConflict('Selected player profile changed. Refresh the review before asking.' if (spec.get('subject_mode') or subject_mode)=='selected_player' else 'Main player or profile changed. Refresh the review before asking.')
+                if 'subject_mode' in spec and spec.get('subject_mode')!=subject_mode:
+                    raise QueueConflict('Coaching subject changed. Refresh the review before asking.')
+                if parent_id is None and spec.get('subject_hint')!=subject_hint:
+                    raise QueueConflict('Coaching subject changed. Refresh the review before asking.')
             if raw_auto:
                 if parent_id is not None:
                     raise ValueError('Automatic coaching requests cannot be follow-ups')
@@ -99,8 +115,10 @@ def register_coaching(app,library,session):
                 parent=get(parent_id)
                 if parent['role']!='ai' or parent['state']!='completed' or parent['body'].get('export_id')!=render['id'] or parent['body'].get('publication')!=spec['publication']:
                     raise ValueError('Follow-ups must refer to a completed response for this excerpt')
-                if parent['body'].get('player_context') != body['player_context']:
-                    raise ValueError('Main player or profile changed. Start a new review for this excerpt.')
+                parent_eff_mode=parent['body'].get('subject_mode') or ('main_player' if parent['body'].get('player_context') else 'none')
+                curr_eff_mode=subject_mode or ('main_player' if body.get('player_context') else 'none')
+                if parent['body'].get('player_context') != body['player_context'] or parent_eff_mode != curr_eff_mode:
+                    raise ValueError('Selected player or profile changed. Start a new review for this excerpt.' if 'selected_player' in (parent_eff_mode, curr_eff_mode) else 'Main player or profile changed. Start a new review for this excerpt.')
                 answer=parent['result']['answer']
                 body.update(follow_up_of=parent_id,previous_question=parent['body']['prompt'],previous_answer=answer[:12000],previous_answer_truncated=len(answer)>12000)
             body.update(evidence_frames=expected_frames(render),required_capability=CAPABILITY,prompt_version=PROMPT_VERSION,source_sha256=data.get('source',{}).get('sha256',data['id']),processing=data.get('processing'))

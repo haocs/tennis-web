@@ -3449,3 +3449,451 @@ def test_clip_study_auto_coach_long_clip_watchdog_and_stale_abort_regressions(br
     assert [c['export_id'] for c in ai_calls] == ['exp-stale-1'], f'Expected only first stale export to be attempted before switch, got {ai_calls}'
     assert not errors
     page.close()
+
+
+@pytest.mark.parametrize('width', [390, 1280])
+def test_coaching_subject_selector_auto_coach_reopen_followup_and_learning(browser, tmp_path, width):
+    import base64
+    import hashlib
+    from app import create_app
+    from worker.tennis_coach.annotations import CAPABILITY, evidence_manifest
+
+    token = 'test-worker-secret'
+    png_bytes = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jWZkAAAAASUVORK5CYII=')
+
+    app, root, data = setup.__wrapped__(tmp_path / f'subject-ui-{width}')
+    data['published_at'] += 1
+    data['video']['duration_seconds'] = 24
+    data['source']['duration_seconds'] = 24
+    data['kept_seconds'] = 24
+    data['removed_seconds'] = 0
+    data['clips'] = [
+        dict(
+            data['clips'][0],
+            id=letter * 24,
+            index=i + 1,
+            file=f'Clips/clip-{i + 1:03}.mp4',
+            duration_seconds=12,
+            original_start_seconds=i * 12,
+            original_end_seconds=(i + 1) * 12,
+            playback_start_seconds=i * 12,
+            playback_end_seconds=(i + 1) * 12,
+        )
+        for i, letter in enumerate('bc')
+    ]
+    (root / 'metadata/sessions' / f'{ID}.json').write_text(json.dumps(data))
+    fixtures = Path(__file__).parent / 'fixtures'
+    shutil.copyfile(fixtures / 'practice.mp4', root / 'media' / ID / 'Practice.mp4')
+    for clip in data['clips']:
+        shutil.copyfile(fixtures / 'clip.mp4', root / 'media' / ID / clip['file'])
+
+    app = create_app({
+        'TESTING': True,
+        'LIBRARY_ROOT': str(root),
+        'DATA_ROOT': app.config['DATA_ROOT'],
+        'COACH_WORKER_TOKEN': token,
+    })
+    c = app.test_client()
+    req_headers = {'X-Tennis-Request': '1'}
+    worker_headers = {'X-Tennis-Request': '1', 'Authorization': f'Bearer {token}'}
+
+    # Seed Alex as the persistent recording & clip-1 main player; clip-2 stays unassigned.
+    alex = c.post('/api/players', json={'name': 'AlexPrivate', 'height_cm': 172, 'level': 'beginner'}, headers=req_headers).json
+    sess0 = c.get(f'/api/sessions/{ID}').json
+    assert c.put(f'/api/sessions/{ID}/players', json={'player_ids': [alex['id']], 'version': sess0['player_assignment']['version']}, headers=req_headers).status_code == 200
+    sess1 = c.get(f'/api/sessions/{ID}').json
+    assert c.put(
+        f'/api/sessions/{ID}/clips/{CLIP}/player',
+        json={'player_id': alex['id'], 'version': sess1['clips'][0]['player_assignment']['version'], 'publication': sess1['published_at']},
+        headers=req_headers,
+    ).status_code == 200
+
+    server = make_server('127.0.0.1', 0, app, threaded=True)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f'http://127.0.0.1:{server.server_port}'
+    try:
+        page = browser.new_page(viewport={'width': width, 'height': 844}, has_touch=width < 761)
+        errors = []
+        page.on('pageerror', lambda err: errors.append(str(err)))
+
+        def complete_claimed_render(job):
+            fence = hashlib.sha256(job['token'].encode()).hexdigest()[:24]
+            folder = Path(app.config['COACH_MEDIA_ROOT']) / job['id'] / fence
+            folder.mkdir(parents=True)
+            b = job['body']
+            orig_start = float(b['original_start'])
+            orig_end = float(b['original_end'])
+            local_start = float(b['start'])
+            speed = float(b['speed'])
+            t1 = round(orig_start + (orig_end - orig_start) * 0.3, 3)
+            t2 = round(orig_start + (orig_end - orig_start) * 0.7, 3)
+            frames = []
+            for idx, orig_sec in enumerate((t1, t2)):
+                raw = png_bytes + f'-{job["id"]}-{idx}'.encode()
+                fname = f'frame-{idx:03}.jpg'
+                (folder / fname).write_bytes(raw)
+                frames.append(dict(
+                    file=fname,
+                    sha256=hashlib.sha256(raw).hexdigest(),
+                    original_seconds=orig_sec,
+                    clip_seconds=round(local_start + (orig_sec - orig_start), 3),
+                    excerpt_seconds=round((orig_sec - orig_start) / speed, 3),
+                ))
+            (folder / 'excerpt.mp4').write_bytes((fixtures / 'clip.mp4').read_bytes())
+            meta = dict(
+                recipe=b,
+                lease_token=job['token'],
+                frames=frames,
+                bytes=1024,
+                output_seconds=round((orig_end - orig_start) / speed, 3),
+                sha256='e' * 64,
+                render_seconds=0.1,
+            )
+            (folder / 'recipe.json').write_text(json.dumps(meta))
+            done = c.post(f"/api/coaching/worker/jobs/{job['id']}/complete", json={'token': job['token']}, headers=worker_headers)
+            assert done.status_code == 200, done.json
+            return job['id']
+
+        def finish_next_render():
+            job = None
+            for _ in range(120):
+                claim_resp = c.post('/api/coaching/worker/render/claim', json={'worker_id': 'ui-render'}, headers=worker_headers)
+                assert claim_resp.status_code == 200
+                job = claim_resp.json['job']
+                if job is not None:
+                    break
+                page.wait_for_timeout(50)
+            assert job is not None, 'Expected a queued render job'
+            return complete_claimed_render(job)
+
+        def finish_next_ai(summary, title='Split step timing', cue='Land balanced before contact.'):
+            job = None
+            for _ in range(120):
+                claim_resp = c.post('/api/coaching/worker/ai/claim', json={'worker_id': 'ui-ai', 'capabilities': [CAPABILITY]}, headers=worker_headers)
+                assert claim_resp.status_code == 200
+                job = claim_resp.json['job']
+                if job is not None:
+                    break
+                page.wait_for_timeout(50)
+            assert job is not None, 'Expected a queued AI job'
+            b = job['body']
+            folder = Path(app.config['COACH_MEDIA_ROOT']) / b['export_id'] / b['artifact_directory']
+            manifest = evidence_manifest(job)
+            cache = Path(app.config['COACH_MEDIA_ROOT']) / 'evidence/frames'
+            cache.mkdir(parents=True, exist_ok=True)
+            for frame in manifest['frames']:
+                src = folder / f"frame-{frame['order'] - 1:03}.jpg"
+                shutil.copyfile(src, cache / (frame['sha256'] + '.jpg'))
+            ev = c.post(f"/api/coaching/worker/jobs/{job['id']}/evidence", json={'token': job['token'], 'result': manifest}, headers=worker_headers)
+            assert ev.status_code == 200, ev.json
+            assert c.post(f"/api/coaching/worker/jobs/{job['id']}/calling", json={'token': job['token']}, headers=worker_headers).status_code == 200
+            orig_start = round(float(b['original_start']) + 0.1, 3)
+            orig_end = round(max(orig_start + 0.1, float(b['original_end']) - 0.1), 3)
+            structured_answer = json.dumps(dict(
+                schema_version=2,
+                summary=summary,
+                suggestions=[dict(
+                    title=title,
+                    topic='Footwork',
+                    observation='Stance width observed in sampled frame.',
+                    cue=cue,
+                    drill='Shadow 10 split-steps.',
+                    uncertainty='Sampled frames cannot confirm exact ball contact.',
+                    evidence_frame_ids=[manifest['frames'][0]['frame_id']],
+                    applies_to=[dict(start_seconds=orig_start, end_seconds=orig_end)],
+                )],
+            ))
+            done = c.post(
+                f"/api/coaching/worker/jobs/{job['id']}/complete",
+                json={'token': job['token'], 'result': dict(answer=structured_answer, analysis_mode='timestamped_frames', model='fake-ui-model')},
+                headers=worker_headers,
+            )
+            assert done.status_code == 200, done.json
+            return job
+
+        def fulfill_manual_ask(summary, title='Split step timing'):
+            for _ in range(60):
+                claim_r = c.post('/api/coaching/worker/render/claim', json={'worker_id': 'ui-render'}, headers=worker_headers).json['job']
+                if claim_r is not None:
+                    complete_claimed_render(claim_r)
+                    break
+                queued_ai = [j for j in c.get(f'/api/coaching/sessions/{ID}').json['jobs'] if j['role'] == 'ai' and j['state'] == 'queued']
+                if queued_ai:
+                    break
+                page.wait_for_timeout(50)
+            return finish_next_ai(summary, title=title)
+        page.add_init_script("""(() => {
+          window.__scanWorkers = [];
+          window.__scanScene = 'two_bursts';
+          window.__scanDelayMs = 2;
+          window.Worker = class {
+            constructor(url) {
+              this.url = url;
+              this.terminated = false;
+              window.__scanWorkers.push(this);
+            }
+            postMessage(msg) {
+              if (this.terminated) return;
+              if (msg.type === 'init') {
+                setTimeout(() => { if (!this.terminated) this.onmessage?.({data: {type: 'ready'}}); }, 2);
+              } else if (msg.type === 'detect') {
+                const w = msg.width || 320, h = msg.height || 180;
+                const v = document.getElementById('study-video');
+                const t = Number(v?.currentTime || 0);
+                let detections = [];
+                const box = (nx, ny, nw, nh) => ({
+                  boundingBox: {originX: nx * w, originY: ny * h, width: nw * w, height: nh * h},
+                  categories: [{categoryName: 'person', score: 0.92}],
+                });
+                if (window.__scanScene === 'two_bursts') {
+                  if (t >= 1.5 && t <= 4.2) {
+                    detections = [box(0.28 + (t - 1.5) * 0.14, 0.34, 0.16, 0.42)];
+                  } else if (t >= 7.8 && t <= 10.5) {
+                    detections = [box(0.66 - (t - 7.8) * 0.14, 0.32, 0.17, 0.44)];
+                  } else {
+                    detections = [box(0.45, 0.35, 0.16, 0.42)];
+                  }
+                }
+                setTimeout(() => {
+                  if (!this.terminated) this.onmessage?.({data: {type: 'result', epoch: msg.epoch, seq: msg.seq, detections}});
+                }, window.__scanDelayMs);
+              }
+            }
+            terminate() { this.terminated = true; }
+          };
+        })()""")
+
+        page.goto(base_url + f'/review/{ID}?clip={CLIP}')
+        expect(page.locator('#video-seek')).to_be_enabled()
+        page.evaluate("""() => {
+          const v = document.getElementById('study-video');
+          const proto = HTMLMediaElement.prototype;
+          const realCurrentTime = Object.getOwnPropertyDescriptor(proto, 'currentTime');
+          let logicalTime = 0;
+          Object.defineProperty(v, 'duration', {configurable: true, get: () => 12});
+          Object.defineProperty(v, 'currentTime', {
+            configurable: true,
+            get: () => logicalTime,
+            set: val => {
+              logicalTime = Number(val) || 0;
+              realCurrentTime.set.call(v, Math.min(1.95, Math.max(0, (logicalTime / 12) * 1.9)));
+            },
+          });
+        }""")
+
+        # 1. Open Clip Study -> Coach: subject selector defaults to Alex (clip main player).
+        page.get_by_role('button', name='Study clip', exact=True).click()
+        page.wait_for_function("() => document.querySelector('#study-video')?.readyState >= 2")
+        if width < 761:
+            page.locator('#study-mode-coach').click()
+
+        subject_sel = page.locator('#coach-subject')
+        expect(subject_sel).to_be_visible()
+        expect(subject_sel).to_have_value(alex['id'])
+        expect(page.locator('#coach-player-context')).to_contain_text('For AlexPrivate (clip main player)')
+
+        # 2. Add an unlisted saved player (Blair) via Saved players… without closing Clip Study or mutating clip/recording roster.
+        page.locator('#coach-manage-players').click()
+        expect(page.locator('#players-dialog')).to_be_visible()
+        expect(page.locator('#clip-study')).to_have_js_property('open', True)
+        page.get_by_role('button', name='Add player', exact=True).click()
+        page.get_by_label('Name', exact=True).fill('BlairPrivate')
+        page.get_by_label('Height (cm, optional)', exact=True).fill('184')
+        page.get_by_label('Level', exact=True).select_option('experienced')
+        page.get_by_role('button', name='Save player', exact=True).click()
+        expect(page.locator('#saved-player-list')).to_contain_text('BlairPrivate')
+        page.get_by_role('button', name='Close saved players', exact=True).click()
+        expect(page.locator('#players-dialog')).not_to_be_visible()
+        expect(page.locator('#clip-study')).to_have_js_property('open', True)
+
+        players_now = c.get('/api/players').json['players']
+        blair = next(p for p in players_now if p['name'] == 'BlairPrivate')
+        expect(subject_sel.locator(f'option[value="{blair["id"]}"]')).to_have_text('BlairPrivate')
+
+        sess_after_add = c.get(f'/api/sessions/{ID}').json
+        assert sess_after_add['clips'][0]['main_player']['id'] == alex['id']
+        assert [p['id'] for p in sess_after_add['recording_players']] == [alex['id']]
+
+        # 3. Select Blair + visible target cue, click Ask coach, and switch dropdown mid-render: pending job keeps Blair!
+        subject_sel.select_option(blair['id'])
+        expect(page.locator('#coach-player-context')).to_contain_text('For BlairPrivate (this request only; clip player unchanged)')
+        expect(page.locator('#coach-player-context')).to_contain_text('Auto detect scans foreground motion, not player identity.')
+        page.locator('#coach-subject-hint').fill('far-court player in dark shirt')
+        page.locator('#coach-question').fill('Check split-step posture for Blair')
+        page.locator('#coach-ask').click()
+        expect(page.locator('#coach-status')).to_have_text('Preparing your clip…')
+
+        # Mutate the live UI controls while render is queued — must NOT retarget pendingAsk.
+        subject_sel.select_option(alex['id'])
+        page.locator('#coach-subject-hint').fill('near-court server in white')
+        finish_next_render()
+        # Trigger a refresh cycle by polling / waiting until AI job is queued, then complete AI job.
+        page.wait_for_function("() => document.querySelector('#coach-status')?.textContent === 'Getting response…'", timeout=8000)
+        claimed_blair_1 = finish_next_ai('Blair manual stance summary', title='Wide split step')
+        assert claimed_blair_1['body']['subject_mode'] == 'selected_player'
+        assert claimed_blair_1['body']['player_context']['player_id'] == blair['id']
+        assert claimed_blair_1['body']['subject_hint'] == 'far-court player in dark shirt'
+        for secret in ('BlairPrivate', 'AlexPrivate', blair['id'], alex['id']):
+            assert secret not in claimed_blair_1['body']['submitted_prompt']
+        assert 'Selected-player profile' in claimed_blair_1['body']['submitted_prompt']
+        assert 'far-court player in dark shirt' in claimed_blair_1['body']['submitted_prompt']
+
+        page.evaluate('() => window.Coach.open(model.session, model.session.clips[0])')
+        if width < 761:
+            page.locator('#study-mode-coach').click()
+        blair_card = page.locator(f'.coach-note[data-job="{claimed_blair_1["id"]}"]')
+        expect(blair_card).to_contain_text('Blair manual stance summary')
+        expect(blair_card.locator('.coach-job-subject')).to_have_text('For BlairPrivate · selected for this review · Target: far-court player in dark shirt')
+        # Suggestion is eligible for Use in playback even though clip.main_player is Alex!
+        use_btn = blair_card.get_by_role('button', name='Use in playback', exact=True)
+        expect(use_btn).to_be_visible()
+        use_btn.click()
+        expect(blair_card.locator('.coach-review-state')).to_have_text('Saved · Active in playback')
+
+        # 4. Cross-tab profile edit (Blair v1 -> v2) returns 409 and automatically syncs #coach-subject to v2 for clean retry.
+        subject_sel.select_option(blair['id'])
+        page.locator('#coach-subject-hint').fill('far-court player in dark shirt')
+        page.locator('#coach-question').fill('Second angle check for Blair')
+        assert c.put(f"/api/players/{blair['id']}", json={'name': 'BlairPrivate', 'height_cm': 185, 'level': 'pro', 'version': 1}, headers=req_headers).status_code == 200
+        page.locator('#coach-ask').click()
+        expect(page.locator('#coach-status')).to_contain_text('Selected player profile changed. Refresh the review before asking.')
+        # Wait for syncPlayersFromServer to update model.players to v2, then retry immediately without reloading.
+        page.wait_for_function(f"() => model.players.find(p => p.id === '{blair['id']}')?.version === 2")
+        expect(subject_sel).to_have_value(blair['id'])
+        page.locator('#coach-ask').click()
+        expect(page.locator('#coach-status')).to_have_text('Getting response…')
+        claimed_blair_v2 = finish_next_ai('Blair v2 follow-on summary', title='Pro unit turn')
+        assert claimed_blair_v2['body']['player_context']['profile_version'] == 2
+
+        # 5. Auto detect & ask with Blair (v2), switch dropdown & close Clip Study while renders run, reopen -> frozen Blair handoff & per-clip 2-review cap.
+        page.evaluate('() => window.Coach.open(model.session, model.session.clips[0])')
+        if width < 761:
+            page.locator('#study-mode-coach').click()
+        subject_sel.select_option(blair['id'])
+        page.locator('#coach-subject-hint').fill('backhand corner player')
+        page.locator('#coach-question').fill('Auto check footwork bursts')
+        auto_btn = page.locator('#coach-auto-ask')
+        expect(auto_btn).to_have_attribute('data-auto-coach-remaining', '2')
+        auto_btn.click()
+        expect(auto_btn).to_have_attribute('data-auto-coach-state', 'submitting')
+        expect(auto_btn).to_have_attribute('data-auto-coach-remaining', '0')
+
+        # Switch dropdown to No player profile and close Clip Study while both auto renders are still queued!
+        subject_sel.select_option('')
+        page.locator('#coach-subject-hint').fill('')
+        page.get_by_role('button', name='← Back to review', exact=True).click()
+        expect(page.locator('#clip-study')).not_to_be_visible()
+
+        finish_next_render()
+        finish_next_render()
+
+        # Reopen Clip Study: advancePendingAutoExports must submit both AI jobs with frozen Blair v2 + 'backhand corner player'.
+        page.get_by_role('button', name='Study clip', exact=True).click()
+        if width < 761:
+            page.locator('#study-mode-coach').click()
+        # Wait until both auto AI jobs exist in SQLite before claiming them.
+        for _ in range(50):
+            listed_ai = [j for j in c.get(f'/api/coaching/sessions/{ID}').json['jobs'] if j['role'] == 'ai' and j['body'].get('auto_detect')]
+            if len(listed_ai) == 2:
+                break
+            page.wait_for_timeout(100)
+        assert len(listed_ai) == 2
+        auto_ai_1 = finish_next_ai('Blair auto burst 1 summary', title='Burst 1 recovery')
+        auto_ai_2 = finish_next_ai('Blair auto burst 2 summary', title='Burst 2 recovery')
+        for auto_job in (auto_ai_1, auto_ai_2):
+            assert auto_job['body']['subject_mode'] == 'selected_player'
+            assert auto_job['body']['player_context']['player_id'] == blair['id']
+            assert auto_job['body']['player_context']['profile_version'] == 2
+            assert auto_job['body']['subject_hint'] == 'backhand corner player'
+
+        page.evaluate('() => window.Coach.open(model.session, model.session.clips[0])')
+        if width < 761:
+            page.locator('#study-mode-coach').click()
+        expect(auto_btn).to_have_attribute('data-auto-coach-state', 'capped')
+        expect(auto_btn).to_have_attribute('data-auto-coach-remaining', '0')
+        # Switching #coach-subject across Alex, Blair, and No player profile NEVER resets the per-clip 2-review cap.
+        for candidate_val in (alex['id'], blair['id'], ''):
+            subject_sel.select_option(candidate_val)
+            expect(auto_btn).to_have_attribute('data-auto-coach-state', 'capped')
+            expect(auto_btn).to_have_attribute('data-auto-coach-remaining', '0')
+            expect(auto_btn).to_be_disabled()
+
+        # 6. Explicit No player profile review + Re-ask subject restoration vs switching subject to start an independent review.
+        subject_sel.select_option('')
+        page.locator('#coach-subject-hint').fill('')
+        page.locator('#coach-question').fill('General unassigned rally geometry')
+        page.locator('#coach-ask').click()
+        claimed_none = fulfill_manual_ask('Unassigned rally summary', title='Court geometry')
+        assert claimed_none['body']['subject_mode'] == 'none'
+        assert claimed_none['body']['player_context'] is None
+
+        page.evaluate('() => window.Coach.open(model.session, model.session.clips[0])')
+        if width < 761:
+            page.locator('#study-mode-coach').click()
+        expect(page.locator(f'.coach-note[data-job="{claimed_none["id"]}"] .coach-job-subject')).to_have_text('For unassigned player (no profile)')
+
+        # Click Re-ask on Blair's v2 review: restores Blair + hint; then switch to Alex -> clears follow_up_of and submits independently.
+        v2_card = page.locator(f'.coach-note[data-job="{claimed_blair_v2["id"]}"]')
+        v2_card.get_by_role('button', name='Re-ask', exact=True).click()
+        expect(subject_sel).to_have_value(blair['id'])
+        expect(page.locator('#coach-subject-hint')).to_have_value('far-court player in dark shirt')
+        expect(page.locator('#coach-follow-up-context')).to_have_text('Re-asking with previous question and response context.')
+
+        subject_sel.select_option(alex['id'])
+        page.locator('#coach-subject-hint').fill('')
+        expect(page.locator('#coach-follow-up-context')).to_have_text('Switched coaching player — starting a new independent review without the previous player’s response context.')
+        page.locator('#coach-question').fill('Check Alex main player preparation')
+        page.locator('#coach-ask').click()
+        claimed_alex = fulfill_manual_ask('Alex main player summary', title='Alex preparation')
+        assert claimed_alex['body']['subject_mode'] == 'main_player'
+        assert claimed_alex['body']['player_context']['player_id'] == alex['id']
+        assert 'follow_up_of' not in claimed_alex['body']
+
+        for check_w in (320, 390, 1280):
+            page.set_viewport_size({'width': check_w, 'height': 844})
+            assert not page.evaluate('document.documentElement.scrollWidth > innerWidth'), f'Overflow at {check_w}px'
+            assert page.locator('#clip-study').evaluate('d => d.scrollWidth <= d.clientWidth'), f'Dialog overflow at {check_w}px'
+        page.set_viewport_size({'width': width, 'height': 844})
+        page.get_by_role('button', name='← Back to review', exact=True).click()
+
+        # Verify persistent clip & recording assignments remained untouched throughout every coaching flow.
+        final_sess = c.get(f'/api/sessions/{ID}').json
+        assert final_sess['clips'][0]['main_player']['id'] == alex['id']
+        assert final_sess['clips'][0]['player_assignment'] == sess_after_add['clips'][0]['player_assignment']
+        assert final_sess['clips'][1]['player_assignment'] == sess_after_add['clips'][1]['player_assignment']
+        assert [p['id'] for p in final_sess['recording_players']] == [alex['id']]
+
+        # 7. Navigate to /learning: verify requested-player attribution, zero false mismatch warning, Plan eligibility, and exclusion of 'none'.
+        page.goto(base_url + f'/learning?player={blair["id"]}')
+        expect(page.locator('#learning-tab-reviews')).to_have_text('Reviews (4)')
+        expect(page.locator('.learning-card')).to_have_count(1)
+        blair_reviews_text = page.locator('#learning-clips').inner_text()
+        assert 'Blair manual stance summary' in blair_reviews_text
+        assert 'Blair v2 follow-on summary' in blair_reviews_text
+        assert 'Blair auto burst 1 summary' in blair_reviews_text
+        assert 'Blair auto burst 2 summary' in blair_reviews_text
+        assert 'Selected player for this review · Target: far-court player in dark shirt' in blair_reviews_text
+        assert 'Current clip has a different or unassigned player' not in blair_reviews_text
+        assert 'Alex main player summary' not in blair_reviews_text
+        assert 'Unassigned rally summary' not in blair_reviews_text
+
+        page.locator('#learning-tab-plan').click()
+        expect(page.locator('#learning-banner-headline')).to_have_text('Ready to generate a learning plan from your saved coaching reviews.')
+
+        page.locator('#learning-player').select_option(alex['id'])
+        page.locator('#learning-tab-reviews').click()
+        expect(page.locator('#learning-tab-reviews')).to_have_text('Reviews (1)')
+        alex_reviews_text = page.locator('#learning-clips').inner_text()
+        assert 'Alex main player summary' in alex_reviews_text
+        assert 'Blair manual stance summary' not in alex_reviews_text
+        assert 'Unassigned rally summary' not in alex_reviews_text
+
+        for check_w in (320, 390, 1280):
+            page.set_viewport_size({'width': check_w, 'height': 844})
+            assert not page.evaluate('document.documentElement.scrollWidth > innerWidth'), f'Learning overflow at {check_w}px'
+        assert not errors
+        page.close()
+    finally:
+        server.shutdown()
+        thread.join()

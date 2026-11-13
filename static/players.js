@@ -1,5 +1,5 @@
 'use strict';
-const PlayerUI = (() => {
+const PlayerUI = window.PlayerUI = (() => {
  let target=null,editing=null,selected=new Set(),openedVersion=null;
  const levels={kids:'Kids',beginner:'Beginner',intermediate:'Intermediate',experienced:'Experienced',pro:'Pro'};
  const initials=p=>p.name.trim().split(/\s+/).slice(0,2).map(s=>[...s][0]).join('').toLocaleUpperCase();
@@ -9,18 +9,19 @@ const PlayerUI = (() => {
  function filter(id,value,label='Filter by player'){return `<select id="${id}" aria-label="${label}">${options(value)}</select>`;}
  function syncHome(){const field=$('#home-player-filter');if(field)field.innerHTML=options(model.homePlayer);}
  function matches(item,id){return !id||(item.players||[]).some(p=>p.id===id);}
- async function reload(){
+ async function reload(detail={}){
   const data=await api('/api/sessions');model.players=data.players||[];model.sessions=data.sessions;model.practiceGroups=data.practice_groups||[];
   if(model.session){
    const fresh=await api(`/api/sessions/${model.session.id}`);
    Object.assign(model.session,fresh);syncReview();renderClipList();updatePlayerDownload();
   }else homeResults();
   const homeFilter=$('#home-player-filter');if(homeFilter)homeFilter.innerHTML=options(model.homePlayer);renderSaved();
+  window.dispatchEvent(new CustomEvent('tennis-players-updated',{detail:{...detail,players:model.players,session:model.session}}));
  }
  function renderSaved(){
   $('#saved-player-list').innerHTML=model.players.length?model.players.map(p=>`<div class="saved-player-row"><div>${avatars([p],true)}<p>${esc([p.height_cm==null?'':p.height_cm+' cm',levels[p.level]||''].filter(Boolean).join(' · '))}</p></div><button class="button small" type="button" data-edit-player="${p.id}">Edit</button></div>`).join(''):'<p>No players saved yet.</p>';
  }
- async function openSaved(){try{model.players=(await api('/api/players')).players;renderSaved();$('#players-dialog').showModal();}catch(e){toast(e.message);}}
+ async function openSaved(){try{model.players=(await api('/api/players')).players;renderSaved();window.dispatchEvent(new CustomEvent('tennis-players-updated',{detail:{players:model.players,session:model.session}}));$('#players-dialog').showModal();}catch(e){toast(e.message);}}
  function renderChoices(){
   $('#player-choices').innerHTML=model.players.length?model.players.map(p=>`<label class="player-choice"><input type="${['clip','clips'].includes(target.kind)?'radio':'checkbox'}" name="chosen-player" value="${p.id}"${selected.has(p.id)?' checked':''}>${avatars([p],true)}</label>`).join(''):'<p>Add a player to get started.</p>';
   if(['clip','clips'].includes(target.kind))$('#player-choices').insertAdjacentHTML('afterbegin',`<label class="player-choice"><input type="radio" name="chosen-player" value=""${!selected.size?' checked':''}>Unassigned</label>`);
@@ -92,7 +93,7 @@ const PlayerUI = (() => {
    try{
     const value={name:$('#player-profile-name').value.trim(),height_cm:$('#player-height').value===''?null:Number($('#player-height').value),level:$('#player-level').value||null,...(editing?{version:openedVersion}:{})};
     const p=await api('/api/players'+(editing?'/'+editing.id:''),{method:editing?'PUT':'POST',body:JSON.stringify(value)});
-    await reload();$('#player-editor').close();if($('#player-picker').open){if(!editing){if(['clip','clips'].includes(target.kind))selected.clear();selected.add(p.id);}renderChoices();}
+    await reload({savedPlayer:p,created:!editing});$('#player-editor').close();if($('#player-picker').open){if(!editing){if(['clip','clips'].includes(target.kind))selected.clear();selected.add(p.id);}renderChoices();}
    }catch(error){$('#player-editor-error').textContent=error.message;}finally{b.disabled=false;}
   };
   $('#player-picker-form').onsubmit=async e=>{

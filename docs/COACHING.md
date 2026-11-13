@@ -10,9 +10,13 @@ Open **Study clip**, adjust the **Interval start** and **Interval end** pins on 
 study progress bar (0.1–30 seconds for coaching), set framing with the zoom scrubber
 and drag-to-pan, and choose playback speed (`0.1×`–`1×`).
 
-In **Ask a coach**, pick a preset question or type a custom question and click
-**Ask coach**. The browser captures an immutable snapshot of the selected interval,
-normalized crop, playback speed and prompt:
+In **Ask a coach**, confirm or change **Player to coach** (defaults to the clip's
+assigned main player without mutating clip or recording rosters; see
+[COACHING-SUBJECT.md](COACHING-SUBJECT.md)), optionally add a concise visible target
+cue, pick a preset question or type a custom question, and click **Ask coach** (or
+**Auto detect & ask** for up to two local-detector moments per clip; see
+[AUTO-COACH.md](AUTO-COACH.md)). The browser captures an immutable snapshot of the
+selected player context, interval, normalized crop, playback speed and prompt:
 
 1. **Preparing your clip…** — queues a `render` job (`intent: "coaching"`) that
    renders the cropped, speed-adjusted SDR H.264 preview (`max_edge: 960`, muted)

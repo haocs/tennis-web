@@ -87,5 +87,80 @@
     e.setUint32(0,0x06054b50,true);e.setUint16(8,files.length,true);e.setUint16(10,files.length,true);e.setUint32(12,directorySize,true);e.setUint32(16,offset,true);
     return new Blob([...chunks,...directory,end],{type:'application/zip'});
   }
-  return {finite, clamp, clock, sampleTimes, sourceTime, panBounds, clampInterval, clampToInterval, resolveIntervalPlayback, coachingPrompt, copyText, crc32, zipFiles};
+  function normalizeSubjectHint(value) {
+    if (typeof value !== 'string') return '';
+    return value.replace(/\s+/g, ' ').trim().slice(0, 160);
+  }
+  function coachingSubjectOptions({clip, session, players, authoritativePlayers = false} = {}) {
+    const byId = new Map();
+    const upsert = p => {
+      if (!p || typeof p.id !== 'string' || !p.id || typeof p.name !== 'string') return;
+      const prev = byId.get(p.id);
+      if (!prev || (Number(p.version) || 0) >= (Number(prev.version) || 0)) byId.set(p.id, p);
+    };
+    if (Array.isArray(players) && (authoritativePlayers || players.length > 0)) {
+      for (const p of players) upsert(p);
+      if (!authoritativePlayers) {
+        for (const p of (session?.recording_players || [])) upsert(p);
+        for (const p of (session?.players || [])) upsert(p);
+        if (clip?.main_player) upsert(clip.main_player);
+      }
+    } else if (!authoritativePlayers) {
+      for (const p of (session?.recording_players || [])) upsert(p);
+      for (const p of (session?.players || [])) upsert(p);
+      if (clip?.main_player) upsert(clip.main_player);
+    }
+    const mainId = clip?.main_player?.id && byId.has(clip.main_player.id) ? clip.main_player.id : '';
+    const recordingIds = new Set([...(session?.recording_players || []), ...(session?.players || [])].map(p => p?.id).filter(Boolean));
+    const sortByName = (a, b) => a.name.localeCompare(b.name, undefined, {sensitivity: 'base'}) || String(a.id).localeCompare(String(b.id));
+    const options = [];
+    if (mainId) {
+      const mp = byId.get(mainId);
+      options.push({value: mp.id, label: `${mp.name} (clip main player)`, role: 'main_player', player: mp});
+    }
+    const inRecording = [...byId.values()].filter(p => p.id !== mainId && recordingIds.has(p.id)).sort(sortByName);
+    for (const p of inRecording) {
+      options.push({value: p.id, label: `${p.name} (in recording)`, role: 'recording_player', player: p});
+    }
+    const others = [...byId.values()].filter(p => p.id !== mainId && !recordingIds.has(p.id)).sort(sortByName);
+    for (const p of others) {
+      options.push({value: p.id, label: p.name, role: 'saved_player', player: p});
+    }
+    options.push({value: '', label: mainId ? 'No player profile' : 'No player profile (unassigned)', role: 'none', player: null});
+    return {options, defaultValue: mainId, byId: Object.fromEntries(byId)};
+  }
+  function resolveCoachingSubject({selectedPlayerId, clip, session, players, authoritativePlayers = false, subjectHint = ''} = {}) {
+    const {byId, defaultValue} = coachingSubjectOptions({clip, session, players, authoritativePlayers});
+    const hint = normalizeSubjectHint(subjectHint);
+    const pid = typeof selectedPlayerId === 'string' ? selectedPlayerId.trim() : '';
+    if (!pid) {
+      return {subjectMode: 'none', playerId: null, playerProfileVersion: null, player: null, subjectHint: hint || null};
+    }
+    const player = byId[pid] || null;
+    if (!player) throw new Error('Selected player is unavailable. Choose a saved player.');
+    const isMain = Boolean(defaultValue && pid === defaultValue);
+    return {
+      subjectMode: isMain ? 'main_player' : 'selected_player',
+      playerId: player.id,
+      playerProfileVersion: player.version,
+      player,
+      subjectHint: hint || null
+    };
+  }
+  function describeCoachingSubject({selectedPlayerId, clip, session, players, authoritativePlayers = false} = {}) {
+    const {byId, defaultValue} = coachingSubjectOptions({clip, session, players, authoritativePlayers});
+    const pid = typeof selectedPlayerId === 'string' ? selectedPlayerId.trim() : '';
+    const player = pid ? byId[pid] : null;
+    if (player && defaultValue && pid === defaultValue) {
+      return `For ${player.name} (clip main player) · height and level are included; name stays in this library.`;
+    }
+    if (player) {
+      return `For ${player.name} (this request only; clip player unchanged) · height and level included; name stays local. Auto detect scans foreground motion, not player identity.`;
+    }
+    if (defaultValue && byId[defaultValue]) {
+      return `No player profile for this request (clip player stays ${byId[defaultValue].name}) · advice stays on this clip only.`;
+    }
+    return 'No main player assigned · choose a player above or use Saved players… to add one without changing clip assignment.';
+  }
+  return {finite, clamp, clock, sampleTimes, sourceTime, panBounds, clampInterval, clampToInterval, resolveIntervalPlayback, coachingPrompt, copyText, crc32, zipFiles, normalizeSubjectHint, coachingSubjectOptions, resolveCoachingSubject, describeCoachingSubject};
 });

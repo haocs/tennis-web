@@ -107,14 +107,21 @@ class Annotations:
             a = dict(row); body = json.loads(a.pop('body')); asked_at = a.pop('asked_at', None)
             a['asked_at'] = asked_at
             a['proposal'] = json.loads(a['proposal']); a['current'] = json.loads(a['current'])
-            a['provenance'] = {k: body.get(k) for k in ('source_id','source_sha256','clip_id','publication','export_id','prompt_version','processing','player_context','original_start','original_end')}
+            a['provenance'] = {k: body.get(k) for k in ('source_id','source_sha256','clip_id','publication','export_id','prompt_version','processing','player_context','subject_mode','subject_hint','original_start','original_end')}
             a['provenance']['asked_at'] = asked_at
             # Even an untimed proposal retains its historical selection without inventing precise cue timing.
             intervals = a['current']['applies_to'] or [dict(start_seconds=body['original_start'], end_seconds=body['original_end'])]
             a['related_clip_ids'] = [c['id'] for c in clips if any(i['start_seconds'] <= c['original_end_seconds'] and i['end_seconds'] >= c['original_start_seconds'] for i in intervals)]
             context = body.get('player_context')
+            subject_mode = body.get('subject_mode')
             related = [c for c in clips if c['id'] in a['related_clip_ids']]
-            a['player_matches_current'] = not context or bool(related) and all((c.get('main_player') or {}).get('id') == context['player_id'] for c in related)
+            if subject_mode == 'selected_player' and context and context.get('player_id'):
+                player_valid = self.player_exists(context['player_id']) if getattr(self, 'player_exists', None) else True
+                a['player_matches_current'] = bool(related) and bool(player_valid)
+            elif subject_mode == 'none':
+                a['player_matches_current'] = bool(related)
+            else:
+                a['player_matches_current'] = not context or bool(related) and all((c.get('main_player') or {}).get('id') == context['player_id'] for c in related)
             a['historical'] = body['publication'] != publication
             a['playback_eligible'] = a['player_matches_current'] and a['status'] == 'accepted' and a['reviewed_publication'] == publication and bool(a['current']['applies_to'])
             a['training_label_status'] = 'not_released'
@@ -552,10 +559,14 @@ class Annotations:
             if sid not in sources:
                 sources[sid] = source_loader(sid)
             data = sources[sid]
+            subject_mode = body.get('subject_mode')
+            if subject_mode == 'none':
+                continue
             profile = body.get('player_context') or {}
             if profile.get('player_id') not in (None, player_id):
                 continue
             explicit = profile.get('player_id') == player_id
+            is_selected_subject = explicit and subject_mode == 'selected_player'
             start, end = body['original_start'], body['original_end']
             overlapping_clips = (
                 [c for c in data['clips'] if max(start, c['original_start_seconds']) < min(end, c['original_end_seconds'])]
@@ -572,6 +583,8 @@ class Annotations:
                         invalid_reasons[eid] = 'reassigned_player'
                     continue
                 clips = matching_clips
+            elif is_selected_subject:
+                clips = overlapping_clips
             else:
                 mismatch = bool(overlapping_clips and any((c.get('main_player') or {}).get('id') != player_id for c in overlapping_clips))
                 if mismatch:

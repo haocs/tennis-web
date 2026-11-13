@@ -971,3 +971,123 @@ def test_learning_plan_citation_validation_and_immutable_evidence_revision_prove
     assert carried['cue'] == 'Old cue v1'
     assert carried['version'] == 1
     assert carried['version_digest'] == snap2['covered_evidence_map'][eid_old]
+
+
+def test_learning_reviews_and_plan_attribute_explicit_selected_subject_and_exclude_none(setup):
+    from worker.tennis_coach.annotations import CAPABILITY, LEARNING_PLAN_CAPABILITY
+    from test_players import focus
+
+    app, root, data = setup
+    app.config['COACH_WORKER_TOKEN'] = 'secret-worker-token'
+    c = app.test_client()
+    alex = player(c, 'Alex')
+    blair = player(c, 'Blair')
+    dana = player(c, 'Dana')
+
+    # Assign Alex as persistent main_player on CLIP; Blair is NOT assigned to CLIP or recording roster.
+    roster(c, [alex['id']])
+    assert focus(c, data, alex['id']).status_code == 200
+    q = app.extensions['coaching']
+    now = [2000.0]
+    q.clock = lambda: now[0]
+
+    # 1. Create a main_player review for Alex (t=2000), a selected_player review for Blair (t=2100),
+    #    and an explicit No player profile ('none') review (t=2200) on the same clip.
+    r_alex, anns_alex = _structured_review(app, data, 'subj-learn-alex', alex['id'], [
+        dict(title='Alex split step', topic='Footwork', observation='Late split', cue='Split as opponent hits', drill='', uncertainty='',
+             evidence_frame_ids=['f_subj-learn-alex_1'], applies_to=[dict(start_seconds=6.0, end_seconds=7.5)]),
+    ])
+    with q.db() as db:
+        body_a = json.loads(db.execute('SELECT body FROM jobs WHERE id=?', (r_alex['id'],)).fetchone()['body'])
+        body_a['subject_mode'] = 'main_player'
+        db.execute('UPDATE jobs SET body=? WHERE id=?', (json.dumps(body_a), r_alex['id']))
+
+    now[0] = 2100.0
+    r_blair, anns_blair = _structured_review(app, data, 'subj-learn-blair', blair['id'], [
+        dict(title='Blair unit turn', topic='Preparation', observation='Late shoulder turn', cue='Turn shoulders early', drill='Shadow unit turns', uncertainty='',
+             evidence_frame_ids=['f_subj-learn-blair_1'], applies_to=[dict(start_seconds=6.2, end_seconds=7.8)]),
+    ])
+    with q.db() as db:
+        body_b = json.loads(db.execute('SELECT body FROM jobs WHERE id=?', (r_blair['id'],)).fetchone()['body'])
+        body_b['subject_mode'] = 'selected_player'
+        body_b['subject_hint'] = 'far court white visor'
+        db.execute('UPDATE jobs SET body=? WHERE id=?', (json.dumps(body_b), r_blair['id']))
+
+    now[0] = 2200.0
+    r_none = q.create('ai', dict(
+        source_id=ID, clip_id=CLIP, publication=data['published_at'],
+        original_start=6.0, original_end=8.0, player_context=None, subject_mode='none',
+    ), 'subj-learn-none')
+    claim_none = q.claim('ai', 'worker-1', [CAPABILITY])
+    q.worker_update(claim_none['id'], claim_none['token'], 'calling')
+    q.worker_update(claim_none['id'], claim_none['token'], 'complete', dict(answer='Unassigned opponent review'))
+
+    # 2. Alex sees ONLY r_alex (never Blair's review and never the 'none' review, even under limit=1 pagination).
+    alex_payload = c.get(f"/api/learning?player_id={alex['id']}").json
+    assert [r['id'] for e in alex_payload['entries'] for r in e['reviews']] == [r_alex['id']]
+    assert alex_payload['entries'][0]['reviews'][0]['player_mismatch'] is False
+    assert alex_payload['plan_state']['eligibility']['valid_reviews_count'] == 1
+
+    paged_alex = []
+    cursor = ''
+    while True:
+        page = c.get(f"/api/learning?player_id={alex['id']}&limit=1" + (f'&after={cursor}' if cursor else '')).json
+        paged_alex.extend(r['id'] for e in page['entries'] for r in e['reviews'])
+        cursor = page['next_after']
+        if not cursor:
+            break
+    assert paged_alex == [r_alex['id']]
+
+    # 3. Blair sees ONLY r_blair, with player_mismatch=False, selected_override=True, and valid Learning Plan eligibility!
+    blair_payload = c.get(f"/api/learning?player_id={blair['id']}").json
+    assert len(blair_payload['entries']) == 1
+    blair_rev = blair_payload['entries'][0]['reviews'][0]
+    assert blair_rev['id'] == r_blair['id']
+    assert blair_rev['player_mismatch'] is False
+    assert blair_rev['selected_override'] is True
+    assert blair_rev['subject_mode'] == 'selected_player'
+    assert blair_rev['subject_hint'] == 'far court white visor'
+    assert blair_payload['plan_state']['eligibility']['valid_reviews_count'] == 1
+    assert blair_payload['plan_state']['eligibility']['can_generate'] is True
+
+    eid_blair = 'coach:' + anns_blair[0]['id']
+    plan_req = _post_json(c, '/api/learning/plan', dict(
+        player_id=blair['id'], consent=True, expected_parent_revision=None,
+        input_digest=blair_payload['plan_state']['eligibility']['input_digest'], request_id='blair-subj-plan-1',
+    ))
+    assert plan_req.status_code == 201
+    claim_plan = q.claim('ai', 'worker-1', [CAPABILITY, LEARNING_PLAN_CAPABILITY])
+    q.worker_update(claim_plan['id'], claim_plan['token'], 'calling')
+    q.worker_update(claim_plan['id'], claim_plan['token'], 'complete', dict(
+        answer=_plan_answer('Blair early preparation plan.', [eid_blair], [
+            dict(item_key='', topic='Preparation', title='Early unit turn', observed_issue='Late turn', cue='Turn shoulders early', drill='Shadow swings', uncertainty='', evidence_ids=[eid_blair]),
+        ]),
+        analysis_mode='learning_plan',
+    ))
+
+    # 4. Reassign CLIP's persistent main_player from Alex to Dana:
+    #    - Alex's 'main_player' review becomes player_mismatch=True and invalid_reason='reassigned_player'.
+    #    - Blair's explicit 'selected_player' review stays valid (player_mismatch=False, citation currently_valid=True)!
+    assert focus(c, data, dana['id'], version=1).status_code == 200
+    alex_after = c.get(f"/api/learning?player_id={alex['id']}").json
+    assert alex_after['entries'][0]['reviews'][0]['player_mismatch'] is True
+    assert alex_after['plan_state']['eligibility']['valid_reviews_count'] == 0
+
+    blair_after = c.get(f"/api/learning?player_id={blair['id']}").json
+    assert blair_after['entries'][0]['reviews'][0]['player_mismatch'] is False
+    assert blair_after['entries'][0]['reviews'][0]['selected_override'] is True
+    cit = blair_after['plan_state']['active_plan']['citations'][eid_blair]
+    assert cit['currently_valid'] is True
+    assert f"coach_job={r_blair['id']}" in cit['study_url']
+
+    # Editing Blair's suggestion preserves immutable asked_at=2100.0 and triggers plan delta eligibility.
+    now[0] = 2500.0
+    assert put(c, f"/api/coaching/annotations/{anns_blair[0]['id']}", dict(
+        publication=data['published_at'], version=1, status='accepted',
+        content=dict(title='Blair unit turn', topic='Preparation', observation='Late shoulder turn', cue='Turn shoulders as ball crosses net', drill='Shadow unit turns', uncertainty='',
+                     evidence_frame_ids=['f_subj-learn-blair_1'], applies_to=[dict(start_seconds=6.2, end_seconds=7.8)]),
+    )).status_code == 200
+    blair_edited = c.get(f"/api/learning?player_id={blair['id']}").json
+    assert blair_edited['entries'][0]['reviews'][0]['asked_at'] == 2100.0
+    assert blair_edited['plan_state']['eligibility']['new_or_revised_reviews_count'] == 1
+    assert blair_edited['plan_state']['eligibility']['can_generate'] is True
