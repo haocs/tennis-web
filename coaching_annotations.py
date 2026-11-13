@@ -1177,7 +1177,7 @@ class Annotations:
         if not isinstance(request_id, str) or not 8 <= len(request_id) <= 100:
             raise ValueError('A request ID is required')
         if body.get('consent') is not True:
-            raise ValueError('Confirm sending coaching review summaries and practice progress to OpenAI')
+            raise ValueError('Confirm sending coaching review summaries and practice progress to AI coach')
         expected_parent = body.get('expected_parent_revision')
         if expected_parent is not None and type(expected_parent) is not int:
             raise ValueError('Invalid expected parent revision')

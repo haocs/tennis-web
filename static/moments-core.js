@@ -50,7 +50,8 @@
     if(!finite(x)||!finite(y)||!point&&y<=x)return [];
     const local=x-(clip?.original_start_seconds??(f.original_start-f.local_start));
     const playback=clip?clip.playback_start_seconds+local:f.playback_start+x-f.original_start;
-    return [{...f,original_start:x,original_end:y,local_start:local,local_end:local+y-x,playback_start:playback,playback_end:playback+y-x}];
+    const max_point_span=clip?Math.max(0,hi-x):Infinity;
+    return [{...f,original_start:x,original_end:y,local_start:local,local_end:local+y-x,playback_start:playback,playback_end:playback+y-x,max_point_span}];
    });
    return fragments.length?[{annotation:a,fragments}]:[];
   });
@@ -59,7 +60,11 @@
   const mode=options.mode||'full';
   return inScope(items,options).filter(({annotation:a})=>a.status==='active'&&canPlay(a,items)).flatMap(({annotation:a,fragments})=>{
    const point=!finite(a.target.end_seconds),duration=defaults[a.kind]||3;
-   return fragments.map((f,index)=>({key:a.id+':'+index,id:a.id,kind:a.kind,start:mode==='clip'?f.local_start:f.playback_start,end:mode==='clip'?f.local_end:f.playback_end,point,duration,fragment:f,annotation:a}));
+   return fragments.map((f,index)=>{
+    const start=mode==='clip'?f.local_start:f.playback_start;
+    const end=point?msRound(start+Math.min(duration,finite(f.max_point_span)?f.max_point_span:duration)):(mode==='clip'?f.local_end:f.playback_end);
+    return {key:a.id+':'+index,id:a.id,kind:a.kind,start,end,point,duration,fragment:f,annotation:a};
+   });
   }).sort((a,b)=>a.start-b.start||a.key.localeCompare(b.key));
  }
  function nextMoment(items,position,options={}){
@@ -78,33 +83,15 @@
  }
  class CueClock{
   constructor(){this.reset();}
-  reset(){this.previous=null;this.points=new Map();}
-  tick(events,position,now,{discontinuity=false,playing=false,rate=1}={}){
-   if(!finite(position)||!finite(now))return [];
-   const backward=this.previous!==null&&position<this.previous-.01;
-   if(discontinuity||backward)this.points.clear();
+  reset(){}
+  tick(events,position){
+   if(!finite(position))return [];
    const result=[],ids=new Set();
    for(const e of events){
     if(ids.has(e.id))continue;
-    if(!e.point){
-     const inRange=position>=e.start&&position<e.end;
-     const crossedRange=playing&&!discontinuity&&!backward&&this.previous!==null&&this.previous<e.start&&position>=e.start&&position-this.previous<=Math.max(1,rate);
-     if(e.kind==='coach'){
-      if((inRange||crossedRange)&&!this.points.has(e.key))this.points.set(e.key,now+e.duration*1000);
-      const expiresAt=this.points.get(e.key);
-      if(inRange||(expiresAt&&expiresAt>now)){result.push(expiresAt&&expiresAt>now?{...e,expiresAt}:e);ids.add(e.id);}
-     }else if(inRange){
-      result.push(e);ids.add(e.id);
-     }
-     continue;
-    }
-    const near=position>=e.start&&position<e.start+e.duration;
-    const crossed=playing&&!discontinuity&&!backward&&this.previous!==null&&this.previous<e.start&&position>=e.start&&position-this.previous<=Math.max(1,rate);
-    if((near||crossed)&&!this.points.has(e.key))this.points.set(e.key,now+e.duration*1000);
-    const expiresAt=this.points.get(e.key);
-    if(expiresAt>now){result.push({...e,expiresAt});ids.add(e.id);}
+    if(position>=e.start&&position<e.end){result.push(e);ids.add(e.id);}
    }
-   this.previous=position;return result;
+   return result;
   }
  }
  return {defaults,msRound,msMin,msMaxPoint,msMaxEnd,clampPointToClip,displayText,teaserText,canPlay,inScope,timeline,nextMoment,nextHighlight,CueClock};

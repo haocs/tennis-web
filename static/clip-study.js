@@ -167,11 +167,42 @@
       playBtn.dataset.iconState = label;
     }
   }
+  function isAutoDetectSupported() {
+    return !window.__TENNIS_AUTOFOCUS_FORCE_UNSUPPORTED && typeof Worker === 'function' && typeof WebAssembly === 'object' && !!window.AutoFocusCore;
+  }
+  function applyDetectedWindow(owner, win) {
+    if (!owner || !win || context !== owner) return;
+    const dur = fallbackDuration();
+    setIntervalBounds(win.start, win.end, 'end');
+    if (win.focusBox && ready() && window.AutoFocusCore?.targetFraming) {
+      const initial = window.AutoFocusCore.targetFraming(win.focusBox, stage.clientWidth, stage.clientHeight, video.videoWidth, video.videoHeight, {minZoom: 1, maxZoom: 4});
+      const snappedZoom = C.clamp(Math.round((initial?.zoom || 1) * 4) / 4, 1, 4);
+      const snapped = window.AutoFocusCore.targetFraming(win.focusBox, stage.clientWidth, stage.clientHeight, video.videoWidth, video.videoHeight, {minZoom: snappedZoom, maxZoom: snappedZoom});
+      owner.zoom = snapped?.zoom || 1;
+      owner.x = snapped?.x || 0;
+      owner.y = snapped?.y || 0;
+      applyView(true);
+    }
+    video.pause();
+    if (video.readyState >= 1) video.currentTime = C.clamp(win.start, 0, dur);
+    owner.lastTime = C.clamp(win.start, 0, dur);
+    syncTime();
+  }
   function setControls() {
     const enabled = ready() && !context.capturing;
     for (const id of ['study-seek', 'study-pin-start', 'study-pin-end', 'study-back', 'study-play', 'study-forward', 'study-download-interval']) {
       if ($(id)) $(id).disabled = !enabled || (id === 'study-download-interval' && !!context?.downloading);
     }
+    const autoBtn = $('study-auto-detect'), autoCancelBtn = $('study-auto-cancel');
+    if (autoBtn) {
+      const unavailable = !!context?.autoDetectUnavailable || !isAutoDetectSupported();
+      const scanning = !!context?.scanningAutoDetect;
+      const count = context?.detectedWindows?.length || 0;
+      const idx = context?.detectedWindowIndex ?? -1;
+      autoBtn.disabled = !enabled || unavailable || scanning || !!context?.capturing;
+      autoBtn.textContent = scanning ? 'Scanning…' : unavailable ? 'Auto select unavailable' : count > 1 && idx >= 0 ? `Next moment (${idx + 1}/${count})` : 'Auto select & zoom';
+    }
+    if (autoCancelBtn) autoCancelBtn.hidden = !context?.scanningAutoDetect;
     const frameReady = enabled && video.readyState >= 2 && !context?.capturing;
     for (const id of ['study-capture', 'study-sample']) $(id).disabled = !frameReady;
     $('study-copy').disabled = !!context?.capturing;
@@ -297,7 +328,7 @@
     video.pause();
     $('study-media-error').hidden = false;
     $('study-media-error').textContent = 'This browser could not play the clip. Download it to review in a compatible player. HDR/HEVC support varies by device.';
-    for (const id of ['study-seek','study-pin-start','study-pin-end','study-back','study-play','study-forward','study-capture','study-sample','study-download-interval']) {
+    for (const id of ['study-seek','study-pin-start','study-pin-end','study-back','study-play','study-forward','study-auto-detect','study-capture','study-sample','study-download-interval']) {
       if ($(id)) $(id).disabled = true;
     }
   }
@@ -748,11 +779,7 @@
         delete owner.captureReturnTime;
         const dur = fallbackDuration();
         if (selectedWindows && selectedWindows.length > 0) {
-          setIntervalBounds(selectedWindows[0].start, selectedWindows[0].end, 'end');
-          if (video.readyState >= 1) {
-            video.currentTime = C.clamp(selectedWindows[0].start, 0, dur);
-          }
-          owner.lastTime = selectedWindows[0].start;
+          applyDetectedWindow(owner, selectedWindows[0]);
         } else {
           owner.intervalStart = returnInterval.start;
           owner.intervalEnd = returnInterval.end;
@@ -784,7 +811,7 @@
     if (context || !options.clip || !options.player) return;
     const {session,clip,player,url,returnFocus}=options;
     const initialDur = C.finite(clip.duration_seconds) && clip.duration_seconds > 0 ? clip.duration_seconds : 1;
-    context={session,clip,player,url,returnFocus,parentRate:player.playbackRate,startTime:player.currentTime||0,lastTime:player.currentTime||0,intervalStart:0,intervalEnd:initialDur,intervalDefaultEnd:true,loop:false,zoom:1,x:0,y:0,frames:[],fetchController:new AbortController(),capturing:false,downloading:false,shareJobId:null,shareRequestId:null,shareTimer:null,generation:++generation};
+    context={session,clip,player,url,returnFocus,parentRate:player.playbackRate,startTime:player.currentTime||0,lastTime:player.currentTime||0,intervalStart:0,intervalEnd:initialDur,intervalDefaultEnd:true,loop:false,zoom:1,x:0,y:0,frames:[],fetchController:new AbortController(),capturing:false,downloading:false,scanningAutoDetect:false,autoDetectUnavailable:!isAutoDetectSupported(),detectedWindows:null,detectedWindowIndex:-1,shareJobId:null,shareRequestId:null,shareTimer:null,generation:++generation};
     player.pause();
     $('study-heading').textContent='Clip study · '+String(clip.index).padStart(2,'0');
     $('study-description').textContent=`${session.title} · Original ${C.clock(clip.original_start_seconds)}–${C.clock(clip.original_end_seconds)}`;
@@ -900,6 +927,53 @@
   $('study-sample').addEventListener('click',()=>capture(true));
   $('study-capture').addEventListener('click',()=>capture(false));
   $('study-cancel-capture').addEventListener('click',stopCapture);
+  $('study-auto-cancel')?.addEventListener('click',stopCapture);
+  $('study-auto-detect')?.addEventListener('click',async()=>{
+    if(!context||!ready()||context.capturing)return;
+    const owner=context;
+    if(Array.isArray(owner.detectedWindows)&&owner.detectedWindows.length>0){
+      owner.detectedWindowIndex=(owner.detectedWindowIndex+1)%owner.detectedWindows.length;
+      const win=owner.detectedWindows[owner.detectedWindowIndex];
+      applyDetectedWindow(owner,win);
+      setControls();
+      status(`Moment ${owner.detectedWindowIndex+1} of ${owner.detectedWindows.length}: ${C.clock(win.start)}–${C.clock(win.end)} (${Number(owner.zoom.toFixed(2))}× zoom).`);
+      return;
+    }
+    if(!isAutoDetectSupported()){
+      owner.autoDetectUnavailable=true;
+      setControls();
+      status('Auto select & zoom is unavailable in this browser. Select an interval and zoom manually.');
+      return;
+    }
+    owner.scanningAutoDetect=true;
+    setControls();
+    status('Scanning clip for player motion…');
+    try{
+      const result=await window.ClipStudy.scanPlayerMoments({
+        maxWindows:5,
+        onProgress:({index,total})=>{if(context===owner)status(`Scanning clip for player motion (${index}/${total})…`);}
+      });
+      if(context!==owner)return;
+      const windows=result?.windows||[];
+      if(!windows.length){
+        owner.detectedWindows=[];
+        owner.detectedWindowIndex=-1;
+        status('No clear player motion detected in this clip. Select an interval and zoom manually.');
+        return;
+      }
+      owner.detectedWindows=windows;
+      owner.detectedWindowIndex=0;
+      applyDetectedWindow(owner,windows[0]);
+      status(windows.length>1?`Selected 1 of ${windows.length} moments (${C.clock(windows[0].start)}–${C.clock(windows[0].end)} · ${Number(owner.zoom.toFixed(2))}× zoom). Click Next moment to cycle.`:`Selected moment (${C.clock(windows[0].start)}–${C.clock(windows[0].end)} · ${Number(owner.zoom.toFixed(2))}× zoom).`);
+    }catch(error){
+      if(context!==owner)return;
+      if(error?.name==='AbortError')status('Auto select scan cancelled.');
+      else if(['unsupported','worker_graphics_unavailable'].includes(error?.code)){owner.autoDetectUnavailable=true;status('Auto select & zoom is unavailable in this browser. Select an interval and zoom manually.');}
+      else status(error?.message||'Auto select & zoom failed.');
+    }finally{
+      if(context===owner){owner.scanningAutoDetect=false;setControls();}
+    }
+  });
   $('study-copy').addEventListener('click',async()=>{
     if(!context)return;
     const owner=context,field=$('study-prompt');

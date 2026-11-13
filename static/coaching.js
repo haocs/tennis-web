@@ -22,7 +22,7 @@
     return hasProfile?base.replace(' I am a beginner.',''):base;
   }
   function defaultQuestion(){return presetQuestion('full');}
-  let owner=null,timer=null,generation=0,selectedExport=null,selectedAsk=null,pendingAsk=null,busy=false,scanningAuto=false,autoState='ready',stickyNotice='',revision=0,requestId=null,askId=null,askFingerprint=null,lastData=null,historyKey='',followUpId=null,followUpOrigin=null,mobileMode='watch',pendingFocus=null,highlightedKey=null;
+  let owner=null,timer=null,generation=0,selectedExport=null,selectedAsk=null,pendingAsk=null,busy=false,revision=0,requestId=null,askId=null,askFingerprint=null,lastData=null,historyKey='',followUpId=null,followUpOrigin=null,mobileMode='watch',pendingFocus=null,highlightedKey=null;
   let stopWatch=()=>{},stopIntervalSeek=()=>{};
   function playerUI(){
     return typeof PlayerUI==='object'?PlayerUI:window.PlayerUI;
@@ -136,58 +136,6 @@
     saveDraft();
     if(lastData&&(forceResetIds||subjectChanged)){historyKey='';history(lastData);askAvailability(lastData);}
   }
-  function isAutoDetectorSupported(){
-    return !window.__TENNIS_AUTOFOCUS_FORCE_UNSUPPORTED&&typeof Worker==='function'&&typeof WebAssembly==='object'&&!!window.AutoFocusCore;
-  }
-  function autoCoachStats(data){
-    if(!owner||!Array.isArray(data?.jobs))return {used:0,remaining:2,inFlightRenders:[],completedUnsubmittedRenders:[],inFlightAi:[],failedRenders:[],excludedIntervals:[]};
-    const clipJobs=data.jobs.filter(j=>
-      j.body?.auto_detect===true&&
-      j.body?.source_id===owner.session.id&&
-      j.body?.publication===owner.session.published_at&&
-      j.body?.clip_id===owner.clip.id
-    );
-    const aiJobs=clipJobs.filter(j=>j.role==='ai');
-    const activeOrConsumedAi=aiJobs.filter(j=>
-      ['queued','leased','calling','completed','needs_review'].includes(j.state)||
-      (j.state==='failed'&&j.result?.provider_called===true)
-    );
-    const untransitionedRenders=clipJobs.filter(r=>
-      r.role==='render'&&
-      ['queued','leased','completed'].includes(r.state)&&
-      !aiJobs.some(a=>a.body?.export_id===r.id)
-    );
-    const inFlightRenders=untransitionedRenders.filter(r=>['queued','leased'].includes(r.state));
-    const completedUnsubmittedRenders=untransitionedRenders.filter(r=>r.state==='completed');
-    const failedRenders=clipJobs.filter(r=>r.role==='render'&&r.state==='failed'&&!aiJobs.some(a=>a.body?.export_id===r.id));
-    const inFlightAi=activeOrConsumedAi.filter(a=>['queued','leased','calling'].includes(a.state));
-    const origBase=Number(owner.clip.original_start_seconds)||0;
-    const jobLocalInterval=j=>{
-      const b=j?.body;
-      if(C.finite(b?.start)&&C.finite(b?.end)&&b.end>b.start){
-        return {start:Number(b.start),end:Number(b.end)};
-      }
-      if(C.finite(b?.original_start)&&C.finite(b?.original_end)&&b.original_end>b.original_start){
-        return {start:Math.max(0,Number(b.original_start)-origBase),end:Math.max(0,Number(b.original_end)-origBase)};
-      }
-      if(j?.role==='ai'&&b?.export_id){
-        const parentRender=clipJobs.find(r=>r.role==='render'&&r.id===b.export_id);
-        if(parentRender)return jobLocalInterval(parentRender);
-      }
-      return null;
-    };
-    const excludedIntervals=[...activeOrConsumedAi,...untransitionedRenders].map(jobLocalInterval).filter(Boolean);
-    const used=Math.min(2,activeOrConsumedAi.length+untransitionedRenders.length);
-    return {
-      used,
-      remaining:Math.max(0,2-used),
-      inFlightRenders,
-      completedUnsubmittedRenders,
-      inFlightAi,
-      failedRenders,
-      excludedIntervals
-    };
-  }
   function el(tag,text,cls){const n=document.createElement(tag);if(text!==undefined)n.textContent=text;if(cls)n.className=cls;return n;}
   async function api(path,body,method='POST'){
     const r=await fetch('/api/coaching/'+path,body===undefined?{}:{method,headers:{'Content-Type':'application/json','X-Tennis-Request':'1'},body:JSON.stringify(body)});
@@ -282,14 +230,13 @@
     if(lastData)askAvailability(lastData);
     else{
       if($('coach-ask'))$('coach-ask').disabled=value||!owner;
-      if($('coach-auto-ask'))$('coach-auto-ask').disabled=value||!owner||autoState==='unavailable';
     }
   }
   function button(text,action,cls='study-button'){const b=el('button',text,cls);b.type='button';b.onclick=action;return b;}
   function makePanel(){
     const panel=el('section',undefined,'study-panel coaching-panel');panel.id='coaching-panel';
     panel.innerHTML=`<h3>Ask a coach</h3>
-      <p class="study-muted">Ask coach uses your selected interval (0.1–30s); Auto detect &amp; ask scans the clip locally for up to 2 player-motion intervals. Applies your zoom and playback speed, sending up to 32 stills per review and your question to OpenAI.</p>
+      <p class="study-muted">Select a 0.1–30s interval (or use Auto select &amp; zoom above), set zoom and speed, then click Ask coach to send up to 32 stills and your question to AI coach.</p>
       <p id="coach-range"></p>
       <div class="coach-subject-group">
         <div class="coach-subject-label-row">
@@ -298,7 +245,7 @@
         </div>
         <select id="coach-subject" aria-label="Player to coach"></select>
         <p id="coach-player-context" class="study-hint"></p>
-        <label for="coach-subject-hint">Visible target cue <span>(optional, sent to OpenAI)</span><input id="coach-subject-hint" type="text" maxlength="160" placeholder="e.g. far-court player in dark shirt (no names)"></label>
+        <label for="coach-subject-hint">Visible target cue <span>(optional, sent to AI coach)</span><input id="coach-subject-hint" type="text" maxlength="160" placeholder="e.g. far-court player in dark shirt (no names)"></label>
       </div>
       <p id="coach-follow-up-context" class="study-hint" hidden></p>
       <label for="coach-preset">Preset<select id="coach-preset" aria-label="Preset">
@@ -312,10 +259,7 @@
       <label for="coach-question">Question for coach<textarea id="coach-question" rows="4" maxlength="4000"></textarea></label>
       <div class="coach-actions">
         <button class="study-button study-primary" id="coach-ask" type="button">Ask coach</button>
-        <button class="study-button study-secondary" id="coach-auto-ask" type="button" data-auto-coach-state="ready" data-auto-coach-remaining="2">Auto detect &amp; ask</button>
-        <button class="study-button" id="coach-auto-cancel" type="button" hidden>Cancel scan</button>
       </div>
-      <p id="coach-auto-quota" class="study-hint"></p>
       <p id="coach-status" role="status" aria-live="polite"></p>
       <div id="coach-history"></div>`;
     const sidebar=document.querySelector('.study-sidebar');
@@ -393,8 +337,6 @@
       if(lastData)askAvailability(lastData);
     });
     $('coach-ask').onclick=askCoach;
-    $('coach-auto-ask').onclick=autoCoach;
-    $('coach-auto-cancel').onclick=()=>{window.ClipStudy?.cancelScan?.();};
   }
   function captureSubjectSnapshot(targetOwner=owner){
     return C.resolveCoachingSubject({
@@ -454,11 +396,10 @@
     saveDraft();
   }
   async function askCoach(){
-    if(busy||scanningAuto||!owner)return;
+    if(busy||!owner)return;
     const current=owner,gen=generation;
     try{
       const captured=captureRecipe();
-      stickyNotice='';
       $('study-video').pause();
       setBusy(true);
       // If following up on the same completed export or if an identical export is already completed, go straight to AI request.
@@ -522,207 +463,6 @@
         if(lastData)askAvailability(lastData);
       }
     }
-  }
-  async function autoCoach(){
-    if(busy||scanningAuto||!owner)return;
-    if(!isAutoDetectorSupported()){
-      autoState='unavailable';
-      stickyNotice='Automatic detection is unavailable in this browser. Select an interval and use Ask coach.';
-      message(stickyNotice);
-      askAvailability(lastData);
-      return;
-    }
-    const current=owner,gen=generation;
-    if(!lastData){
-      await refresh(true);
-      if(owner!==current||gen!==generation)return;
-    }
-    const stats=autoCoachStats(lastData);
-    if(stats.remaining<=0){
-      stickyNotice='Automatic coach review limit reached for this clip (2 of 2 used). Use Ask coach for manual selections.';
-      message(stickyNotice);
-      askAvailability(lastData);
-      return;
-    }
-    const transform=window.ClipStudy?.coachingSelection?.();
-    if(!transform){
-      message('Wait for the clip to load');
-      return;
-    }
-    const question=$('coach-question').value.trim();
-    if(!question){
-      message('Enter a question up to 4000 characters');
-      return;
-    }
-    let subject;
-    try{
-      subject=captureSubjectSnapshot(current);
-    }catch(e){
-      message(e.message);
-      return;
-    }
-    const captured={
-      source_id:current.session.id,
-      clip_id:current.clip.id,
-      publication:current.session.published_at,
-      speed:transform.speed||0.5,
-      crop:[...(transform.crop||[0,0,1,1])],
-      quality:'balanced',
-      question,
-      subjectMode:subject.subjectMode,
-      playerId:subject.playerId,
-      playerProfileVersion:subject.playerProfileVersion,
-      subjectHint:subject.subjectHint,
-      batchId:cryptoId()
-    };
-    stickyNotice='';
-    scanningAuto=true;
-    autoState='scanning';
-    $('study-video')?.pause?.();
-    setBusy(true);
-    try{
-      message('Scanning clip for player motion…');
-      const scanResult=await window.ClipStudy.scanPlayerMoments({
-        maxWindows:()=>autoCoachStats(lastData).remaining,
-        excludedIntervals:()=>autoCoachStats(lastData).excludedIntervals,
-        onProgress:({index,total})=>{
-          if(owner===current&&gen===generation){
-            message(`Scanning clip for player motion (${index}/${total})…`);
-          }
-        }
-      });
-      if(owner!==current||gen!==generation)return;
-      scanningAuto=false;
-      const windows=scanResult?.windows||[];
-      if(!windows.length){
-        const latestStats=autoCoachStats(lastData);
-        autoState='ready';
-        stickyNotice=latestStats.excludedIntervals.length
-          ?'No additional player-motion moments detected in this clip. Adjust the interval and use Ask coach.'
-          :'No clear player motion detected in this clip. Adjust the interval and use Ask coach.';
-        message(stickyNotice);
-        return;
-      }
-      const origBase=current.clip.original_start_seconds||0;
-      const rangeLabels=windows.map((w,i)=>`#${i+1} ${C.clock(origBase+w.start)}–${C.clock(origBase+w.end)}`);
-      message(`Found ${windows.length} player-motion moment${windows.length===1?'':'s'} (${rangeLabels.join(', ')}) · preparing snapshot${windows.length===1?'':'s'}…`);
-      const createdRenders=[];
-      let partialConflictError='';
-      for(let i=0;i<windows.length;i++){
-        if(owner!==current||gen!==generation)return;
-        const w=windows[i];
-        try{
-          const renderJob=await api('exports',{
-            source_id:captured.source_id,
-            clip_id:captured.clip_id,
-            publication:captured.publication,
-            start:w.start,
-            end:w.end,
-            speed:captured.speed,
-            crop:captured.crop,
-            quality:captured.quality,
-            question:captured.question,
-            ...(captured.subjectMode?{subject_mode:captured.subjectMode}:{}),
-            player_id:captured.playerId,
-            player_profile_version:captured.playerProfileVersion,
-            ...(captured.subjectHint?{subject_hint:captured.subjectHint}:{}),
-            consent:true,
-            auto_detect:true,
-            auto_slot:i+1,
-            request_id:`${captured.batchId}-exp-${i+1}`
-          });
-          if(owner!==current||gen!==generation)return;
-          createdRenders.push(renderJob);
-        }catch(err){
-          if(owner!==current||gen!==generation)return;
-          if(createdRenders.length>0){
-            partialConflictError=err?.message||'Second moment skipped due to quota limit.';
-            break;
-          }
-          throw err;
-        }
-      }
-      if(createdRenders.length){
-        followUpId=null;
-        followUpOrigin=null;
-        $('coach-follow-up-context').hidden=true;
-        saveDraft();
-      }
-      if(partialConflictError){
-        stickyNotice=`Submitted 1 automatic review (${rangeLabels[0]}); ${partialConflictError}`;
-        message(stickyNotice);
-      }else{
-        stickyNotice=`Auto-detected ${createdRenders.length} moment${createdRenders.length===1?'':'s'} (${rangeLabels.slice(0,createdRenders.length).join(', ')}) · preparing coaching review${createdRenders.length===1?'':'s'}…`;
-        message(stickyNotice);
-      }
-      await refresh(true);
-    }catch(e){
-      if(owner===current&&gen===generation){
-        scanningAuto=false;
-        const unavailableCodes=['unavailable','unsupported','worker_graphics_unavailable'];
-        if(e?.name==='AbortError'){
-          autoState='ready';
-          stickyNotice='Auto-detect scan cancelled.';
-          message(stickyNotice);
-        }else if(unavailableCodes.includes(e?.code)){
-          autoState='unavailable';
-          stickyNotice='Automatic detection is unavailable in this browser. Select an interval and use Ask coach.';
-          message(stickyNotice);
-        }else{
-          autoState='ready';
-          stickyNotice=e?.message||'Auto-detect failed.';
-          message(stickyNotice);
-          if(e?.status===409)await syncPlayersFromServer(current,gen,{includeSession:true,forceResetIds:true});
-        }
-      }
-    }finally{
-      if(owner===current&&gen===generation){
-        scanningAuto=false;
-        setBusy(false);
-        if(lastData)askAvailability(lastData);
-      }
-    }
-  }
-  async function advancePendingAutoExports(data,current,gen){
-    if(owner!==current||gen!==generation||!current)return false;
-    const stats=autoCoachStats(data);
-    if(!stats.completedUnsubmittedRenders.length)return false;
-    let advanced=false;
-    for(const renderJob of stats.completedUnsubmittedRenders){
-      if(owner!==current||gen!==generation)return false;
-      if(current.failedAutoExports.has(renderJob.id)||current.submittingAutoExports.has(renderJob.id))continue;
-      current.submittingAutoExports.add(renderJob.id);
-      try{
-        const prompt=(renderJob.body.question||$('coach-question')?.value||defaultQuestion()).trim();
-        const playerCtx=renderJob.body.player_context||null;
-        const hasSavedPlayerCtx=Object.prototype.hasOwnProperty.call(renderJob.body,'player_context');
-        const savedSubjectMode=renderJob.body.subject_mode||(hasSavedPlayerCtx?(playerCtx?'main_player':'none'):null);
-        const savedSubjectHint=renderJob.body.subject_hint||null;
-        await api('requests',{
-          ...(savedSubjectMode?{subject_mode:savedSubjectMode}:{}),
-          player_id:hasSavedPlayerCtx?(playerCtx?playerCtx.player_id:null):(current.clip.main_player?.id||null),
-          player_profile_version:hasSavedPlayerCtx?(playerCtx?playerCtx.profile_version:null):(current.clip.main_player?.version||null),
-          ...(savedSubjectHint?{subject_hint:savedSubjectHint}:{}),
-          export_id:renderJob.id,
-          prompt,
-          consent:true,
-          auto_detect:true,
-          ...(Number.isInteger(renderJob.body.auto_slot)?{auto_slot:renderJob.body.auto_slot}:{}),
-          request_id:'auto-ai-'+renderJob.id
-        });
-        if(owner!==current||gen!==generation)return false;
-        advanced=true;
-      }catch(e){
-        if(owner!==current||gen!==generation)return false;
-        current.failedAutoExports.add(renderJob.id);
-        stickyNotice=e?.message||'Failed to submit automatic coaching request.';
-        message(stickyNotice);
-        if(e?.status===409)await syncPlayersFromServer(current,gen,{includeSession:true,forceResetIds:true});
-      }finally{
-        current.submittingAutoExports.delete(renderJob.id);
-      }
-    }
-    return advanced;
   }
   function jump(original){
     const clip=owner.clip;
@@ -945,7 +685,7 @@
     const aiJobs=data.jobs
       .filter(j=>j.role==='ai'&&(j.body.clip_id===owner.clip.id||j.body.original_start<owner.clip.original_end_seconds&&j.body.original_end>owner.clip.original_start_seconds));
     const pendingAutoRenders=data.jobs
-      .filter(j=>j.role==='render'&&j.body?.auto_detect===true&&j.body?.clip_id===owner.clip.id&&j.body?.publication===owner.session.published_at&&(['queued','leased','failed'].includes(j.state)||(j.state==='completed'&&owner.failedAutoExports.has(j.id)))&&!data.jobs.some(a=>a.role==='ai'&&a.body?.export_id===j.id));
+      .filter(j=>j.role==='render'&&j.body?.auto_detect===true&&j.body?.clip_id===owner.clip.id&&j.body?.publication===owner.session.published_at&&['queued','leased','failed'].includes(j.state)&&!data.jobs.some(a=>a.role==='ai'&&a.body?.export_id===j.id));
     const jobs=[...aiJobs,...pendingAutoRenders]
       .sort((a,b)=>((Number.isFinite(b.asked_at)?b.asked_at:(b.updated||0))-(Number.isFinite(a.asked_at)?a.asked_at:(a.updated||0)))||String(b.id||'').localeCompare(String(a.id||'')));
     if(!jobs.length){box.append(el('p','No coach responses yet.','study-muted'));return;}
@@ -955,24 +695,44 @@
         const origEnd=(owner.clip.original_start_seconds||0)+(j.body.end||0);
         const stateText=j.state==='failed'?'Failed':'Preparing clip…';
         const card=el('article',undefined,'coach-note');card.dataset.job=j.id;card.dataset.role='render';
-        card.append(el('strong',`${C.clock(origStart)}–${C.clock(origEnd)} · ${stateText} · Auto-detected`),el('p',formatAskedAt(j),'study-hint coach-asked-at'));
+        card.append(el('strong',`${C.clock(origStart)}–${C.clock(origEnd)} · ${stateText}`),el('p',formatAskedAt(j),'study-hint coach-asked-at'));
         const subjectText=formatJobSubject(j);
         if(subjectText)card.append(el('p',subjectText,'study-hint coach-job-subject'));
         if(j.body.question){const question=el('details');question.append(el('summary','Question asked'),el('p',j.body.question));card.append(question);}
         if(j.result?.error)card.append(el('p',j.result.error,'coach-warning'));
-        if(['queued','leased'].includes(j.state)||(j.state==='completed'&&owner.failedAutoExports.has(j.id))){
+        if(['queued','leased'].includes(j.state)){
           const current=owner,gen=generation;
-          card.append(button('Cancel request',async()=>{try{await api('jobs/'+j.id,{action:'cancel',version:j.version},'PUT');if(owner===current&&gen===generation){current.failedAutoExports.delete(j.id);await refresh(true);}}catch(e){if(owner===current&&gen===generation)message(e.message);}}));
+          card.append(button('Cancel request',async()=>{try{await api('jobs/'+j.id,{action:'cancel',version:j.version},'PUT');if(owner===current&&gen===generation)await refresh(true);}catch(e){if(owner===current&&gen===generation)message(e.message);}}));
         }
         box.append(card);
         continue;
       }
-      const card=el('article',undefined,'coach-note');card.dataset.job=j.id;card.append(el('strong',`${C.clock(j.body.original_start)}–${C.clock(j.body.original_end)} · ${states[j.state]||j.state}${j.body.auto_detect?' · Auto-detected':''}${j.body.follow_up_of?' · Follow-up':''}`),el('p',formatAskedAt(j),'study-hint coach-asked-at'));
+      const card=el('article',undefined,'coach-note');card.dataset.job=j.id;card.append(el('strong',`${C.clock(j.body.original_start)}–${C.clock(j.body.original_end)} · ${states[j.state]||j.state}${j.body.follow_up_of?' · Follow-up':''}`),el('p',formatAskedAt(j),'study-hint coach-asked-at'));
       const subjectText=formatJobSubject(j);
       if(subjectText)card.append(el('p',subjectText,'study-hint coach-job-subject'));
       const question=el('details');question.append(el('summary','Question asked'),el('p',j.body.prompt));card.append(question);
+      const cardActions=el('div',undefined,'coach-card-actions');
+      if(j.state==='completed'&&j.body.publication===owner.session.published_at){
+        cardActions.append(button('Re-ask',()=>followUp(j),'study-button'));
+      }
+      if(!['leased','calling'].includes(j.state)){
+        const current=owner,gen=generation;
+        cardActions.append(button('Delete review',async()=>{
+          try{
+            await api('jobs/'+j.id,{},'DELETE');
+            if(owner!==current||gen!==generation)return;
+            if(selectedAsk===j.id)selectedAsk=null;
+            if(selectedExport&&j.body?.export_id===selectedExport)selectedExport=null;
+            if(followUpId===j.id){followUpId=null;followUpOrigin=null;$('coach-follow-up-context').hidden=true;}
+            saveDraft();historyKey='';
+            await refresh(true);
+            window.dispatchEvent(new Event('coach-notes-changed'));
+            message('Coaching review deleted.');
+          }catch(e){if(owner===current&&gen===generation)message(e.message);}
+        },'study-button coach-delete-btn'));
+      }
+      if(cardActions.children.length)card.append(cardActions);
       if(j.state==='completed'){
-        if(j.body.publication===owner.session.published_at)card.append(button('Re-ask',()=>followUp(j),'study-button'));
         if(highlightedKey==='j:'+j.id)card.classList.add('is-highlighted');
         if(j.result.structured){const result=j.result.structured;if(result.summary)card.append(el('p',result.summary,'coach-summary'));for(const warning of result.validation_warnings)card.append(el('p',warning,'coach-warning'));if(result.parse_status==='unstructured')card.append(el('p','Timing unavailable. See the original response and frames.','study-hint'));
           for(const a of data.annotations.filter(a=>a.job_id===j.id))card.append(suggestionCard(a,j));
@@ -1001,38 +761,8 @@
     const capturing=!!window.ClipStudy?.isCapturing?.();
     const workersEnabled=data?.enabled!==false;
     const hasQuestion=!!$('coach-question')?.value.trim();
-    $('coach-ask').disabled=busy||scanningAuto||capturing||exportInProgress||aiInProgress||!workersEnabled||!hasQuestion;
+    $('coach-ask').disabled=busy||capturing||exportInProgress||aiInProgress||!workersEnabled||!hasQuestion;
     $('coach-ask').textContent='Ask coach';
-    const autoBtn=$('coach-auto-ask'),cancelBtn=$('coach-auto-cancel'),quotaEl=$('coach-auto-quota');
-    if(!autoBtn)return;
-    const stats=autoCoachStats(data);
-    const failedSet=owner?.failedAutoExports;
-    const submittingSet=owner?.submittingAutoExports;
-    const pendingAutoExports=stats.completedUnsubmittedRenders.filter(r=>!failedSet?.has(r.id));
-    let state='ready';
-    if(!isAutoDetectorSupported()||autoState==='unavailable'){
-      state='unavailable';
-    }else if(scanningAuto){
-      state='scanning';
-    }else if(stats.inFlightRenders.length>0||pendingAutoExports.length>0||stats.inFlightAi.length>0||(submittingSet?.size||0)>0){
-      state='submitting';
-    }else if(stats.remaining<=0){
-      state='capped';
-    }
-    autoBtn.dataset.autoCoachState=state;
-    autoBtn.dataset.autoCoachRemaining=String(stats.remaining);
-    autoBtn.disabled=state!=='ready'||busy||capturing||exportInProgress||aiInProgress||!workersEnabled||!hasQuestion;
-    autoBtn.textContent=state==='scanning'?'Scanning clip…':state==='submitting'?'Preparing auto review…':state==='capped'?'Auto detect & ask (2/2 used)':state==='unavailable'?'Auto detect unavailable':'Auto detect & ask';
-    if(cancelBtn)cancelBtn.hidden=!scanningAuto;
-    if(quotaEl){
-      if(state==='unavailable'){
-        quotaEl.textContent='Automatic detection unavailable in this browser · use Ask coach.';
-      }else if(state==='capped'){
-        quotaEl.textContent='0 of 2 automatic reviews remaining · Ask coach stays available.';
-      }else{
-        quotaEl.textContent=`${stats.remaining} of 2 automatic review${stats.remaining===1?'':'s'} remaining`;
-      }
-    }
   }
   function applyClipInterval(origStart,origEnd){
     stopIntervalSeek();
@@ -1141,29 +871,12 @@
           }
         }
       }
-      const advancedAuto=await advancePendingAutoExports(data,current,gen);
-      if(owner!==current||gen!==generation)return;
-      if(advancedAuto)return await refresh(true);
-      const key=JSON.stringify([data.jobs.map(j=>[j.id,j.version,j.state]),data.annotations.map(a=>[a.id,a.version,a.status]),[...current.failedAutoExports],knownPlayers().map(p=>[p.id,p.version,p.name])]);
+      const key=JSON.stringify([data.jobs.map(j=>[j.id,j.version,j.state]),data.annotations.map(a=>[a.id,a.version,a.status]),knownPlayers().map(p=>[p.id,p.version,p.name])]);
       if(force||key!==historyKey&&!document.activeElement?.closest('#coach-history')&&!$('coach-history').querySelector('.coach-editor[open]')){history(data);historyKey=key;}
       const focusOutcome=applyPendingFocus(data);
       askAvailability(data);
-      if(focusOutcome.preserveMessage||scanningAuto)return;
-      const stats=autoCoachStats(data);
-      const pendingAutoExports=stats.completedUnsubmittedRenders.filter(r=>!current.failedAutoExports.has(r.id));
-      if(stickyNotice.startsWith('Auto-detected ')&&!stats.inFlightRenders.length&&!pendingAutoExports.length&&!stats.inFlightAi.length){
-        const clipAutoAi=data.jobs.filter(x=>x.role==='ai'&&x.body?.auto_detect===true&&x.body?.clip_id===current.clip.id&&x.body?.publication===current.session.published_at);
-        const failedAutoAi=clipAutoAi.find(x=>x.state==='failed');
-        if(failedAutoAi){
-          stickyNotice=failedAutoAi.result?.error||'Failed to get coach response.';
-        }else if(stats.failedRenders.length){
-          stickyNotice=stats.failedRenders[0].result?.error||'Failed to prepare clip.';
-        }else if(clipAutoAi.some(x=>x.state==='completed')){
-          stickyNotice='Auto-detected coach response ready.';
-        }
-      }
+      if(focusOutcome.preserveMessage)return;
       if(!data.enabled)message('Coaching workers are not configured yet.');
-      else if(stickyNotice)message(stickyNotice);
       else if(ai&&['queued','leased','calling'].includes(ai.state))message('Getting response…');
       else if(ai&&ai.state==='failed')message(ai.result?.error||'Failed to get coach response.');
       else if(ai&&ai.state==='needs_review')message(states.needs_review);
@@ -1179,7 +892,7 @@
     open(session,clip){
       if(!$('coaching-panel'))makePanel();
       stopIntervalSeek();
-      generation++;owner={session,clip,failedAutoExports:new Set(),submittingAutoExports:new Set(),subjectCustomized:false,authoritativePlayers:false};selectedExport=null;selectedAsk=null;pendingAsk=null;requestId=null;busy=false;scanningAuto=false;autoState=isAutoDetectorSupported()?'ready':'unavailable';stickyNotice='';historyKey='';lastData=null;highlightedKey=null;
+      generation++;owner={session,clip,subjectCustomized:false,authoritativePlayers:false};selectedExport=null;selectedAsk=null;pendingAsk=null;requestId=null;busy=false;historyKey='';lastData=null;highlightedKey=null;
       $('clip-study').dataset.playerCollapsed='false';
       if($('study-mobile-collapse'))$('study-mobile-collapse').textContent='Hide player';
       followUpId=null;followUpOrigin=null;$('coach-follow-up-context').hidden=true;$('coach-status').textContent='';
@@ -1210,7 +923,7 @@
       }
       showRange();setBusy(false);showMode(focusing?'coach':'watch',false);syncPlayersFromServer(owner,generation);refresh(true);clearInterval(timer);timer=setInterval(()=>refresh(),4000);
     },
-    close(){window.ClipStudy?.cancelScan?.();stopIntervalSeek();saveDraft();pendingAsk=null;pendingFocus=null;highlightedKey=null;followUpOrigin=null;scanningAuto=false;stickyNotice='';generation++;owner=null;clearInterval(timer);},
+    close(){window.ClipStudy?.cancelScan?.();stopIntervalSeek();saveDraft();pendingAsk=null;pendingFocus=null;highlightedKey=null;followUpOrigin=null;generation++;owner=null;clearInterval(timer);},
     watch({session,clip,player}){
       stopWatch();let pendingSeek=null;
       const requested=new URL(location.href).searchParams.get('coach_time');

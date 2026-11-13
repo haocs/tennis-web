@@ -444,7 +444,7 @@
 
   function selectAutoCoachWindows(rawSamples, duration, options = {}) {
     if (!finite(duration) || duration < 0.1) return [];
-    const maxWindows = clamp(Math.floor(finite(options.maxWindows) ? options.maxWindows : 2), 0, 2);
+    const maxWindows = clamp(Math.floor(finite(options.maxWindows) ? options.maxWindows : 2), 0, 5);
     if (maxWindows <= 0) return [];
     const frameWidth = finite(options.frameWidth) && options.frameWidth > 0 ? options.frameWidth : 1;
     const frameHeight = finite(options.frameHeight) && options.frameHeight > 0 ? options.frameHeight : 1;
@@ -514,6 +514,29 @@
       const center = (start + end) * 0.5;
       const centerAlign = 1 - clamp(Math.abs(centroid - center) / Math.max(0.25, windowSpan * 0.5), 0, 1);
       const rankingScore = score + 0.03 * centerAlign;
+      let minX = 1, minY = 1, maxX = 0, maxY = 0;
+      for (const s of detected) {
+        const b = s.primary;
+        if (!b) continue;
+        minX = Math.min(minX, b.x);
+        minY = Math.min(minY, b.y);
+        maxX = Math.max(maxX, b.x + b.width);
+        maxY = Math.max(maxY, b.y + b.height);
+      }
+      let focusBox = null;
+      if (maxX > minX && maxY > minY) {
+        const fx = clamp(minX, 0, 1), fy = clamp(minY, 0, 1);
+        const fw = clamp(maxX - fx, 0, 1 - fx), fh = clamp(maxY - fy, 0, 1 - fy);
+        focusBox = {
+          x: Number(fx.toFixed(4)),
+          y: Number(fy.toFixed(4)),
+          width: Number(fw.toFixed(4)),
+          height: Number(fh.toFixed(4)),
+          cx: Number(clamp(fx + fw * 0.5, 0, 1).toFixed(4)),
+          cy: Number(clamp(fy + fh * 0.5, 0, 1).toFixed(4)),
+          area: Number((fw * fh).toFixed(4)),
+        };
+      }
       eligible.push({
         start,
         end,
@@ -523,6 +546,7 @@
         peakMotion: Number(peakMotion.toFixed(4)),
         detectedCount: detected.length,
         sampleCount: inWindow.length,
+        focusBox,
       });
     }
 
@@ -573,6 +597,7 @@
       peakMotion: w.peakMotion,
       detectedCount: w.detectedCount,
       sampleCount: w.sampleCount,
+      focusBox: w.focusBox || null,
     }));
   }
 

@@ -1385,42 +1385,72 @@ def _mock_playback_moments(page,ui_server,items):
 def test_moment_cues_default_durations_ranges_and_collapsed_area(browser,ui_server,width):
     page=browser.new_page(viewport={'width':width,'height':900})
     errors=[];page.on('pageerror',lambda error:errors.append(str(error)))
-    rows=[_playback_moment('point','highlight',.25),_playback_moment('coach-point','coach',.5),_playback_moment('range','note',.1,1.7)]
+    rows=[_playback_moment('point','highlight',.25),_playback_moment('note-point','note',.2),_playback_moment('coach-point','coach',.5),_playback_moment('range','note',.1,1.7)]
     rows[0]['body']['text']=''
     _mock_playback_moments(page,ui_server,rows)
     page.goto(ui_server+f'/review/{ID}?clip={CLIP}')
     expect(page.locator('#video-seek')).to_be_enabled()
     expect(page.locator('#moment-toggle')).to_have_attribute('aria-expanded','false')
     expect(page.get_by_role('button',name='Highlight this moment',exact=True)).to_be_visible()
-    expect(page.locator('.note-marker')).to_have_count(3)
+    expect(page.locator('.note-marker')).to_have_count(4)
     assert page.locator('#note-markers').evaluate("e=>e.parentElement.classList.contains('video-seek-label')")
     assert page.locator('#moment-cues').evaluate("e=>e.parentElement.id==='notes-panel'")
     empty_panel=page.locator('#notes-panel').bounding_box()
     bar_box=page.locator('.moment-bar').bounding_box()
     assert empty_panel['height']<=bar_box['height']+16
-    page.locator('#player').evaluate('v=>{v.pause();v.currentTime=.25;}')
+    page.evaluate("""() => {
+      model.session.clips[0].duration_seconds = 8;
+      model.session.clips[0].original_end_seconds = 8;
+      const v = document.getElementById('player');
+      let logicalTime = v.currentTime || 0;
+      Object.defineProperty(v, 'duration', {configurable: true, get: () => 8});
+      Object.defineProperty(v, 'currentTime', {
+        configurable: true,
+        get: () => logicalTime,
+        set: val => { logicalTime = Number(val) || 0; },
+      });
+      window.__setPlayerTime = t => {
+        v.pause();
+        v.currentTime = t;
+        v.dispatchEvent(new Event('timeupdate'));
+      };
+    }""")
+    page.evaluate('async () => await NoteUI.refresh(true)')
+    page.evaluate('() => window.__setPlayerTime(0.25)')
     expect(page.locator('[data-active-moment="point"]')).to_have_count(0)
     expect(page.locator('[data-active-moment="range"]')).to_be_visible()
+    expect(page.locator('[data-active-moment="note-point"]')).to_be_visible()
     with_teaser=page.locator('#notes-panel').bounding_box()
     cue_box=page.locator('[data-active-moment="range"]').bounding_box()
     assert with_teaser['height']>empty_panel['height']+20
     assert cue_box['y']>=with_teaser['y'] and cue_box['y']+cue_box['height']<=with_teaser['y']+with_teaser['height']+1
-    expect(page.locator('[data-active-moment="point"]')).to_have_count(0,timeout=2500)
-    # A point expiry does not repeatedly re-trigger at a paused playhead.
+    # Pausing keeps active cues visible (no wall-clock auto-hide while paused).
+    page.wait_for_timeout(350)
     expect(page.locator('[data-active-moment="range"]')).to_be_visible()
-    page.locator('#player').evaluate('v=>{v.currentTime=.5;}')
+    expect(page.locator('[data-active-moment="note-point"]')).to_be_visible()
+    page.evaluate('() => window.__setPlayerTime(0.5)')
     expect(page.locator('[data-active-moment="coach-point"]')).to_be_visible()
     with_two_teasers=page.locator('#notes-panel').bounding_box()
     assert with_two_teasers['height']>with_teaser['height']+20
-    expect(page.locator('[data-active-moment="coach-point"]')).to_have_count(0,timeout=6500)
+    page.wait_for_timeout(350)
+    expect(page.locator('[data-active-moment="coach-point"]')).to_be_visible()
     expect(page.locator('[data-active-moment="range"]')).to_be_visible()
-    page.locator('#player').evaluate('v=>{v.currentTime=1.75;}')
+    # Explicit interval hides once playback moves past end; point cues remain during their playback spans (3s note, 5s coach).
+    page.evaluate('() => window.__setPlayerTime(1.75)')
     expect(page.locator('[data-active-moment="range"]')).to_have_count(0)
-    page.locator('#player').evaluate('v=>{v.currentTime=.05;}')
+    expect(page.locator('[data-active-moment="note-point"]')).to_be_visible()
+    expect(page.locator('[data-active-moment="coach-point"]')).to_be_visible()
+    page.evaluate('() => window.__setPlayerTime(3.25)')
+    expect(page.locator('[data-active-moment="note-point"]')).to_have_count(0)
+    expect(page.locator('[data-active-moment="coach-point"]')).to_be_visible()
+    page.evaluate('() => window.__setPlayerTime(5.55)')
+    expect(page.locator('[data-active-moment="coach-point"]')).to_have_count(0)
     expect(page.locator('#moment-cues .moment-cue')).to_have_count(0)
     shrunk_panel=page.locator('#notes-panel').bounding_box()
     assert abs(shrunk_panel['height']-empty_panel['height'])<=2
-    page.locator('#player').evaluate('v=>{v.currentTime=.25;}')
+    page.evaluate('() => window.__setPlayerTime(0.05)')
+    expect(page.locator('#moment-cues .moment-cue')).to_have_count(0)
+    page.evaluate('() => window.__setPlayerTime(0.25)')
     expect(page.locator('[data-active-moment="point"]')).to_have_count(0)
     expect(page.locator('[data-active-moment="range"]')).to_be_visible()
     expect(page.locator('#player')).to_have_js_property('paused',True)
@@ -2750,7 +2780,6 @@ def test_auto_coach_real_worker_smoke_and_fallback(browser, ui_server):
     page = browser.new_page(viewport={'width': 1280, 'height': 900})
     requests = []
     errors = []
-    csp_violations = []
     page.on('request', lambda req: requests.append((req.method, req.url)))
     page.on('pageerror', lambda err: errors.append(str(err)))
     page.add_init_script("""(() => {
@@ -2775,11 +2804,12 @@ def test_auto_coach_real_worker_smoke_and_fallback(browser, ui_server):
     page.get_by_role('button', name='Study clip', exact=True).click()
     page.wait_for_function("() => document.querySelector('#study-video')?.readyState >= 2")
     assert page.evaluate('window.__autoCoachWorkerEvents.length') == 0
+    expect(page.locator('#coach-auto-ask')).to_have_count(0)
+    expect(page.locator('#coach-auto-quota')).to_have_count(0)
 
-    auto_btn = page.locator('#coach-auto-ask')
+    auto_btn = page.locator('#study-auto-detect')
     expect(auto_btn).to_be_enabled()
-    expect(auto_btn).to_have_attribute('data-auto-coach-state', 'ready')
-    expect(auto_btn).to_have_attribute('data-auto-coach-remaining', '2')
+    expect(auto_btn).to_have_text('Auto select & zoom')
     auto_btn.click()
 
     page.wait_for_function(
@@ -2789,12 +2819,14 @@ def test_auto_coach_real_worker_smoke_and_fallback(browser, ui_server):
     events = page.evaluate('window.__autoCoachWorkerEvents')
     assert any(e['type'] == 'send:init' for e in events)
     assert any(e['type'] == 'terminate' for e in events)
+    assert not any('/api/coaching/exports' in url or '/api/coaching/requests' in url for _, url in requests)
     unsupported = any(e['type'] == 'unsupported' and e.get('code') == 'worker_graphics_unavailable' for e in events)
     if unsupported:
         assert browser.browser_type.name != 'chromium', 'Reference Chromium must run real MediaPipe inference in Clip Study'
-        expect(auto_btn).to_have_attribute('data-auto-coach-state', 'unavailable')
+        expect(page.locator('#study-video')).to_have_attribute('data-auto-coach-state', 'unavailable')
         expect(auto_btn).to_be_disabled()
-        expect(page.locator('#coach-status')).to_contain_text('Automatic detection is unavailable in this browser.')
+        expect(auto_btn).to_have_text('Auto select unavailable')
+        expect(page.locator('#study-status')).to_contain_text('Auto select & zoom is unavailable in this browser.')
         expect(page.locator('#coach-ask')).to_be_enabled()
     else:
         assert int(page.locator('#study-video').get_attribute('data-auto-coach-detections') or '0') >= 1
@@ -2851,12 +2883,17 @@ def test_clip_study_auto_coach_detection_cap_cancellation_and_manual_coexistence
               } else {
                 detections = [box(0.45, 0.35, 0.16, 0.42)];
               }
-            } else if (scene === 'one_burst') {
-              if (t >= 2.0 && t <= 4.5) {
-                const shift = (t - 2.0) * 0.14;
-                detections = [box(0.32 + shift, 0.34, 0.16, 0.42)];
-              } else {
-                detections = [box(0.45, 0.35, 0.16, 0.42)];
+            } else if (scene === 'six_bursts') {
+              const centers = [3.75, 11.25, 18.75, 33.75, 41.25, 56.25];
+              for (let idx = 0; idx < centers.length; idx++) {
+                const c = centers[idx];
+                if (t >= c - 1.0 && t <= c + 1.0) {
+                  const dir = idx % 2 === 0 ? 1 : -1;
+                  const base = 0.22 + (idx % 3) * 0.2;
+                  const shift = (t - (c - 1.0)) * 0.12 * dir;
+                  detections = [box(base + shift, 0.30, 0.14, 0.36)];
+                  break;
+                }
               }
             }
             setTimeout(() => {
@@ -2872,13 +2909,9 @@ def test_clip_study_auto_coach_detection_cap_cancellation_and_manual_coexistence
       };
     })()""")
 
-    source = page.request.get(ui_server + f'/api/sessions/{ID}').json()
-    publication = source['published_at']
     state = dict(enabled=True, jobs=[], annotations=[], workers=[])
     export_calls = []
     ai_calls = []
-    cancel_calls = []
-    fail_second_export = {'conflict': False}
 
     def handle_sessions(route):
         route.fulfill(json=state)
@@ -2886,10 +2919,6 @@ def test_clip_study_auto_coach_detection_cap_cancellation_and_manual_coexistence
     def handle_exports(route):
         body = route.request.post_data_json
         export_calls.append(body)
-        if body.get('auto_detect') and body.get('auto_slot') == 2 and fail_second_export['conflict']:
-            fail_second_export['conflict'] = False
-            route.fulfill(status=409, json={'error': 'Automatic coach review limit reached for this clip (2 of 2 used).'})
-            return
         idx = len(export_calls)
         job = dict(
             id=f'exp-{idx}',
@@ -2909,44 +2938,9 @@ def test_clip_study_auto_coach_detection_cap_cancellation_and_manual_coexistence
         state['jobs'].append(job)
         route.fulfill(status=201, json=job)
 
-    def handle_requests(route):
-        body = route.request.post_data_json
-        ai_calls.append(body)
-        render_job = next(j for j in state['jobs'] if j['id'] == body['export_id'])
-        idx = len(ai_calls)
-        job = dict(
-            id=f'ai-{idx}',
-            version=1,
-            role='ai',
-            state='completed',
-            asked_at=1700020000.0 + idx,
-            updated=1700020010.0 + idx,
-            body=dict(
-                render_job['body'],
-                **body,
-                evidence_frames=[],
-            ),
-            result=dict(
-                answer=f'Coach review {idx}',
-                structured=dict(summary=f'Auto summary {idx}', validation_warnings=[], parse_status='valid'),
-            ),
-        )
-        state['jobs'].append(job)
-        route.fulfill(status=201, json=job)
-
-    def handle_job_put(route):
-        job_id = route.request.url.rsplit('/', 1)[-1]
-        body = route.request.post_data_json
-        cancel_calls.append((job_id, body))
-        target = next(j for j in state['jobs'] if j['id'] == job_id)
-        target['state'] = 'cancelled'
-        target['version'] += 1
-        route.fulfill(json=target)
-
     page.route('**/api/coaching/sessions/*', handle_sessions)
     page.route('**/api/coaching/exports', handle_exports)
-    page.route('**/api/coaching/requests', handle_requests)
-    page.route('**/api/coaching/jobs/*', handle_job_put)
+    page.route('**/api/coaching/requests', lambda route: (ai_calls.append(route.request.post_data_json), route.fulfill(status=201, json={})))
 
     page.goto(ui_server + f'/review/{ID}?clip={CLIP}')
     expect(page.locator('#video-seek')).to_be_enabled()
@@ -2957,38 +2951,45 @@ def test_clip_study_auto_coach_detection_cap_cancellation_and_manual_coexistence
       const proto = HTMLMediaElement.prototype;
       const realCurrentTime = Object.getOwnPropertyDescriptor(proto, 'currentTime');
       let logicalTime = 0;
-      Object.defineProperty(v, 'duration', {configurable: true, get: () => 12});
+      let mockDuration = 12;
+      Object.defineProperty(v, 'duration', {configurable: true, get: () => mockDuration});
       Object.defineProperty(v, 'currentTime', {
         configurable: true,
         get: () => logicalTime,
         set: val => {
           logicalTime = Number(val) || 0;
-          realCurrentTime.set.call(v, Math.min(1.95, Math.max(0, (logicalTime / 12) * 1.9)));
+          realCurrentTime.set.call(v, Math.min(1.95, Math.max(0, (logicalTime / mockDuration) * 1.9)));
         },
       });
+      window.__setMockDuration = d => { mockDuration = d; };
     }""")
     page.get_by_role('button', name='Study clip', exact=True).click()
     page.wait_for_function("() => document.querySelector('#study-video')?.readyState >= 2")
-    if width < 761:
-        page.locator('#study-mode-coach').click()
 
-    # Zero background scanning on modal open.
+    # Zero background scanning on modal open; old #coach-auto-* controls removed; model-neutral copy enforced.
     assert page.evaluate('window.__scanWorkers.length') == 0
     assert len(export_calls) == 0 and len(ai_calls) == 0
+    expect(page.locator('#coach-auto-ask')).to_have_count(0)
+    expect(page.locator('#coach-auto-quota')).to_have_count(0)
+    expect(page.locator('#coaching-panel .study-muted').first).to_contain_text('to send up to 32 stills and your question to AI coach')
+    coaching_text = page.locator('#coaching-panel').inner_text()
+    assert 'OpenAI' not in coaching_text
+    assert 'ChatGPT' not in coaching_text
+    prompt_actions_text = page.locator('.study-ai-actions').text_content() or ''
+    assert 'Copy prompt' in prompt_actions_text
+    for provider_label in ('ChatGPT', 'Claude', 'Gemini'):
+        assert provider_label not in prompt_actions_text
 
-    auto_btn = page.locator('#coach-auto-ask')
+    auto_btn = page.locator('#study-auto-detect')
+    cancel_btn = page.locator('#study-auto-cancel')
     expect(auto_btn).to_be_visible()
     expect(auto_btn).to_be_enabled()
-    expect(auto_btn).to_have_attribute('data-auto-coach-state', 'ready')
-    expect(auto_btn).to_have_attribute('data-auto-coach-remaining', '2')
-    expect(page.locator('#coaching-panel .study-muted').first).to_contain_text('sending up to 32 stills per review and your question to OpenAI')
-    expect(page.locator('#coach-auto-quota')).to_have_text('2 of 2 automatic reviews remaining')
+    expect(auto_btn).to_have_text('Auto select & zoom')
 
     # 1. Empty court / static scene -> 0 windows selected, 0 jobs created, truthful guidance shown.
     auto_btn.click()
-    expect(page.locator('#coach-status')).to_contain_text('No clear player motion detected in this clip. Adjust the interval and use Ask coach.')
+    expect(page.locator('#study-status')).to_contain_text('No clear player motion detected in this clip. Select an interval and zoom manually.')
     assert len(export_calls) == 0 and len(ai_calls) == 0
-    expect(auto_btn).to_have_attribute('data-auto-coach-remaining', '2')
     assert page.evaluate('window.__scanWorkers.at(-1).terminated') is True
 
     # 2. Cancellation during scan restores previous playhead and interval without submitting exports.
@@ -3001,15 +3002,15 @@ def test_clip_study_auto_coach_detection_cap_cancellation_and_manual_coexistence
       window.__scanDelayMs = 250;
     }""")
     auto_btn.click()
-    expect(auto_btn).to_have_attribute('data-auto-coach-state', 'scanning')
-    expect(page.locator('#coach-auto-cancel')).to_be_visible()
-    # Double-clicking while scanning must not spawn a second worker.
+    expect(auto_btn).to_have_text('Scanning…')
+    expect(cancel_btn).to_be_visible()
     workers_during_scan = page.evaluate('window.__scanWorkers.length')
     auto_btn.click(force=True)
     assert page.evaluate('window.__scanWorkers.length') == workers_during_scan
-    page.locator('#coach-auto-cancel').click()
-    expect(page.locator('#coach-status')).to_contain_text('Auto-detect scan cancelled.')
-    expect(page.locator('#coach-auto-cancel')).to_be_hidden()
+    cancel_btn.click()
+    expect(page.locator('#study-status')).to_contain_text('Auto select scan cancelled.')
+    expect(cancel_btn).to_be_hidden()
+    expect(auto_btn).to_have_text('Auto select & zoom')
     assert len(export_calls) == 0
     sel_after_cancel = page.evaluate('window.ClipStudy.coachingSelection()')
     assert sel_after_cancel['start'] == pytest.approx(0.3, abs=0.05)
@@ -3018,117 +3019,76 @@ def test_clip_study_auto_coach_detection_cap_cancellation_and_manual_coexistence
 
     # Closing Clip Study during an active scan also terminates the worker and submits 0 exports.
     auto_btn.click()
-    expect(auto_btn).to_have_attribute('data-auto-coach-state', 'scanning')
+    expect(auto_btn).to_have_text('Scanning…')
     page.get_by_role('button', name='← Back to review', exact=True).click()
     page.wait_for_function('() => window.__scanWorkers.at(-1)?.terminated === true')
     assert len(export_calls) == 0
     page.get_by_role('button', name='Study clip', exact=True).click()
     page.wait_for_function("() => document.querySelector('#study-video')?.readyState >= 2")
+
+    # 3. Two non-overlapping motion bursts: scans locally, applies zoom > 1 & focus crop, cycles Next moment (1/2) -> (2/2) -> (1/2) without spawning extra workers or API calls.
+    page.evaluate('() => { window.__scanDelayMs = 2; window.__scanScene = "two_bursts"; }')
+    workers_before_detect = page.evaluate('window.__scanWorkers.length')
+    auto_btn.click()
+    expect(auto_btn).to_have_text('Next moment (1/2)')
+    expect(page.locator('#study-status')).to_contain_text('Selected 1 of 2 moments')
+    assert page.evaluate('window.__scanWorkers.length') == workers_before_detect + 1
+    assert len(export_calls) == 0 and len(ai_calls) == 0
+
+    sel1 = page.evaluate('window.ClipStudy.coachingSelection()')
+    assert sel1['zoom'] > 1.0
+    assert 0 < min(sel1['crop'][2], sel1['crop'][3]) < 1.0
+    assert page.locator('#study-video').evaluate('v => v.currentTime') == pytest.approx(sel1['start'], abs=0.08)
+
+    # Clicking again cycles locally to moment 2 without spawning another worker.
+    auto_btn.click()
+    expect(auto_btn).to_have_text('Next moment (2/2)')
+    expect(page.locator('#study-status')).to_contain_text('Moment 2 of 2:')
+    assert page.evaluate('window.__scanWorkers.length') == workers_before_detect + 1
+    sel2 = page.evaluate('window.ClipStudy.coachingSelection()')
+    assert sel2['start'] > sel1['start']
+    assert sel2['zoom'] > 1.0
+    assert sel2['crop'] != sel1['crop']
+    assert len(export_calls) == 0 and len(ai_calls) == 0
+
+    # Clicking again wraps back to moment 1.
+    auto_btn.click()
+    expect(auto_btn).to_have_text('Next moment (1/2)')
+    assert page.evaluate('window.ClipStudy.coachingSelection().start') == pytest.approx(sel1['start'], abs=0.05)
+
+    # 4. Manual Ask coach sends the locally auto-selected interval and zoomed crop (without auto_detect flag).
+    page.locator('#study-speed').select_option('0.25')
     if width < 761:
         page.locator('#study-mode-coach').click()
+    page.get_by_role('textbox', name='Question for coach', exact=True).fill('Check split step and recovery on zoomed moment')
+    page.locator('#coach-ask').click()
+    assert len(export_calls) == 1
+    assert not export_calls[0].get('auto_detect')
+    assert export_calls[0]['start'] == pytest.approx(sel1['start'], abs=0.05)
+    assert export_calls[0]['end'] == pytest.approx(sel1['end'], abs=0.05)
+    assert export_calls[0]['speed'] == 0.25
+    assert 0 < min(export_calls[0]['crop'][2], export_calls[0]['crop'][3]) < 1.0
 
-    # 3. Two non-overlapping motion bursts: set custom question, speed 0.25x, and zoom crop, then run Auto detect & ask.
-    page.evaluate('() => { window.__scanDelayMs = 2; window.__scanScene = "two_bursts"; }')
+    # 5. Up to 5 moments cap on a 60s multi-burst clip.
+    page.evaluate("""() => {
+      model.session.clips[1].duration_seconds = 60;
+      model.session.clips[1].original_start_seconds = 20;
+      model.session.clips[1].original_end_seconds = 80;
+      window.__setMockDuration(60);
+      window.__scanScene = 'six_bursts';
+    }""")
+    page.get_by_role('button', name='← Back to review', exact=True).click()
+    expect(page.locator('#clip-study')).to_be_hidden()
+    page.wait_for_function('() => window.ClipStudy.coachingSelection() === null')
+    page.evaluate('() => { window.ClipStudy.open({session: model.session, clip: model.session.clips[1], player: document.getElementById("player"), url: document.getElementById("player").getAttribute("src")}); }')
+    expect(page.locator('#clip-study')).to_be_visible()
+    page.wait_for_function("() => document.querySelector('#study-video')?.readyState >= 2")
     if width < 761:
         page.locator('#study-mode-watch').click()
-    page.locator('#study-speed').select_option('0.25')
-    zoom = page.get_by_role('slider', name='Video zoom', exact=True)
-    zoom.press('Home')
-    for _ in range(3):
-        zoom.press('ArrowRight')
-    if width < 761:
-        page.locator('#study-mode-coach').click()
-    page.get_by_role('textbox', name='Question for coach', exact=True).fill('Check split step and recovery on auto moments')
     auto_btn.click()
-
-    page.wait_for_function('() => document.querySelectorAll("#coach-history .coach-note").length === 2')
-    assert len(export_calls) == 2
-    assert export_calls[0]['auto_detect'] is True and export_calls[1]['auto_detect'] is True
-    assert export_calls[0]['consent'] is True and export_calls[1]['consent'] is True
-    assert export_calls[0]['auto_slot'] == 1 and export_calls[1]['auto_slot'] == 2
-    assert export_calls[0]['speed'] == 0.25 and export_calls[1]['speed'] == 0.25
-    assert export_calls[0]['question'] == 'Check split step and recovery on auto moments'
-    assert 0 < min(export_calls[0]['crop'][2:]) < 1
-    assert export_calls[0]['crop'] == export_calls[1]['crop']
-    assert export_calls[0]['request_id'] != export_calls[1]['request_id']
-    # Non-overlapping windows in chronological order.
-    w1, w2 = sorted(export_calls[:2], key=lambda c: c['start'])
-    assert w1['end'] <= w2['start'] + 1e-6
-
-    # Both render jobs are queued: auto button is disabled in 'submitting' state with 0 remaining.
-    expect(auto_btn).to_have_attribute('data-auto-coach-state', 'submitting')
-    expect(auto_btn).to_have_attribute('data-auto-coach-remaining', '0')
-    expect(auto_btn).to_be_disabled()
-    expect(page.locator('#coach-history')).to_contain_text('Preparing clip… · Auto-detected')
-
-    # Complete exp-1 and fail exp-2 pre-call: exp-1 advances to POST /api/coaching/requests, while exp-2 releases its slot!
-    state['jobs'][0].update(state='completed', version=2, result={'artifact_directory': 'f1'})
-    state['jobs'][1].update(state='failed', version=2, result={'error': 'Render worker interrupted'})
-    page.evaluate('() => window.Coach.open(model.session, model.session.clips[0])')
-    if width < 761:
-        page.locator('#study-mode-coach').click()
-    page.wait_for_function('() => document.querySelector("#coach-auto-ask")?.dataset.autoCoachState === "ready"')
-    assert len(ai_calls) == 1
-    assert ai_calls[0]['export_id'] == 'exp-1'
-    assert ai_calls[0]['auto_detect'] is True
-    assert ai_calls[0]['request_id'] == 'auto-ai-exp-1'
-    expect(auto_btn).to_have_attribute('data-auto-coach-remaining', '1')
-    expect(page.locator('#coach-auto-quota')).to_contain_text('1 of 2 automatic review remaining')
-    expect(page.locator('#coach-history')).to_contain_text('Auto summary 1')
-    expect(page.locator('#coach-history')).to_contain_text('Ready · Auto-detected')
-
-    # 4. With 1 slot remaining (exp-1 succeeded, exp-2 failed), clicking Auto detect & ask excludes exp-1's interval, selects the other eligible burst (exp-2's region), and reaches the 2/2 cap.
-    auto_btn.click()
-    page.wait_for_function('() => document.querySelector("#coach-history")?.innerText.includes("Preparing clip…")')
-    assert len(export_calls) == 3
-    assert export_calls[2]['start'] >= export_calls[0]['end'], f'Retry must not duplicate consumed first interval: {export_calls[:3]}'
-    assert export_calls[2]['start'] == pytest.approx(export_calls[1]['start'], abs=0.05)
-    assert export_calls[2]['end'] == pytest.approx(export_calls[1]['end'], abs=0.05)
-    # Complete exp-3 -> advances to ai-2 -> reaches 2 of 2 cap.
-    state['jobs'][-1].update(state='completed', version=2, result={'artifact_directory': 'f3'})
-    page.evaluate('() => window.Coach.open(model.session, model.session.clips[0])')
-    if width < 761:
-        page.locator('#study-mode-coach').click()
-    page.wait_for_function('() => document.querySelector("#coach-auto-ask")?.dataset.autoCoachState === "capped"')
-    assert len(ai_calls) == 2
-    expect(auto_btn).to_have_attribute('data-auto-coach-state', 'capped')
-    expect(auto_btn).to_have_attribute('data-auto-coach-remaining', '0')
-    expect(auto_btn).to_be_disabled()
-    expect(page.locator('#coach-auto-quota')).to_contain_text('0 of 2 automatic reviews remaining')
-
-    # Reopening Clip Study preserves the capped state.
-    page.get_by_role('button', name='← Back to review', exact=True).click()
-    page.get_by_role('button', name='Study clip', exact=True).click()
-    if width < 761:
-        page.locator('#study-mode-coach').click()
-    expect(auto_btn).to_have_attribute('data-auto-coach-state', 'capped')
-    expect(auto_btn).to_be_disabled()
-
-    # 5. Manual Ask coach remains enabled and functional when the automatic cap is full.
-    expect(page.locator('#coach-ask')).to_be_enabled()
-    page.get_by_role('textbox', name='Question for coach', exact=True).fill('Manual question after auto cap reached')
-    page.locator('#coach-ask').click()
-    assert len(export_calls) == 4
-    assert not export_calls[-1].get('auto_detect')
-
-    # 6. Another clip in the same recording has its own 2-review quota, and a 409 conflict on the 2nd window preserves the 1st submission with a partial-success notice.
-    fail_second_export['conflict'] = True
-    page.evaluate("""() => {
-      model.session.clips[1].duration_seconds = 12;
-      model.session.clips[1].original_start_seconds = 20;
-      model.session.clips[1].original_end_seconds = 32;
-      window.Coach.open(model.session, model.session.clips[1]);
-    }""")
-    if width < 761:
-        page.locator('#study-mode-coach').click()
-    expect(auto_btn).to_have_attribute('data-auto-coach-state', 'ready')
-    expect(auto_btn).to_have_attribute('data-auto-coach-remaining', '2')
-    auto_btn.click()
-    expect(page.locator('#coach-status')).to_contain_text('Submitted 1 automatic review')
-    expect(page.locator('#coach-status')).to_contain_text('Automatic coach review limit reached for this clip (2 of 2 used).')
-    assert len(export_calls) == 6
-    assert export_calls[-2]['clip_id'] == 'c' * 24 and export_calls[-2]['auto_slot'] == 1
-    assert export_calls[-1]['clip_id'] == 'c' * 24 and export_calls[-1]['auto_slot'] == 2
+    expect(auto_btn).to_have_text('Next moment (1/5)')
+    expect(page.locator('#study-status')).to_contain_text('Selected 1 of 5 moments')
+    assert len(export_calls) == 1
 
     for check_w in (320, 390, 1280):
         page.set_viewport_size({'width': check_w, 'height': 844})
@@ -3189,13 +3149,6 @@ def test_clip_study_auto_coach_long_clip_watchdog_and_stale_abort_regressions(br
               } else {
                 detections = [box(0.45, 0.35, 0.16, 0.42)];
               }
-            } else if (scene === 'long_60s_one_burst') {
-              if (t >= 9.5 && t <= 13.0) {
-                const shift = ((t - 9.5) / 3.5) * 0.22;
-                detections = [box(0.28 + shift, 0.34, 0.16, 0.42)];
-              } else {
-                detections = [];
-              }
             }
             setTimeout(() => {
               if (!this.terminated) {
@@ -3210,72 +3163,17 @@ def test_clip_study_auto_coach_long_clip_watchdog_and_stale_abort_regressions(br
       };
     })()""")
 
-    source = page.request.get(ui_server + f'/api/sessions/{ID}').json()
-    publication = source['published_at']
     state = dict(enabled=True, jobs=[], annotations=[], workers=[])
     export_calls = []
     ai_calls = []
-    stale_switch_on_first_ai = {'active': False}
 
-    def handle_sessions(route):
-        route.fulfill(json=state)
-
-    def handle_exports(route):
-        body = route.request.post_data_json
-        export_calls.append(body)
-        idx = len(export_calls)
-        job = dict(
-            id=f'exp-long-{idx}',
-            version=1,
-            role='render',
-            state='queued',
-            asked_at=1700010000.0 + idx,
-            updated=1700010000.0 + idx,
-            body=dict(
-                body,
-                original_start=body['start'],
-                original_end=body['end'],
-                player_context=None,
-            ),
-            result={},
-        )
-        state['jobs'].append(job)
-        route.fulfill(status=201, json=job)
-
-    def handle_requests(route):
-        body = route.request.post_data_json
-        ai_calls.append(body)
-        if stale_switch_on_first_ai['active'] and body.get('export_id') == 'exp-stale-1':
-            stale_switch_on_first_ai['active'] = False
-            # Switch clip (or close) while first request is in flight, then reject the first request!
-            page.evaluate('() => window.Coach.open(model.session, model.session.clips[1])')
-            route.fulfill(status=409, json={'error': 'First auto export was cancelled before AI submission'})
-            return
-        render_job = next(j for j in state['jobs'] if j['id'] == body['export_id'])
-        idx = len(ai_calls)
-        job = dict(
-            id=f'ai-long-{idx}',
-            version=1,
-            role='ai',
-            state='completed',
-            asked_at=1700020000.0 + idx,
-            updated=1700020010.0 + idx,
-            body=dict(render_job['body'], **body, evidence_frames=[]),
-            result=dict(
-                answer=f'Coach review {idx}',
-                structured=dict(summary=f'Auto summary {idx}', validation_warnings=[], parse_status='valid'),
-            ),
-        )
-        state['jobs'].append(job)
-        route.fulfill(status=201, json=job)
-
-    page.route('**/api/coaching/sessions/*', handle_sessions)
-    page.route('**/api/coaching/exports', handle_exports)
-    page.route('**/api/coaching/requests', handle_requests)
+    page.route('**/api/coaching/sessions/*', lambda route: route.fulfill(json=state))
+    page.route('**/api/coaching/exports', lambda route: (export_calls.append(route.request.post_data_json), route.fulfill(status=201, json={})))
+    page.route('**/api/coaching/requests', lambda route: (ai_calls.append(route.request.post_data_json), route.fulfill(status=201, json={})))
 
     page.goto(ui_server + f'/review/{ID}?clip={CLIP}')
     expect(page.locator('#video-seek')).to_be_enabled()
-    # Configure 60s clip duration to verify >40s clips select 2 non-overlapping moments in Clip Study.
+    # Configure 60s clip duration to verify >40s clips select 2 non-overlapping moments locally in Clip Study.
     page.evaluate("""() => {
       model.session.clips[0].duration_seconds = 60;
       model.session.clips[0].original_end_seconds = 60;
@@ -3296,8 +3194,9 @@ def test_clip_study_auto_coach_long_clip_watchdog_and_stale_abort_regressions(br
     page.get_by_role('button', name='Study clip', exact=True).click()
     page.wait_for_function("() => document.querySelector('#study-video')?.readyState >= 2")
 
-    auto_btn = page.locator('#coach-auto-ask')
-    expect(auto_btn).to_have_attribute('data-auto-coach-state', 'ready')
+    auto_btn = page.locator('#study-auto-detect')
+    expect(auto_btn).to_be_enabled()
+    expect(auto_btn).to_have_text('Auto select & zoom')
 
     # 1. Total scan watchdog: each sample takes 55ms (< detectTimeoutMs=2000ms), but cumulative scan exceeds scanTimeoutMs=160ms.
     page.evaluate("""() => {
@@ -3309,168 +3208,67 @@ def test_clip_study_auto_coach_long_clip_watchdog_and_stale_abort_regressions(br
       window.__TENNIS_AUTOFOCUS_CONFIG = {detectTimeoutMs: 2000, scanTimeoutMs: 160};
     }""")
     auto_btn.click()
-    expect(page.locator('#coach-status')).to_contain_text('Auto-detect scan timed out. Try again or select an interval and use Ask coach.')
+    expect(page.locator('#study-status')).to_contain_text('Auto-detect scan timed out. Try again or select an interval and use Ask coach.')
     expect(page.locator('#study-video')).to_have_attribute('data-auto-coach-state', 'error')
-    expect(auto_btn).to_have_attribute('data-auto-coach-state', 'ready')
     expect(auto_btn).to_be_enabled()
+    expect(auto_btn).to_have_text('Auto select & zoom')
     assert page.evaluate('window.__scanWorkers.at(-1).terminated') is True
-    assert len(export_calls) == 0
+    assert len(export_calls) == 0 and len(ai_calls) == 0
     sel_after_timeout = page.evaluate('window.ClipStudy.coachingSelection()')
     assert sel_after_timeout['start'] == pytest.approx(4.0, abs=0.05)
     assert sel_after_timeout['end'] == pytest.approx(12.0, abs=0.05)
     assert page.locator('#study-video').evaluate('v => v.currentTime') == pytest.approx(6.5, abs=0.08)
 
-    # 2. Runtime detector_error stays recoverable ('ready'), whereas worker_graphics_unavailable becomes 'unavailable'.
+    # 2. Runtime detector_error stays recoverable (enabled), whereas worker_graphics_unavailable disables #study-auto-detect cleanly.
     page.evaluate("""() => {
       window.__scanDelayMs = 2;
       window.__TENNIS_AUTOFOCUS_CONFIG = {detectTimeoutMs: 8000, scanTimeoutMs: 45000};
       window.__workerMode = 'detector_error';
     }""")
     auto_btn.click()
-    expect(page.locator('#coach-status')).to_contain_text('Automatic detection failed on this clip. Try again or select an interval and use Ask coach.')
+    expect(page.locator('#study-status')).to_contain_text('Automatic detection failed on this clip. Try again or select an interval and use Ask coach.')
     expect(page.locator('#study-video')).to_have_attribute('data-auto-coach-state', 'error')
-    expect(auto_btn).to_have_attribute('data-auto-coach-state', 'ready')
     expect(auto_btn).to_be_enabled()
 
     page.evaluate("() => { window.__workerMode = 'unsupported'; }")
     auto_btn.click()
-    expect(page.locator('#coach-status')).to_contain_text('Automatic detection is unavailable in this browser. Select an interval and use Ask coach.')
+    expect(page.locator('#study-status')).to_contain_text('Auto select & zoom is unavailable in this browser.')
     expect(page.locator('#study-video')).to_have_attribute('data-auto-coach-state', 'unavailable')
-    expect(auto_btn).to_have_attribute('data-auto-coach-state', 'unavailable')
     expect(auto_btn).to_be_disabled()
+    expect(auto_btn).to_have_text('Auto select unavailable')
     expect(page.locator('#coach-ask')).to_be_enabled()
 
-    # Re-open with normal worker mode to test 60s clip auto-detection (2 non-overlapping windows from <=16 paired samples).
+    # Re-open with normal worker mode to test 60s clip paired-sample auto-detection (2 non-overlapping moments from 16 samples, zero auto exports).
     page.evaluate("""() => {
       window.__workerMode = 'normal';
-      window.Coach.open(model.session, model.session.clips[0]);
+      document.getElementById('clip-study').close();
     }""")
-    expect(auto_btn).to_have_attribute('data-auto-coach-state', 'ready')
+    page.get_by_role('button', name='Study clip', exact=True).click()
+    page.wait_for_function("() => document.querySelector('#study-video')?.readyState >= 2")
+    expect(auto_btn).to_be_enabled()
     auto_btn.click()
-    page.wait_for_function('() => document.querySelectorAll("#coach-history .coach-note").length === 2')
-    assert len(export_calls) == 2
+    expect(auto_btn).to_contain_text('Next moment (1/')
+    assert len(export_calls) == 0 and len(ai_calls) == 0
     assert int(page.locator('#study-video').get_attribute('data-auto-coach-detections') or '0') == 16
-    w1, w2 = sorted(export_calls, key=lambda c: c['start'])
-    assert w1['end'] <= w2['start']
-    assert w1['start'] < 20.0 and w2['start'] >= 35.0
+    total_moments = int(auto_btn.inner_text().split('/')[1].rstrip(')'))
+    assert 2 <= total_moments <= 5
+    windows_seen = []
+    for idx in range(total_moments):
+        if idx > 0:
+            auto_btn.click()
+            expect(auto_btn).to_have_text(f'Next moment ({idx + 1}/{total_moments})')
+        sel = page.evaluate('window.ClipStudy.coachingSelection()')
+        assert sel['zoom'] > 1.0
+        windows_seen.append(sel)
+    for prev, nxt in zip(windows_seen, windows_seen[1:]):
+        assert prev['end'] <= nxt['start'] + 1e-6
+    assert windows_seen[0]['start'] < 20.0 and windows_seen[-1]['start'] >= 35.0
+    assert len(export_calls) == 0 and len(ai_calls) == 0
 
-    # 2b. Retry diversity on single-burst vs pre-call failed/cancelled intervals:
-    # First: if w1 failed pre-call (e.g. AI failed before calling, provider_called not true) and w2 was cancelled, both intervals are eligible again on retry!
-    state['jobs'] = [
-        dict(
-            id='exp-precall-1',
-            version=2,
-            role='render',
-            state='completed',
-            asked_at=1700025001.0,
-            updated=1700025002.0,
-            body=dict(source_id=ID, publication=publication, clip_id=CLIP, start=w1['start'], end=w1['end'], original_start=w1['start'], original_end=w1['end'], speed=0.5, crop=[0, 0, 1, 1], quality='balanced', question='Q1', auto_detect=True, auto_slot=1, player_context=None),
-            result={'artifact_directory': 'f-pre1'},
-        ),
-        dict(
-            id='ai-precall-1',
-            version=2,
-            role='ai',
-            state='failed',
-            asked_at=1700025003.0,
-            updated=1700025004.0,
-            body=dict(source_id=ID, publication=publication, clip_id=CLIP, export_id='exp-precall-1', start=w1['start'], end=w1['end'], original_start=w1['start'], original_end=w1['end'], prompt='Q1', auto_detect=True, evidence_frames=[]),
-            result={'error': 'Worker preflight failed'},
-        ),
-        dict(
-            id='exp-cancel-2',
-            version=2,
-            role='render',
-            state='cancelled',
-            asked_at=1700025005.0,
-            updated=1700025006.0,
-            body=dict(source_id=ID, publication=publication, clip_id=CLIP, start=w2['start'], end=w2['end'], original_start=w2['start'], original_end=w2['end'], speed=0.5, crop=[0, 0, 1, 1], quality='balanced', question='Q2', auto_detect=True, auto_slot=2, player_context=None),
-            result={},
-        ),
-    ]
-    export_calls.clear()
-    page.evaluate("""() => {
-      window.__scanScene = 'long_60s_one_burst';
-      window.Coach.open(model.session, model.session.clips[0]);
-    }""")
-    expect(auto_btn).to_have_attribute('data-auto-coach-remaining', '2')
-    auto_btn.click()
-    page.wait_for_function('() => document.querySelector("#coach-auto-ask")?.dataset.autoCoachState === "submitting"')
-    assert len(export_calls) == 1
-    assert export_calls[0]['start'] < 20.0 and export_calls[0]['end'] <= 22.0
-
-    # Now w1 is in-flight/consumed (exp-long-1 queued) and no second burst exists in 'long_60s_one_burst':
-    # Mark exp-long-1 completed -> advances to ai -> 1 of 2 used (1 remaining), then click Auto detect & ask again -> must select 0 windows and NOT duplicate w1!
-    state['jobs'][-1].update(state='completed', version=2, result={'artifact_directory': 'f-one-1'})
-    page.evaluate('() => window.Coach.open(model.session, model.session.clips[0])')
-    page.wait_for_function('() => document.querySelector("#coach-auto-ask")?.dataset.autoCoachState === "ready"')
-    expect(auto_btn).to_have_attribute('data-auto-coach-remaining', '1')
-    exports_before_rescan = len(export_calls)
-    auto_btn.click()
-    expect(page.locator('#coach-status')).to_contain_text('No additional player-motion moments detected in this clip. Adjust the interval and use Ask coach.')
-    assert len(export_calls) == exports_before_rescan, 'Must not submit duplicate export when sole eligible burst was already reviewed'
-    expect(auto_btn).to_have_attribute('data-auto-coach-remaining', '1')
-
-    # 3. Stale rejected submission in advancePendingAutoExports after clip switch must NOT post the 2nd export!
-    state['jobs'] = [
-        dict(
-            id='exp-stale-1',
-            version=1,
-            role='render',
-            state='completed',
-            asked_at=1700030001.0,
-            updated=1700030002.0,
-            body=dict(
-                source_id=ID,
-                publication=publication,
-                clip_id=CLIP,
-                start=2.0,
-                end=6.0,
-                original_start=2.0,
-                original_end=6.0,
-                speed=0.5,
-                crop=[0, 0, 1, 1],
-                quality='balanced',
-                question='Stale export 1',
-                auto_detect=True,
-                auto_slot=1,
-                player_context=None,
-            ),
-            result={'artifact_directory': 'f-stale-1'},
-        ),
-        dict(
-            id='exp-stale-2',
-            version=1,
-            role='render',
-            state='completed',
-            asked_at=1700030003.0,
-            updated=1700030004.0,
-            body=dict(
-                source_id=ID,
-                publication=publication,
-                clip_id=CLIP,
-                start=10.0,
-                end=14.0,
-                original_start=10.0,
-                original_end=14.0,
-                speed=0.5,
-                crop=[0, 0, 1, 1],
-                quality='balanced',
-                question='Stale export 2',
-                auto_detect=True,
-                auto_slot=2,
-                player_context=None,
-            ),
-            result={'artifact_directory': 'f-stale-2'},
-        ),
-    ]
-    ai_calls.clear()
-    stale_switch_on_first_ai['active'] = True
-    page.evaluate('() => window.Coach.open(model.session, model.session.clips[0])')
-    page.wait_for_function('() => document.querySelector("#coach-auto-ask")?.dataset.autoCoachRemaining === "2"')
-    # Wait briefly to confirm no trailing second POST occurs after the rejected first POST.
-    page.wait_for_timeout(150)
-    assert [c['export_id'] for c in ai_calls] == ['exp-stale-1'], f'Expected only first stale export to be attempted before switch, got {ai_calls}'
+    for check_w in (320, 390, 1280):
+        page.set_viewport_size({'width': check_w, 'height': 844})
+        assert not page.evaluate('document.documentElement.scrollWidth > innerWidth'), f'Overflow at {check_w}px'
+        assert page.locator('#clip-study').evaluate('d => d.scrollWidth <= d.clientWidth'), f'Dialog overflow at {check_w}px'
     assert not errors
     page.close()
 
@@ -3742,7 +3540,7 @@ def test_coaching_subject_selector_auto_coach_reopen_followup_and_learning(brows
         # 3. Select Blair + visible target cue, click Ask coach, and switch dropdown mid-render: pending job keeps Blair!
         subject_sel.select_option(blair['id'])
         expect(page.locator('#coach-player-context')).to_contain_text('For BlairPrivate (this request only; clip player unchanged)')
-        expect(page.locator('#coach-player-context')).to_contain_text('Auto detect scans foreground motion, not player identity.')
+        expect(page.locator('#coach-player-context')).to_contain_text('Auto select & zoom scans foreground motion, not player identity.')
         page.locator('#coach-subject-hint').fill('far-court player in dark shirt')
         page.locator('#coach-question').fill('Check split-step posture for Blair')
         page.locator('#coach-ask').click()
@@ -3790,60 +3588,35 @@ def test_coaching_subject_selector_auto_coach_reopen_followup_and_learning(brows
         claimed_blair_v2 = finish_next_ai('Blair v2 follow-on summary', title='Pro unit turn')
         assert claimed_blair_v2['body']['player_context']['profile_version'] == 2
 
-        # 5. Auto detect & ask with Blair (v2), switch dropdown & close Clip Study while renders run, reopen -> frozen Blair handoff & per-clip 2-review cap.
-        page.evaluate('() => window.Coach.open(model.session, model.session.clips[0])')
+        # 5. Local Auto select & zoom selects and zooms to a burst without auto-submitting; then manual Ask coach submits the zoomed crop for Blair (v2).
+        if width < 761:
+            page.locator('#study-mode-watch').click()
+        auto_btn = page.locator('#study-auto-detect')
+        expect(auto_btn).to_be_enabled()
+        auto_btn.click()
+        expect(auto_btn).to_have_text('Next moment (1/2)')
+        zoomed_sel = page.evaluate('window.ClipStudy.coachingSelection()')
+        assert zoomed_sel['zoom'] > 1.0
+        assert 0 < min(zoomed_sel['crop'][2], zoomed_sel['crop'][3]) < 1.0
+        assert [j for j in c.get(f'/api/coaching/sessions/{ID}').json['jobs'] if j['body'].get('auto_detect')] == []
+
         if width < 761:
             page.locator('#study-mode-coach').click()
         subject_sel.select_option(blair['id'])
         page.locator('#coach-subject-hint').fill('backhand corner player')
-        page.locator('#coach-question').fill('Auto check footwork bursts')
-        auto_btn = page.locator('#coach-auto-ask')
-        expect(auto_btn).to_have_attribute('data-auto-coach-remaining', '2')
-        auto_btn.click()
-        expect(auto_btn).to_have_attribute('data-auto-coach-state', 'submitting')
-        expect(auto_btn).to_have_attribute('data-auto-coach-remaining', '0')
+        page.locator('#coach-question').fill('Check zoomed split step and recovery')
+        page.locator('#coach-ask').click()
+        blair_zoomed_ai = fulfill_manual_ask('Blair zoomed moment 1 summary', title='Burst 1 recovery')
+        assert blair_zoomed_ai['body']['subject_mode'] == 'selected_player'
+        assert blair_zoomed_ai['body']['player_context']['player_id'] == blair['id']
+        assert blair_zoomed_ai['body']['player_context']['profile_version'] == 2
+        assert blair_zoomed_ai['body']['subject_hint'] == 'backhand corner player'
+        assert 0 < min(blair_zoomed_ai['body']['crop'][2], blair_zoomed_ai['body']['crop'][3]) < 1.0
 
-        # Switch dropdown to No player profile and close Clip Study while both auto renders are still queued!
-        subject_sel.select_option('')
-        page.locator('#coach-subject-hint').fill('')
-        page.get_by_role('button', name='← Back to review', exact=True).click()
-        expect(page.locator('#clip-study')).not_to_be_visible()
-
-        finish_next_render()
-        finish_next_render()
-
-        # Reopen Clip Study: advancePendingAutoExports must submit both AI jobs with frozen Blair v2 + 'backhand corner player'.
-        page.get_by_role('button', name='Study clip', exact=True).click()
-        if width < 761:
-            page.locator('#study-mode-coach').click()
-        # Wait until both auto AI jobs exist in SQLite before claiming them.
-        for _ in range(50):
-            listed_ai = [j for j in c.get(f'/api/coaching/sessions/{ID}').json['jobs'] if j['role'] == 'ai' and j['body'].get('auto_detect')]
-            if len(listed_ai) == 2:
-                break
-            page.wait_for_timeout(100)
-        assert len(listed_ai) == 2
-        auto_ai_1 = finish_next_ai('Blair auto burst 1 summary', title='Burst 1 recovery')
-        auto_ai_2 = finish_next_ai('Blair auto burst 2 summary', title='Burst 2 recovery')
-        for auto_job in (auto_ai_1, auto_ai_2):
-            assert auto_job['body']['subject_mode'] == 'selected_player'
-            assert auto_job['body']['player_context']['player_id'] == blair['id']
-            assert auto_job['body']['player_context']['profile_version'] == 2
-            assert auto_job['body']['subject_hint'] == 'backhand corner player'
-
+        # 6. Explicit No player profile review + Re-ask subject restoration vs switching subject to start an independent review.
         page.evaluate('() => window.Coach.open(model.session, model.session.clips[0])')
         if width < 761:
             page.locator('#study-mode-coach').click()
-        expect(auto_btn).to_have_attribute('data-auto-coach-state', 'capped')
-        expect(auto_btn).to_have_attribute('data-auto-coach-remaining', '0')
-        # Switching #coach-subject across Alex, Blair, and No player profile NEVER resets the per-clip 2-review cap.
-        for candidate_val in (alex['id'], blair['id'], ''):
-            subject_sel.select_option(candidate_val)
-            expect(auto_btn).to_have_attribute('data-auto-coach-state', 'capped')
-            expect(auto_btn).to_have_attribute('data-auto-coach-remaining', '0')
-            expect(auto_btn).to_be_disabled()
-
-        # 6. Explicit No player profile review + Re-ask subject restoration vs switching subject to start an independent review.
         subject_sel.select_option('')
         page.locator('#coach-subject-hint').fill('')
         page.locator('#coach-question').fill('General unassigned rally geometry')
@@ -3874,6 +3647,27 @@ def test_coaching_subject_selector_auto_coach_reopen_followup_and_learning(brows
         assert claimed_alex['body']['player_context']['player_id'] == alex['id']
         assert 'follow_up_of' not in claimed_alex['body']
 
+        # Accept Alex's suggestion so it renders as an active coaching Moment in playback, and create one disposable Alex review for Clip Study deletion.
+        page.evaluate('() => window.Coach.open(model.session, model.session.clips[0])')
+        if width < 761:
+            page.locator('#study-mode-coach').click()
+        alex_card = page.locator(f'.coach-note[data-job="{claimed_alex["id"]}"]')
+        alex_card.get_by_role('button', name='Use in playback', exact=True).click()
+        expect(alex_card.locator('.coach-review-state')).to_have_text('Saved · Active in playback')
+
+        page.locator('#coach-question').fill('Disposable Alex check to delete in Clip Study')
+        page.locator('#coach-ask').click()
+        temp_alex = fulfill_manual_ask('Temp Alex summary', title='Disposable note')
+        page.evaluate('() => window.Coach.open(model.session, model.session.clips[0])')
+        if width < 761:
+            page.locator('#study-mode-coach').click()
+        temp_card = page.locator(f'.coach-note[data-job="{temp_alex["id"]}"]')
+        expect(temp_card).to_be_visible()
+        temp_card.get_by_role('button', name='Delete review', exact=True).click()
+        expect(page.locator('#coach-status')).to_have_text('Coaching review deleted.')
+        expect(temp_card).to_have_count(0)
+        assert c.get(f'/api/coaching/jobs/{temp_alex["id"]}').status_code == 404
+
         for check_w in (320, 390, 1280):
             page.set_viewport_size({'width': check_w, 'height': 844})
             assert not page.evaluate('document.documentElement.scrollWidth > innerWidth'), f'Overflow at {check_w}px'
@@ -3888,15 +3682,24 @@ def test_coaching_subject_selector_auto_coach_reopen_followup_and_learning(brows
         assert final_sess['clips'][1]['player_assignment'] == sess_after_add['clips'][1]['player_assignment']
         assert [p['id'] for p in final_sess['recording_players']] == [alex['id']]
 
-        # 7. Navigate to /learning: verify requested-player attribution, zero false mismatch warning, Plan eligibility, and exclusion of 'none'.
+        # 6b. Delete Alex's review from the Watch page Moments menu and confirm complete removal.
+        if page.locator('#moment-toggle').get_attribute('aria-expanded') == 'false':
+            page.locator('#moment-toggle').click()
+        alex_moment = page.locator(f'#notes-list .note-item[data-note="coach-response:{claimed_alex["id"]}"]')
+        expect(alex_moment).to_be_visible()
+        alex_moment.locator('.note-actions-menu summary').click()
+        alex_moment.locator('[data-note-action="delete-coach"]').click()
+        expect(alex_moment).to_have_count(0)
+        assert c.get(f'/api/coaching/jobs/{claimed_alex["id"]}').status_code == 404
+
+        # 7. Navigate to /learning: verify requested-player attribution, zero false mismatch warning, Plan eligibility, exclusion of 'none', and Delete review.
         page.goto(base_url + f'/learning?player={blair["id"]}')
-        expect(page.locator('#learning-tab-reviews')).to_have_text('Reviews (4)')
+        expect(page.locator('#learning-tab-reviews')).to_have_text('Reviews (3)')
         expect(page.locator('.learning-card')).to_have_count(1)
         blair_reviews_text = page.locator('#learning-clips').inner_text()
         assert 'Blair manual stance summary' in blair_reviews_text
         assert 'Blair v2 follow-on summary' in blair_reviews_text
-        assert 'Blair auto burst 1 summary' in blair_reviews_text
-        assert 'Blair auto burst 2 summary' in blair_reviews_text
+        assert 'Blair zoomed moment 1 summary' in blair_reviews_text
         assert 'Selected player for this review · Target: far-court player in dark shirt' in blair_reviews_text
         assert 'Current clip has a different or unassigned player' not in blair_reviews_text
         assert 'Alex main player summary' not in blair_reviews_text
@@ -3905,13 +3708,16 @@ def test_coaching_subject_selector_auto_coach_reopen_followup_and_learning(brows
         page.locator('#learning-tab-plan').click()
         expect(page.locator('#learning-banner-headline')).to_have_text('Ready to generate a learning plan from your saved coaching reviews.')
 
-        page.locator('#learning-player').select_option(alex['id'])
         page.locator('#learning-tab-reviews').click()
-        expect(page.locator('#learning-tab-reviews')).to_have_text('Reviews (1)')
-        alex_reviews_text = page.locator('#learning-clips').inner_text()
-        assert 'Alex main player summary' in alex_reviews_text
-        assert 'Blair manual stance summary' not in alex_reviews_text
-        assert 'Unassigned rally summary' not in alex_reviews_text
+        page.locator('.learning-review', has_text='Blair zoomed moment 1 summary').get_by_role('button', name='Delete review', exact=True).click()
+        expect(page.locator('#learning-tab-reviews')).to_have_text('Reviews (2)')
+        assert 'Blair zoomed moment 1 summary' not in page.locator('#learning-clips').inner_text()
+        assert c.get(f'/api/coaching/jobs/{blair_zoomed_ai["id"]}').status_code == 404
+
+        page.locator('#learning-player').select_option(alex['id'])
+        expect(page.locator('#learning-tab-reviews')).to_have_text('Reviews')
+        assert 'Alex main player summary' not in page.locator('#learning-clips').inner_text()
+        assert 'Temp Alex summary' not in page.locator('#learning-clips').inner_text()
 
         for check_w in (320, 390, 1280):
             page.set_viewport_size({'width': check_w, 'height': 844})

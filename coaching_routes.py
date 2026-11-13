@@ -87,7 +87,7 @@ def register_coaching(app,library,session):
         if render['role']!='render' or render['state']!='completed':abort(409,'Prepare an excerpt first')
         if render['body'].get('intent')=='share':abort(400,'Share downloads cannot be used as coaching evidence')
         if not isinstance(prompt,str) or not 1<=len(prompt.strip())<=4000:abort(400,'Enter a question up to 4000 characters')
-        if b.get('consent') is not True:abort(400,'Confirm sending selected frames and your question to OpenAI')
+        if b.get('consent') is not True:abort(400,'Confirm sending selected frames and your question to AI coach')
         spec=render['body'];data=session(spec['source_id'])
         if spec['publication']!=data['published_at']:abort(409,'Recording changed; prepare a fresh excerpt')
         parent_id=b.get('follow_up_of')
@@ -155,6 +155,17 @@ def register_coaching(app,library,session):
         except KeyError:abort(404,'Coaching request not found')
         except QueueConflict:raise
         except ValueError as e:abort(400,str(e))
+
+    @routes.delete('/api/coaching/jobs/<identity>')
+    def delete_job(identity):
+        try:
+            return jsonify(queue.delete_job(identity, media_root=root))
+        except KeyError:
+            abort(404, 'Coaching request not found')
+        except QueueConflict:
+            raise
+        except ValueError as e:
+            abort(400, str(e))
 
     @routes.get('/api/coaching/exports/<identity>/<name>')
     def artifact(identity,name):

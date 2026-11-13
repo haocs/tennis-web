@@ -10,19 +10,27 @@ test('projects original-time moments onto full or clip time and excludes metadat
  assert.equal(timeline([a],{mode:'clip',clipId:'c1'}).length,0);
  assert.equal(timeline([moment('archived',1,{status:'archived'}),moment('legacy',1,{eligible:false}),{...a,record_class:'entity_metadata',kind:'usefulness'}]).length,0);
 });
-test('point text dismisses at three wall-clock seconds even when paused',()=>{
+test('point text follows playback time rather than wall clock and stays visible while paused',()=>{
  const events=timeline([moment('h',2)]),clock=new CueClock();
+ assert.equal(events[0].end,5);
  assert.equal(clock.tick(events,2,0).length,1);
- assert.equal(clock.tick(events,2,2999).length,1);
- assert.equal(clock.tick(events,2,3000).length,0);
- assert.equal(clock.tick(events,2,4000).length,0); // no repeated trigger at a paused playhead
+ assert.equal(clock.tick(events,2,100000).length,1);
+ assert.equal(clock.tick(events,4.99,100001).length,1);
+ assert.equal(clock.tick(events,5,100002).length,0);
 });
-test('point coaching dismisses at five seconds without inventing an end timestamp',()=>{
+test('point coaching ends after five seconds of playback time without inventing an end timestamp',()=>{
  const a=moment('coach',1,{kind:'coach'}),clock=new CueClock(),events=timeline([a]);
+ assert.equal(events[0].end,6);
  assert.equal(clock.tick(events,1,0).length,1);
- assert.equal(clock.tick(events,1,4999).length,1);
- assert.equal(clock.tick(events,1,5000).length,0);
+ assert.equal(clock.tick(events,5.99,100000).length,1);
+ assert.equal(clock.tick(events,6,100001).length,0);
  assert.equal(a.target.end_seconds,undefined);
+});
+test('point end clamps to clip boundary and playback timeline without bleeding into next clip',()=>{
+ const a=moment('h-end',18,{clip:'c1',local:8,playback:8});
+ const events=timeline([a],{clips:[{id:'c1',original_start_seconds:10,original_end_seconds:20,playback_start_seconds:0}]});
+ assert.equal(events[0].start,8);
+ assert.equal(events[0].end,10);
 });
 test('explicit ends use playback time and remain visible while paused',()=>{
  const events=timeline([moment('range',2,{end:5})]),clock=new CueClock();
@@ -36,22 +44,23 @@ test('seeks reconcile the landing position rather than firing every skipped mome
  clock.tick(events,0,0);
  assert.deepEqual(clock.tick(events,9,10,{discontinuity:true}).map(e=>e.id),['eight']);
  assert.deepEqual(clock.tick(events,1,20,{discontinuity:true}).map(e=>e.id),['one']);
- assert.equal(clock.tick(events,1,3021).length,0);
+ assert.equal(clock.tick(events,4,3021).length,0);
  assert.equal(clock.tick(events,1,4000,{discontinuity:true}).length,1);
 });
-test('replaying and changing media resets point cues',()=>{
+test('seeking back to a point cue shows it again at that playback position',()=>{
  const events=timeline([moment('one',1)]),clock=new CueClock();
- clock.tick(events,1,0);assert.equal(clock.tick(events,1.2,3001).length,0);
- assert.equal(clock.tick(events,1,3002).length,1);
+ assert.equal(clock.tick(events,1,0).length,1);
+ assert.equal(clock.tick(events,4,100).length,0);
+ assert.equal(clock.tick(events,1,200).length,1);
  clock.reset();assert.equal(clock.tick(events,1,4000).length,1);
 });
-test('supports overlapping cues, fast playback crossings, minimum 5s coach teaser and half-open ends',()=>{
+test('supports overlapping cues and half-open playback ends without wall-clock extensions',()=>{
  const events=timeline([moment('h',1),moment('coach',1,{kind:'coach',end:2}),moment('note-range',1,{kind:'note',end:2})]),clock=new CueClock();
  clock.tick(events,.9,0);
  assert.deepEqual(clock.tick(events,1.4,100,{playing:true,rate:2}).map(e=>e.id).sort(),['coach','h','note-range']);
- // At playback position 2 (4000ms wall clock), note-range and 3s highlight have expired, while 5s coach teaser remains visible until 5100ms.
- assert.deepEqual(clock.tick(events,2,4000).map(e=>e.id),['coach']);
- assert.equal(clock.tick(events,2,5100).length,0);
+ // At playback position 2, interval cues with end=2 expire even when wall-clock time barely moved, while point h (end=4) stays active.
+ assert.deepEqual(clock.tick(events,2,150).map(e=>e.id),['h']);
+ assert.equal(clock.tick(events,4,200).length,0);
 });
 test('Jump is current-scope, includes all types, wraps, and groups coincident destinations',()=>{
  const items=[moment('first',1),moment('comment',2,{kind:'note'}),moment('same',2),moment('later',8,{clip:'c2',local:1,playback:4})];

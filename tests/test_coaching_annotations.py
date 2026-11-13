@@ -235,3 +235,55 @@ def test_follow_up_reuses_evidence_and_retains_previous_response(setup):
     assert c.get('/api/coaching/jobs/'+job['id']).json['result']['answer']==raw
     assert post(c,'requests',dict(body,request_id='bad-parent-001',follow_up_of=ai['body']['export_id'])).status_code==400
     assert post(c,'requests',dict(body,request_id='bad-parent-002',follow_up_of=[])).status_code==400
+
+
+def test_delete_coaching_review_removes_job_annotations_evidence_and_orphaned_artifacts(setup):
+    H = {'X-Tennis-Request': '1'}
+    app, c, data, ai, folder = prepared(setup)
+    job = claimed(c)
+    manifest = pin(app, c, job, folder)
+    raw = json.dumps(dict(schema_version=2, summary='Review to delete.', suggestions=[suggestion(manifest)]))
+    complete(c, job, raw)
+
+    # Confirm consent error message uses neutral "to AI coach" copy.
+    no_consent = post(c, 'requests', dict(export_id=ai['body']['export_id'], prompt='Retry?', consent=False, request_id='consent-check-1'))
+    assert no_consent.status_code == 400 and 'to AI coach' in no_consent.json['error']
+
+    # Follow-up shares the same render export and frame hashes.
+    fu = post(c, 'requests', dict(export_id=ai['body']['export_id'], prompt='Follow up?', consent=True, request_id='del-follow-up', follow_up_of=job['id'])).json
+    fu_job = claimed(c)
+    manifest_fu = pin(app, c, fu_job, folder)
+    complete(c, fu_job, json.dumps(dict(schema_version=2, summary='Follow-up review.', suggestions=[suggestion(manifest_fu)])))
+
+    # In-flight calling job returns 409 and refuses deletion.
+    third = post(c, 'requests', dict(export_id=ai['body']['export_id'], prompt='Active?', consent=True, request_id='del-active-req')).json
+    claimed_third = claimed(c)
+    pin(app, c, claimed_third, folder)
+    assert post(c, f"worker/jobs/{claimed_third['id']}/calling", {'token': claimed_third['token']}, TOKEN).status_code == 200
+    assert c.delete(f"/api/coaching/jobs/{claimed_third['id']}", headers=H, json={}).status_code == 409
+
+    # Non-review jobs (render / share) return 400.
+    assert c.delete(f"/api/coaching/jobs/{ai['body']['export_id']}", headers=H, json={}).status_code == 400
+
+    cache_dir = Path(app.config['COACH_MEDIA_ROOT']) / 'evidence/frames'
+    frame_files = [cache_dir / f"{f['sha256']}.jpg" for f in manifest['frames']]
+    assert all(p.is_file() for p in frame_files)
+
+    # Deleting the first review leaves shared render folder and shared frame files intact for the follow-up.
+    del1 = c.delete(f"/api/coaching/jobs/{job['id']}", headers=H, json={})
+    assert del1.status_code == 200, del1.json
+    assert del1.json['deleted_export_id'] is None
+    assert Path(folder).is_dir()
+    assert all(p.is_file() for p in frame_files)
+
+    # Finish active third request so fu & third can be deleted and orphan cleanup verified.
+    assert post(c, f"worker/jobs/{claimed_third['id']}/complete", {'token': claimed_third['token'], 'result': {'answer': 'Done', 'analysis_mode': 'timestamped_frames'}}, TOKEN).status_code == 200
+    assert c.delete(f"/api/coaching/jobs/{claimed_third['id']}", headers=H, json={}).status_code == 200
+    del_last = c.delete(f"/api/coaching/jobs/{fu['id']}", headers=H, json={})
+    assert del_last.status_code == 200, del_last.json
+    assert del_last.json['deleted_export_id'] == ai['body']['export_id']
+    assert not (Path(app.config['COACH_MEDIA_ROOT']) / ai['body']['export_id']).exists()
+    assert all(not p.exists() for p in frame_files)
+    assert c.get(f"/api/coaching/jobs/{job['id']}").status_code == 404
+    assert c.get(f"/api/coaching/sessions/{ID}").json['jobs'] == []
+    assert c.get(f"/api/coaching/sessions/{ID}").json['annotations'] == []

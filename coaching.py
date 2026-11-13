@@ -6,10 +6,12 @@ import math
 from pathlib import Path
 import re
 import secrets
+import shutil
 import sqlite3
 import time
 import uuid
 from coaching_annotations import Annotations
+from storage import inside
 from worker.tennis_coach.annotations import RENDER_SHARE_CAPABILITY
 
 MAX_AUTO_REVIEWS_PER_CLIP = 2
@@ -154,7 +156,7 @@ def recipe(body, data, clip):
         if not question.strip():
             raise ValueError('Enter a question up to 4000 characters')
         if body.get('consent') is not True:
-            raise ValueError('Confirm sending selected frames and your question to OpenAI')
+            raise ValueError('Confirm sending selected frames and your question to AI coach')
     auto_slot = body.get('auto_slot')
     if auto_slot is not None and (type(auto_slot) is not int or auto_slot not in (1, 2)):
         raise ValueError('Invalid auto coach slot')
@@ -661,3 +663,83 @@ class Coaching(Annotations):
             else:raise ValueError('Invalid action')
             db.execute('UPDATE jobs SET state=?,result=?,token=NULL,updated=?,version=version+1 WHERE id=?',(state,json.dumps(result),self.clock(),identity));db.commit()
         return self.get(identity)
+
+    def delete_job(self, identity, media_root=None):
+        """Completely remove a coaching review, its annotations, and orphaned media artifacts."""
+        deleted_export_id = None
+        unreferenced_hashes = set()
+        ann_ids = []
+        with self.db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT * FROM jobs WHERE id=?', (identity,)).fetchone()
+            if not row:
+                raise KeyError(identity)
+            body = json.loads(row['body'])
+            state = row['state']
+            if row['role'] != 'ai' or body.get('purpose') == 'learning_plan' or body.get('intent') == 'share':
+                raise ValueError('Only coaching reviews can be deleted')
+            if state in ('leased', 'calling'):
+                raise QueueConflict('This coaching request is currently running; wait for it to finish before deleting')
+            ann_ids = [r['id'] for r in db.execute('SELECT id FROM annotations WHERE job_id=?', (identity,)).fetchall()]
+            for ann_id in ann_ids:
+                db.execute('DELETE FROM annotation_revisions WHERE annotation_id=?', (ann_id,))
+            db.execute('DELETE FROM annotations WHERE job_id=?', (identity,))
+            candidate_hashes = set()
+            ev_row = db.execute('SELECT manifest FROM evidence WHERE job_id=?', (identity,)).fetchone()
+            if ev_row:
+                try:
+                    manifest = json.loads(ev_row['manifest'])
+                    for frame in manifest.get('frames', []):
+                        if isinstance(frame, dict) and isinstance(frame.get('sha256'), str):
+                            candidate_hashes.add(frame['sha256'])
+                except ValueError:
+                    pass
+            for frame in (body.get('evidence_frames') or []):
+                if isinstance(frame, dict) and isinstance(frame.get('sha256'), str):
+                    candidate_hashes.add(frame['sha256'])
+            db.execute('DELETE FROM evidence WHERE job_id=?', (identity,))
+            db.execute('DELETE FROM jobs WHERE id=?', (identity,))
+            export_id = body.get('export_id')
+            if isinstance(export_id, str) and export_id:
+                other_ai = db.execute(
+                    "SELECT 1 FROM jobs WHERE role='ai' AND json_extract(body, '$.export_id')=?",
+                    (export_id,),
+                ).fetchone()
+                if not other_ai:
+                    render_row = db.execute('SELECT id, role, state FROM jobs WHERE id=?', (export_id,)).fetchone()
+                    if render_row and render_row['role'] == 'render' and render_row['state'] != 'leased':
+                        db.execute('DELETE FROM jobs WHERE id=?', (export_id,))
+                        deleted_export_id = export_id
+            if candidate_hashes:
+                referenced_hashes = set()
+                for row_m in db.execute('SELECT manifest FROM evidence').fetchall():
+                    try:
+                        for frame in json.loads(row_m['manifest']).get('frames', []):
+                            if isinstance(frame, dict) and frame.get('sha256') in candidate_hashes:
+                                referenced_hashes.add(frame['sha256'])
+                    except ValueError:
+                        pass
+                if len(referenced_hashes) < len(candidate_hashes):
+                    for row_j in db.execute("SELECT body FROM jobs WHERE role='ai'").fetchall():
+                        try:
+                            for frame in (json.loads(row_j['body']).get('evidence_frames') or []):
+                                if isinstance(frame, dict) and frame.get('sha256') in candidate_hashes:
+                                    referenced_hashes.add(frame['sha256'])
+                        except ValueError:
+                            pass
+                unreferenced_hashes = candidate_hashes - referenced_hashes
+            db.commit()
+        if media_root is not None:
+            root = Path(media_root).resolve()
+            if deleted_export_id:
+                try:
+                    shutil.rmtree(inside(root, deleted_export_id), ignore_errors=True)
+                except ValueError:
+                    pass
+            for sha in unreferenced_hashes:
+                if re.fullmatch(r'[a-f0-9]{64}', sha):
+                    try:
+                        inside(root, 'evidence/frames/' + sha + '.jpg').unlink(missing_ok=True)
+                    except ValueError:
+                        pass
+        return {'deleted': identity, 'deleted_export_id': deleted_export_id, 'deleted_annotations': ann_ids}

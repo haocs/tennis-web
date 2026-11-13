@@ -578,3 +578,24 @@ test('selectAutoCoachWindows excludes consumed or in-flight intervals on retry w
   assert.equal(longRetry.length, 1);
   assert.equal(longRetry[0].start, longInitial[1].start);
 });
+
+test('selectAutoCoachWindows returns focusBox union and supports up to 5 local moments', () => {
+  const bursts = [2, 16, 30, 44];
+  const samples = [];
+  for (let b = 0; b < bursts.length; b += 1) {
+    const start = bursts[b];
+    for (let k = 0; k < 4; k += 1) {
+      samples.push({
+        time: start + k * 1.2,
+        detections: [{x: 0.15 + b * 0.12 + (k % 2) * 0.08, y: 0.35, width: 0.12, height: 0.36, score: 0.92, categoryName: 'person'}],
+      });
+    }
+  }
+  const windows = selectAutoCoachWindows(samples, 55, {maxWindows: 5});
+  assert.ok(windows.length >= 3 && windows.length <= 5, `Expected 3..5 windows, got ${windows.length}`);
+  for (const w of windows) {
+    assert.ok(w.focusBox && w.focusBox.width > 0 && w.focusBox.height > 0);
+    assert.ok(w.focusBox.x >= 0 && w.focusBox.x + w.focusBox.width <= 1);
+    assert.ok(w.focusBox.y >= 0 && w.focusBox.y + w.focusBox.height <= 1);
+  }
+});

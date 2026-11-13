@@ -131,9 +131,12 @@ It is separate from the expandable list and can appear while the panel is collap
   announcement. Its progress-bar marker and list entry remain visible.
 - A highlight with an explicitly added note can show that note; the gate is text
   content, not type. A formatter fallback alone is not meaningful coaching text.
-- Point text defaults to 3 seconds of wall-clock display, including when paused
-  or using a different playback speed. An explicit end follows playback time,
-  bounded by the current visible fragment. Leaving the scope clears the teaser.
+- Point text follows **playback time** rather than a wall-clock timer: default
+  playback-time span is 3 seconds (`5` seconds for coaching point cues), clamped to
+  `[start, min(clip.end, start + span))` (and visible fragment end in full-video
+  mode). Pausing keeps the current playback position's teaser visible without
+  expiring or re-triggering on wall-clock time; advancing or seeking outside
+  `[start, end)` clears the teaser. Leaving the scope clears the teaser.
 - Seek shows only eligible content at the landing position, never all skipped
   Moments. Replaying can trigger it again. Overlapping text Moments stay compact,
   do not overlay the footage, and never pause playback or scroll/focus the page.

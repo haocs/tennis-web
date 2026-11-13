@@ -2,7 +2,7 @@
 const NoteUI=(()=>{
  let source=null,items=[],itemsLoaded=false,itemsLoadedSourceId=null,itemsLoadedPub=null,loadError='',loadPromise=null,generation=0,timer=null,editing=null,editingKind='note',saveRequest=null,saving=false,markerKey='',refreshSequence=0,lastCurrent=null,pendingHighlight=null,saveFingerprint=null;
  let editorContext=null,entityNotesTarget=null,entityNotesGen=0,editNoteRecord={id:null,version:0,initialText:'',mode:'new',player_id:null,unloaded:true},editNoteDirty=false,editNoteSaveRequest=null,editNoteFingerprint=null;
- let cueTimer=null,cueKey='',mediaKey='',cueClock=new MomentPlayback.CueClock();
+ let cueKey='',mediaKey='',cueClock=new MomentPlayback.CueClock();
  let cutState={active:false,versions:[],currentVersionId:null,currentPublication:null,staleServingVersionId:null,versionId:null,manifest:null,timeline:null,allowHistorical:false,allVersions:false,mode:'clip',clipId:null,gapId:null,draftDirty:false,saveRequest:null,saveFingerprint:null};
  const names={comment:'Moment',note:'Moment',highlight:'Highlight',usefulness:'Less useful',cut_feedback:'Cut review',coach:'Coach suggestion'};
  const verdicts={good_cut:'Good cut',needs_adjustment:'Needs adjustment',poor_cut:'Poor cut',missed_play:'Missed play'};
@@ -142,7 +142,7 @@ const NoteUI=(()=>{
  function scopeOptions(){return {mode:model.mode,clipId:model.current,clips:source?.clips||[],sourceId:source?.id};}
  function momentEvents(){return MomentPlayback.timeline(items,scopeOptions());}
  function cueTick(discontinuity=false){
-  clearTimeout(cueTimer);const v=$('#player'),box=$('#moment-cues');if(!v||!box||!source)return;
+  const v=$('#player'),box=$('#moment-cues');if(!v||!box||!source)return;
   const key=source.id+':'+source.published_at+':'+model.mode+':'+(model.mode==='clip'?model.current:'');
   if(key!==mediaKey){mediaKey=key;cueClock.reset();cueKey='';box.replaceChildren();}
   if(document.hidden||v.readyState<1||v.seeking)return;
@@ -152,8 +152,6 @@ const NoteUI=(()=>{
    cueKey=fingerprint;
    box.innerHTML=active.map(e=>{const a=e.annotation,text=MomentPlayback.teaserText(a);return `<article class="moment-cue ${a.kind==='coach'?'moment-coach':''}" data-active-moment="${esc(a.id)}"><div><strong>${esc(a.kind==='coach'?(a.body.response?'Coach review · excerpt':'Coach'):a.kind==='highlight'?'★ Highlight':'Moment')}</strong><span>Original ${esc(preciseTime(a.target.start_seconds))}</span></div>${text?`<p>${esc(text)}</p>`:''}</article>`;}).join('');
   }
-  const expiries=active.filter(e=>e.expiresAt).map(e=>e.expiresAt-performance.now());
-  if(expiries.length)cueTimer=setTimeout(()=>cueTick(),Math.max(1,Math.min(...expiries)+10));
   const next=$('#moment-jump');if(next)next.hidden=!momentEvents().length;
  }
  function nextMoment(){
@@ -202,7 +200,9 @@ const NoteUI=(()=>{
   const history='<button type="button" data-note-action="history">History</button>';
   if(cuts)return jumpButton+(editButtons+history).replaceAll('<button type=','<button class="button small" type=');
   const coach=a.read_only?'<button class="button small" type="button" data-note-action="coach" aria-label="Review coaching">Review</button>':'';
-  return jumpButton+coach+`<details class="moment-more note-actions-menu"><summary class="button small" aria-label="${a.record_class==='entity_metadata'?'Note actions':'Moment actions'}">⋯</summary><div>${editButtons}${history}</div></details>`;
+  const coachJobId=!cuts&&a.kind==='coach'?(a.origin?.job_id||(a.id.startsWith('coach-response:')?a.id.slice(15):'')):'';
+  const deleteCoach=coachJobId?'<button type="button" data-note-action="delete-coach">Delete review</button>':'';
+  return jumpButton+coach+`<details class="moment-more note-actions-menu"><summary class="button small" aria-label="${a.record_class==='entity_metadata'?'Note actions':'Moment actions'}">⋯</summary><div>${editButtons}${deleteCoach}${history}</div></details>`;
  }
  function cutDetailsHTML(a){
   if(a.kind!=='cut_feedback')return '';
@@ -270,6 +270,14 @@ const NoteUI=(()=>{
      playClip(clip.id,false);
      window.Coach?.focusTarget?.({clipId:clip.id,jobId,annotationId,startSeconds,endSeconds});
      $('#study-clip').click();
+    }
+    if(b.dataset.noteAction==='delete-coach'){
+     const jobId=a.origin?.job_id||(a.id.startsWith('coach-response:')?a.id.slice(15):'');
+     if(!jobId)throw new Error('Could not find coaching review to delete.');
+     await api('/api/coaching/jobs/'+encodeURIComponent(jobId),{method:'DELETE',body:JSON.stringify({})});
+     await refresh(true);
+     window.dispatchEvent(new Event('coach-notes-changed'));
+     toast('Coaching review deleted.');
     }
    }catch(e){toast(e.message);if(e.status===409)await refresh(true);}finally{b.disabled=false;}
   });
@@ -513,11 +521,11 @@ const NoteUI=(()=>{
  }
  function mount(s){
   releaseCutPreviewLease(cutState);cutState.active=false;
-  source=s;items=[];itemsLoaded=false;itemsLoadedSourceId=null;itemsLoadedPub=null;loadError='';markerKey='';lastCurrent=null;generation++;clearInterval(timer);clearTimeout(cueTimer);cueClock.reset();mediaKey='';cueKey='';
+  source=s;items=[];itemsLoaded=false;itemsLoadedSourceId=null;itemsLoadedPub=null;loadError='';markerKey='';lastCurrent=null;generation++;clearInterval(timer);cueClock.reset();mediaKey='';cueKey='';
   const markers=document.createElement('div');markers.id='note-markers';markers.className='note-markers';markers.setAttribute('aria-label','Moments on playback timeline');$('#video-seek').after(markers);
   const player=$('#player');player.addEventListener('loadedmetadata',()=>current());player.addEventListener('timeupdate',()=>current());
   player.addEventListener('seeked',()=>cueTick(true));player.addEventListener('play',()=>cueTick());player.addEventListener('pause',()=>cueTick());player.addEventListener('ended',()=>cueTick());
-  player.addEventListener('emptied',()=>{clearTimeout(cueTimer);cueClock.reset();cueKey='';$('#moment-cues')?.replaceChildren();});
+  player.addEventListener('emptied',()=>{cueClock.reset();cueKey='';$('#moment-cues')?.replaceChildren();});
   window.addEventListener('coach-notes-changed',refresh);document.addEventListener('visibilitychange',()=>cueTick(true));
   $('.player-shell').insertAdjacentHTML('afterend',`<section id="moments-area" aria-label="Moment panel"><div id="notes-panel" class="notes-panel"><div class="moment-bar"><button type="button" id="moment-toggle" aria-expanded="false" aria-controls="moment-panel-content">Moments <span aria-hidden="true">⌄</span></button><button type="button" class="button small" id="moment-jump" aria-label="Jump to next moment" hidden>Jump</button><button type="button" class="button small" id="note-highlight" aria-label="Highlight this moment">Highlight</button><button type="button" class="button small" id="add-moment" aria-label="Add moment">+ Moment</button></div><div id="moment-cues" class="moment-cues" role="status" aria-live="polite" aria-atomic="true"></div><div id="moment-panel-content" hidden><div class="notes-toolbar moment-filters"><select id="moment-type" aria-label="Moment type"><option value="all">All types</option><option value="highlight">Highlight</option><option value="coaching">Coaching</option><option value="comment">Moment</option></select><label class="check-label"><input id="notes-archived" type="checkbox">Show archived</label></div><p id="notes-status" role="status"></p><div id="notes-list"></div></div></div></section>`);
   $('#note-highlight').onclick=highlight;$('#note-demote').onclick=demote;$('#moment-jump').onclick=nextMoment;$('#add-moment').onclick=()=>openEditor('comment');

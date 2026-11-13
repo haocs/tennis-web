@@ -120,6 +120,22 @@ const LearningUI=(()=>{
   };
   $('#learning-tab-reviews').onclick=()=>switchTab('reviews');
   $('#learning-tab-plan').onclick=()=>switchTab('plan');
+  $('#learning-clips').addEventListener('click',async e=>{
+   const btn=e.target.closest('[data-delete-review]');
+   if(!btn||btn.disabled)return;
+   const reviewId=btn.dataset.deleteReview;if(!reviewId)return;
+   const pid=selected,epoch=playerEpoch;
+   btn.disabled=true;
+   try{
+    await api('/api/coaching/jobs/'+encodeURIComponent(reviewId),{method:'DELETE',body:JSON.stringify({})});
+    if(epoch!==playerEpoch||pid!==selected)return;
+    toast('Coaching review deleted.');
+    await load();
+   }catch(err){
+    if(epoch===playerEpoch&&pid===selected)toast(err.message);
+    btn.disabled=false;
+   }
+  });
   load();
  }
 
@@ -242,7 +258,7 @@ const LearningUI=(()=>{
  function reviewSection(c,r){
   const suggestions=(r.suggestions||[]).filter(s=>s.status!=='dismissed');
   const chips=suggestions.length?`<div class="learning-cue-chips">${suggestions.slice(0,3).map(s=>`<span class="learning-cue-chip learning-cue-${esc(s.status)}"><strong>${esc(s.title||s.topic||'Cue')}:</strong> ${esc(s.cue)} <em>(${s.status==='accepted'?'Accepted':'Proposed'})</em></span>`).join('')}</div>`:'';
-  return `<section class="learning-review"><h3>Coach review · ${preciseTime(r.original_start)}–${preciseTime(r.original_end)}</h3><p class="learning-context learning-asked-at">${esc(askedLabel(r))}</p>${r.historical?'<p class="learning-context">Earlier processed version</p>':''}${r.player_mismatch?'<p class="learning-context">Current clip has a different or unassigned player. Confirm the focus before using this advice.</p>':''}${r.selected_override?`<p class="learning-context">Selected player for this review${r.subject_hint?' · Target: '+esc(r.subject_hint):''}</p>`:(r.subject_hint?`<p class="learning-context">Target: ${esc(r.subject_hint)}</p>`:'')}${r.association==='current_clip'?'<p class="learning-context">Player from current clip assignment</p>':''}${chips}<p>${esc(r.summary)}</p>${r.answer!==r.summary?`<details><summary>Read saved response</summary><p class="learning-answer">${esc(r.answer)}</p>${r.answer_truncated?`<a href="${esc(r.response_url)}">Full saved response</a>`:''}</details>`:''}${c.media_available?`<a class="button small" href="/review/${c.source_id}?clip=${c.clip_id}&coach_time=${Math.max(c.original_start,Math.min(c.original_end,r.original_start))}&coach_end=${Math.max(c.original_start,Math.min(c.original_end,r.original_end))}&coach_job=${encodeURIComponent(r.id)}">Study & review coaching</a>`:''}</section>`;
+  return `<section class="learning-review"><h3>Coach review · ${preciseTime(r.original_start)}–${preciseTime(r.original_end)}</h3><p class="learning-context learning-asked-at">${esc(askedLabel(r))}</p>${r.historical?'<p class="learning-context">Earlier processed version</p>':''}${r.player_mismatch?'<p class="learning-context">Current clip has a different or unassigned player. Confirm the focus before using this advice.</p>':''}${r.selected_override?`<p class="learning-context">Selected player for this review${r.subject_hint?' · Target: '+esc(r.subject_hint):''}</p>`:(r.subject_hint?`<p class="learning-context">Target: ${esc(r.subject_hint)}</p>`:'')}${r.association==='current_clip'?'<p class="learning-context">Player from current clip assignment</p>':''}${chips}<p>${esc(r.summary)}</p>${r.answer!==r.summary?`<details><summary>Read saved response</summary><p class="learning-answer">${esc(r.answer)}</p>${r.answer_truncated?`<a href="${esc(r.response_url)}">Full saved response</a>`:''}</details>`:''}<div class="learning-review-actions">${c.media_available?`<a class="button small" href="/review/${c.source_id}?clip=${c.clip_id}&coach_time=${Math.max(c.original_start,Math.min(c.original_end,r.original_start))}&coach_end=${Math.max(c.original_start,Math.min(c.original_end,r.original_end))}&coach_job=${encodeURIComponent(r.id)}">Study & review coaching</a>`:''}<button type="button" class="button small learning-delete-review-btn" data-delete-review="${esc(r.id)}">Delete review</button></div></section>`;
  }
 
  function renderCitationPill(eid,citations){
@@ -324,7 +340,7 @@ const LearningUI=(()=>{
     ${isInFlight?`
      ${canCancel?`<button type="button" class="button small" id="learning-plan-cancel">Cancel request</button>`:''}
     `:`
-     <label class="check-label learning-consent-label"><input type="checkbox" id="learning-plan-consent" ${canClick?'':'disabled'}>Send selected review summaries and practice progress to OpenAI</label>
+     <label class="check-label learning-consent-label"><input type="checkbox" id="learning-plan-consent" ${canClick?'':'disabled'}>Send selected review summaries and practice progress to AI coach</label>
      <button type="button" class="button primary small" id="learning-plan-generate" ${canClick?'':'disabled'}>${esc(submitting?'Submitting…':buttonLabel)}</button>
     `}
    </div>
@@ -589,7 +605,7 @@ const LearningUI=(()=>{
   if(genBtn){
    genBtn.onclick=async()=>{
     if(!consentBox||!consentBox.checked){
-     planError='Confirm sending review summaries and practice progress to OpenAI before generating a plan.';
+     planError='Confirm sending review summaries and practice progress to AI coach before generating a plan.';
      renderPlanTab({preservePracticeDom:true});
      return;
     }

@@ -155,7 +155,7 @@
       return `For ${player.name} (clip main player) · height and level are included; name stays in this library.`;
     }
     if (player) {
-      return `For ${player.name} (this request only; clip player unchanged) · height and level included; name stays local. Auto detect scans foreground motion, not player identity.`;
+      return `For ${player.name} (this request only; clip player unchanged) · height and level included; name stays local. Auto select & zoom scans foreground motion, not player identity.`;
     }
     if (defaultValue && byId[defaultValue]) {
       return `No player profile for this request (clip player stays ${byId[defaultValue].name}) · advice stays on this clip only.`;

@@ -107,7 +107,7 @@ test('resolveCoachingSubject, normalizeSubjectHint, and describeCoachingSubject 
   assert.equal(otherRes.subjectHint,'far court dark shirt');
   const otherDesc=C.describeCoachingSubject({selectedPlayerId:blair.id,clip:assignedClip,players});
   assert.match(otherDesc,/For Blair \(this request only; clip player unchanged\)/);
-  assert.match(otherDesc,/Auto detect scans foreground motion, not player identity/);
+  assert.match(otherDesc,/Auto select & zoom scans foreground motion, not player identity/);
 
   const noneRes=C.resolveCoachingSubject({selectedPlayerId:'',clip:assignedClip,players});
   assert.deepEqual(noneRes,{subjectMode:'none',playerId:null,playerProfileVersion:null,player:null,subjectHint:null});

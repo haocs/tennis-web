@@ -7,16 +7,19 @@ container. The original tennis-processing service and worker are untouched.
 ## User flow
 
 Open **Study clip**, adjust the **Interval start** and **Interval end** pins on the
-study progress bar (0.1–30 seconds for coaching), set framing with the zoom scrubber
-and drag-to-pan, and choose playback speed (`0.1×`–`1×`).
+study progress bar (0.1–30 seconds for coaching), or click **Auto select & zoom**
+next to the zoom slider to locally select and zoom to up to 5 player-motion
+moments (`Next moment (k/N)`), adjust framing/pan if needed, and choose
+playback speed (`0.1×`–`1×`). Model-neutral UI copy refers to the **AI coach**
+rather than naming a specific provider; actual provider/model routing is
+managed in `/processing`.
 
 In **Ask a coach**, confirm or change **Player to coach** (defaults to the clip's
 assigned main player without mutating clip or recording rosters; see
 [COACHING-SUBJECT.md](COACHING-SUBJECT.md)), optionally add a concise visible target
-cue, pick a preset question or type a custom question, and click **Ask coach** (or
-**Auto detect & ask** for up to two local-detector moments per clip; see
-[AUTO-COACH.md](AUTO-COACH.md)). The browser captures an immutable snapshot of the
-selected player context, interval, normalized crop, playback speed and prompt:
+cue, pick a preset question or type a custom question, and click **Ask coach**. The
+browser captures an immutable snapshot of the selected player context, interval,
+normalized crop, playback speed and prompt:
 
 1. **Preparing your clip…** — queues a `render` job (`intent: "coaching"`) that
    renders the cropped, speed-adjusted SDR H.264 preview (`max_edge: 960`, muted)
@@ -32,12 +35,15 @@ selected player context, interval, normalized crop, playback speed and prompt:
    `proposed` until explicitly accepted via **Use in playback** (or **Use for
    current video** when a recording was reprocessed), edited and saved via **Save**
    (with **Reset edits** to abandon unsaved form changes), or dismissed via the
-   top-right **×** discard button. Accepted coaching Moments display a 5-second
-   playback teaser in the Watch player, and clicking **Review** on a coaching
-   Moment or Learning item deep-links directly into Clip study with the target
-   interval and card highlighted. Coaching requests and cards record immutable
-   `asked_at` timestamps so edits or status changes do not reorder historical
-   questions.
+   top-right **×** discard button. Accepted coaching Moments display during their
+   playback-time interval (5-second playback-time span from start for point cues,
+   bounded by the clip) without wall-clock expiry timers, and clicking **Review**
+   on a coaching Moment or Learning item deep-links directly into Clip study with
+   the target interval and card highlighted. Coaching requests and cards record
+   immutable `asked_at` timestamps so edits or status changes do not reorder
+   historical questions. Saved coaching reviews can also be deleted cleanly from
+   Clip Study (`Delete review`), Moments (`⋯` → `Delete review`), or the Learning
+   room (`Delete review`).
 
 ### High-quality interval download (`intent: "share"`)
 
@@ -131,6 +137,11 @@ token, configured separately from any provider login.
 - `GET /api/coaching/jobs/{id}` — public job without lease credentials.
 - `PUT /api/coaching/jobs/{id}` — desired cancellation or reviewed cue with current
   version; stale writes return conflict. A started provider call is not cancelled.
+- `DELETE /api/coaching/jobs/{id}` — completely delete a non-active (`queued`,
+  `completed`, `failed`, `cancelled`, or `needs_review`) `ai` coaching review, its
+  linked `annotations`, `annotation_revisions`, and `evidence` rows, orphaned
+  coaching `render` artifacts on disk, and unreferenced evidence frame images
+  (`409` while `leased` or `calling`).
 - `GET /api/coaching/exports/{id}/{excerpt.mp4|prompt.txt|recipe.json}` — browser
   preview/download; expired files return 410. Recipe response strips credentials.
 - `GET|POST /api/coaching/worker/config` — worker-authenticated endpoint returning

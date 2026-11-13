@@ -1091,3 +1091,19 @@ def test_learning_reviews_and_plan_attribute_explicit_selected_subject_and_exclu
     assert blair_edited['entries'][0]['reviews'][0]['asked_at'] == 2100.0
     assert blair_edited['plan_state']['eligibility']['new_or_revised_reviews_count'] == 1
     assert blair_edited['plan_state']['eligibility']['can_generate'] is True
+
+    # Consent validation error uses neutral AI coach copy and DELETE removes the review cleanly from Learning Room & Plan.
+    no_consent = _post_json(c, '/api/learning/plan', dict(
+        player_id=blair['id'], consent=False, expected_parent_revision=1,
+        input_digest=blair_edited['plan_state']['eligibility']['input_digest'], request_id='blair-consent-check',
+    ))
+    assert no_consent.status_code == 400 and 'to AI coach' in no_consent.json['error']
+
+    H = {'X-Tennis-Request': '1'}
+    plan_job_id = blair_after['plan_state']['active_plan']['job_id']
+    assert c.delete(f"/api/coaching/jobs/{plan_job_id}", headers=H, json={}).status_code == 400
+    assert c.delete(f"/api/coaching/jobs/{r_blair['id']}", headers=H, json={}).status_code == 200
+    blair_deleted = c.get(f"/api/learning?player_id={blair['id']}").json
+    assert blair_deleted['entries'] == []
+    assert blair_deleted['plan_state']['eligibility']['removed_reviews_count'] >= 1
+    assert blair_deleted['plan_state']['eligibility']['can_generate'] is True
