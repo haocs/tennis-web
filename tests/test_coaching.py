@@ -818,5 +818,3 @@ def test_auto_coach_cancel_create_race_and_listing_retention_beyond_limit_100(se
     listed_ids = {j['id'] for j in listed['jobs']}
     assert old_auto_1['id'] in listed_ids, 'Completed unsubmitted auto_detect render must remain visible beyond LIMIT 100'
     assert old_auto_2['id'] in listed_ids, 'Queued unsubmitted auto_detect render must remain visible beyond LIMIT 100'
-
-

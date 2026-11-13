@@ -459,7 +459,7 @@
   cancelScan() {
     if (context?.captureController) context.captureController.abort();
   },
-  async scanPlayerMoments({maxWindows = 2, onProgress} = {}) {
+  async scanPlayerMoments({maxWindows = 2, excludedIntervals = [], onProgress} = {}) {
     if (!context) throw new Error('Wait for the clip to load before scanning.');
     if (context.capturing) throw new Error('Another frame scan is already in progress.');
     if (
@@ -704,8 +704,11 @@
       }
 
       if (signal.aborted || context !== owner) throw new DOMException('Cancelled', 'AbortError');
+      const resolvedMaxWindows = typeof maxWindows === 'function' ? maxWindows() : maxWindows;
+      const resolvedExcluded = typeof excludedIntervals === 'function' ? excludedIntervals() : excludedIntervals;
       selectedWindows = A.selectAutoCoachWindows(samples, dur, {
-        maxWindows,
+        maxWindows: resolvedMaxWindows,
+        excludedIntervals: resolvedExcluded,
         frameWidth: dims.width,
         frameHeight: dims.height,
         originalStartSeconds: owner.clip.original_start_seconds,

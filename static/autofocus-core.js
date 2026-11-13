@@ -527,23 +527,40 @@
     }
 
     if (!eligible.length) return [];
+    const rawExcluded = Array.isArray(options.excludedIntervals) ? options.excludedIntervals : [];
+    const excluded = rawExcluded
+      .filter(w => w && finite(w.start) && finite(w.end) && Number(w.end) > Number(w.start))
+      .map(w => {
+        const s = round3(clamp(Number(w.start), 0, duration));
+        const e = round3(clamp(Number(w.end), 0, duration));
+        return e > s ? {start: s, end: e, center: (s + e) * 0.5} : null;
+      })
+      .filter(Boolean);
+    if (excluded.length > 0 && duration < 5.0) return [];
+
     eligible.sort((a, b) => b.rankingScore - a.rankingScore || a.start - b.start);
 
-    const chosen = [eligible[0]];
-    if (maxWindows >= 2 && duration >= 5.0) {
-      const first = eligible[0];
-      const minGap = duration >= 9.0 ? 0.5 : 0;
-      const minCenterSep = Math.max(2.5, windowSpan * 0.85);
-      for (let i = 1; i < eligible.length; i += 1) {
-        const cand = eligible[i];
-        const nonOverlapping = cand.end <= first.start - minGap + 1e-6 || cand.start >= first.end + minGap - 1e-6;
-        if (!nonOverlapping) continue;
-        if (Math.abs(cand.center - first.center) < minCenterSep - 1e-6) continue;
-        if (cand.score < first.score * 0.45) continue;
-        chosen.push(cand);
-        break;
-      }
+    const topReferenceScore = eligible[0].score;
+    const minGap = duration >= 9.0 ? 0.5 : 0;
+    const isDistinctFrom = (cand, ref) => {
+      const nonOverlapping = cand.end <= ref.start - minGap + 1e-6 || cand.start >= ref.end + minGap - 1e-6;
+      if (!nonOverlapping) return false;
+      const refSpan = Math.max(0.1, ref.end - ref.start);
+      const minCenterSep = Math.max(2.5, Math.min(windowSpan, refSpan) * 0.85);
+      if (Math.abs(cand.center - ref.center) < minCenterSep - 1e-6) return false;
+      return true;
+    };
+
+    const chosen = [];
+    for (let i = 0; i < eligible.length && chosen.length < maxWindows; i += 1) {
+      if (chosen.length + excluded.length >= 1 && duration < 5.0) break;
+      const cand = eligible[i];
+      if (chosen.length + excluded.length >= 1 && cand.score < topReferenceScore * 0.45) continue;
+      if (excluded.some(ex => !isDistinctFrom(cand, ex))) continue;
+      if (chosen.some(prev => !isDistinctFrom(cand, prev))) continue;
+      chosen.push(cand);
     }
+    if (!chosen.length) return [];
 
     chosen.sort((a, b) => a.start - b.start);
     return chosen.map((w, idx) => ({

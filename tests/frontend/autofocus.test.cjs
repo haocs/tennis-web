@@ -460,3 +460,121 @@ test('long clips (41s, 60s, 90s) retain bounded paired motion sampling, reject s
     );
   }
 });
+
+test('selectAutoCoachWindows excludes consumed or in-flight intervals on retry while allowing pre-call failed/cancelled intervals', () => {
+  const times15 = planAutoCoachSampleTimes(15, 16);
+  const twoBursts = times15.map(time => {
+    if (time >= 1.2 && time <= 4.8) {
+      const step = (time - 1.2) / 3.6;
+      return {
+        time,
+        detections: [{x: 0.22 + step * 0.36, y: 0.36, width: 0.18, height: 0.44, score: 0.96, categoryName: 'person'}],
+      };
+    }
+    if (time >= 9.6 && time <= 13.6) {
+      const step = (time - 9.6) / 4.0;
+      return {
+        time,
+        detections: [{x: 0.62 - step * 0.28, y: 0.4, width: 0.16, height: 0.4, score: 0.91, categoryName: 'person'}],
+      };
+    }
+    return {
+      time,
+      detections: [{x: 0.45, y: 0.38, width: 0.16, height: 0.4, score: 0.9, categoryName: 'person'}],
+    };
+  });
+
+  const initialTwo = selectAutoCoachWindows(twoBursts, 15, {maxWindows: 2});
+  assert.equal(initialTwo.length, 2);
+  const [firstBurst, secondBurst] = initialTwo;
+  assert.ok(firstBurst.end <= secondBurst.start);
+
+  // Without exclusions, maxWindows = 1 picks the strongest first burst.
+  const unexcludedTop = selectAutoCoachWindows(twoBursts, 15, {maxWindows: 1});
+  assert.equal(unexcludedTop.length, 1);
+  assert.equal(unexcludedTop[0].start, firstBurst.start);
+
+  // Partial failure retry: first burst succeeded (excluded), second failed -> maxWindows = 1 selects second burst, never duplicating first.
+  const retryAfterFirstSucceeded = selectAutoCoachWindows(twoBursts, 15, {
+    maxWindows: 1,
+    excludedIntervals: [{start: firstBurst.start, end: firstBurst.end}],
+  });
+  assert.equal(retryAfterFirstSucceeded.length, 1);
+  assert.ok(retryAfterFirstSucceeded[0].start >= firstBurst.end, `Expected non-overlapping second burst, got ${JSON.stringify(retryAfterFirstSucceeded)}`);
+  assert.equal(retryAfterFirstSucceeded[0].start, secondBurst.start);
+  assert.equal(retryAfterFirstSucceeded[0].end, secondBurst.end);
+
+  // Reverse partial failure: second burst succeeded (excluded), first failed -> maxWindows = 1 selects first burst.
+  const retryAfterSecondSucceeded = selectAutoCoachWindows(twoBursts, 15, {
+    maxWindows: 1,
+    excludedIntervals: [{start: secondBurst.start, end: secondBurst.end}],
+  });
+  assert.equal(retryAfterSecondSucceeded.length, 1);
+  assert.ok(retryAfterSecondSucceeded[0].end <= secondBurst.start);
+  assert.equal(retryAfterSecondSucceeded[0].start, firstBurst.start);
+
+  // Pre-call failed/cancelled intervals are omitted from excludedIntervals -> strongest burst remains eligible on retry.
+  const retryAfterPreCallFail = selectAutoCoachWindows(twoBursts, 15, {
+    maxWindows: 1,
+    excludedIntervals: [],
+  });
+  assert.equal(retryAfterPreCallFail.length, 1);
+  assert.equal(retryAfterPreCallFail[0].start, firstBurst.start);
+
+  // Single-burst clip: after the sole burst is consumed/in-flight, retry with maxWindows = 1 returns 0 windows ([]), never duplicating it.
+  const singleBurst = times15.map(time => {
+    if (time >= 2.0 && time <= 5.5) {
+      const step = (time - 2.0) / 3.5;
+      return {
+        time,
+        detections: [{x: 0.26 + step * 0.32, y: 0.38, width: 0.17, height: 0.42, score: 0.94, categoryName: 'person'}],
+      };
+    }
+    return {time, detections: []};
+  });
+  const onlyInitial = selectAutoCoachWindows(singleBurst, 15, {maxWindows: 2});
+  assert.equal(onlyInitial.length, 1);
+  const retrySingleConsumed = selectAutoCoachWindows(singleBurst, 15, {
+    maxWindows: 1,
+    excludedIntervals: [{start: onlyInitial[0].start, end: onlyInitial[0].end}],
+  });
+  assert.deepEqual(retrySingleConsumed, []);
+
+  // Short clip (< 5s): once 1 interval is consumed, retry returns 0 windows.
+  const shortSamples = planAutoCoachSampleTimes(3.4).map((time, idx) => ({
+    time,
+    detections: [{x: 0.25 + idx * 0.12, y: 0.4, width: 0.18, height: 0.42, score: 0.9, categoryName: 'person'}],
+  }));
+  const shortInitial = selectAutoCoachWindows(shortSamples, 3.4, {maxWindows: 2});
+  assert.equal(shortInitial.length, 1);
+  assert.deepEqual(
+    selectAutoCoachWindows(shortSamples, 3.4, {
+      maxWindows: 1,
+      excludedIntervals: [{start: shortInitial[0].start, end: shortInitial[0].end}],
+    }),
+    []
+  );
+
+  // Long 60s clip: excluding first burst selects the second burst on retry.
+  const times60 = planAutoCoachSampleTimes(60, 16);
+  const longTwoBursts = times60.map((time, idx) => {
+    if ((time >= 8 && time <= 18) || (time >= 42 && time <= 54)) {
+      return {
+        time,
+        detections: [{x: 0.28 + ((idx % 2) * 0.18), y: 0.36, width: 0.17, height: 0.42, score: 0.93, categoryName: 'person'}],
+      };
+    }
+    return {
+      time,
+      detections: [{x: 0.45, y: 0.36, width: 0.16, height: 0.4, score: 0.88, categoryName: 'person'}],
+    };
+  });
+  const longInitial = selectAutoCoachWindows(longTwoBursts, 60, {maxWindows: 2});
+  assert.equal(longInitial.length, 2);
+  const longRetry = selectAutoCoachWindows(longTwoBursts, 60, {
+    maxWindows: 1,
+    excludedIntervals: [{start: longInitial[0].start, end: longInitial[0].end}],
+  });
+  assert.equal(longRetry.length, 1);
+  assert.equal(longRetry[0].start, longInitial[1].start);
+});

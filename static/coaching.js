@@ -23,7 +23,7 @@
     return !window.__TENNIS_AUTOFOCUS_FORCE_UNSUPPORTED&&typeof Worker==='function'&&typeof WebAssembly==='object'&&!!window.AutoFocusCore;
   }
   function autoCoachStats(data){
-    if(!owner||!Array.isArray(data?.jobs))return {used:0,remaining:2,inFlightRenders:[],completedUnsubmittedRenders:[],inFlightAi:[],failedRenders:[]};
+    if(!owner||!Array.isArray(data?.jobs))return {used:0,remaining:2,inFlightRenders:[],completedUnsubmittedRenders:[],inFlightAi:[],failedRenders:[],excludedIntervals:[]};
     const clipJobs=data.jobs.filter(j=>
       j.body?.auto_detect===true&&
       j.body?.source_id===owner.session.id&&
@@ -44,6 +44,22 @@
     const completedUnsubmittedRenders=untransitionedRenders.filter(r=>r.state==='completed');
     const failedRenders=clipJobs.filter(r=>r.role==='render'&&r.state==='failed'&&!aiJobs.some(a=>a.body?.export_id===r.id));
     const inFlightAi=activeOrConsumedAi.filter(a=>['queued','leased','calling'].includes(a.state));
+    const origBase=Number(owner.clip.original_start_seconds)||0;
+    const jobLocalInterval=j=>{
+      const b=j?.body;
+      if(C.finite(b?.start)&&C.finite(b?.end)&&b.end>b.start){
+        return {start:Number(b.start),end:Number(b.end)};
+      }
+      if(C.finite(b?.original_start)&&C.finite(b?.original_end)&&b.original_end>b.original_start){
+        return {start:Math.max(0,Number(b.original_start)-origBase),end:Math.max(0,Number(b.original_end)-origBase)};
+      }
+      if(j?.role==='ai'&&b?.export_id){
+        const parentRender=clipJobs.find(r=>r.role==='render'&&r.id===b.export_id);
+        if(parentRender)return jobLocalInterval(parentRender);
+      }
+      return null;
+    };
+    const excludedIntervals=[...activeOrConsumedAi,...untransitionedRenders].map(jobLocalInterval).filter(Boolean);
     const used=Math.min(2,activeOrConsumedAi.length+untransitionedRenders.length);
     return {
       used,
@@ -51,7 +67,8 @@
       inFlightRenders,
       completedUnsubmittedRenders,
       inFlightAi,
-      failedRenders
+      failedRenders,
+      excludedIntervals
     };
   }
   function el(tag,text,cls){const n=document.createElement(tag);if(text!==undefined)n.textContent=text;if(cls)n.className=cls;return n;}
@@ -134,7 +151,7 @@
   function makePanel(){
     const panel=el('section',undefined,'study-panel coaching-panel');panel.id='coaching-panel';
     panel.innerHTML=`<h3>Ask a coach</h3>
-      <p class="study-muted">Uses your selected interval (0.1–30s), zoom framing, and playback speed. Sends up to 32 stills and your question to OpenAI.</p>
+      <p class="study-muted">Ask coach uses your selected interval (0.1–30s); Auto detect &amp; ask scans the clip locally for up to 2 player-motion intervals. Applies your zoom and playback speed, sending up to 32 stills per review and your question to OpenAI.</p>
       <p id="coach-range"></p>
       <p id="coach-player-context" class="study-hint"></p>
       <p id="coach-follow-up-context" class="study-hint" hidden></p>
@@ -298,6 +315,11 @@
       askAvailability(lastData);
       return;
     }
+    const current=owner,gen=generation;
+    if(!lastData){
+      await refresh(true);
+      if(owner!==current||gen!==generation)return;
+    }
     const stats=autoCoachStats(lastData);
     if(stats.remaining<=0){
       stickyNotice='Automatic coach review limit reached for this clip (2 of 2 used). Use Ask coach for manual selections.';
@@ -305,7 +327,6 @@
       askAvailability(lastData);
       return;
     }
-    const current=owner,gen=generation;
     const transform=window.ClipStudy?.coachingSelection?.();
     if(!transform){
       message('Wait for the clip to load');
@@ -336,7 +357,8 @@
     try{
       message('Scanning clip for player motion…');
       const scanResult=await window.ClipStudy.scanPlayerMoments({
-        maxWindows:stats.remaining,
+        maxWindows:()=>autoCoachStats(lastData).remaining,
+        excludedIntervals:()=>autoCoachStats(lastData).excludedIntervals,
         onProgress:({index,total})=>{
           if(owner===current&&gen===generation){
             message(`Scanning clip for player motion (${index}/${total})…`);
@@ -347,8 +369,11 @@
       scanningAuto=false;
       const windows=scanResult?.windows||[];
       if(!windows.length){
+        const latestStats=autoCoachStats(lastData);
         autoState='ready';
-        stickyNotice='No clear player motion detected in this clip. Adjust the interval and use Ask coach.';
+        stickyNotice=latestStats.excludedIntervals.length
+          ?'No additional player-motion moments detected in this clip. Adjust the interval and use Ask coach.'
+          :'No clear player motion detected in this clip. Adjust the interval and use Ask coach.';
         message(stickyNotice);
         return;
       }
@@ -714,11 +739,11 @@
     if(cancelBtn)cancelBtn.hidden=!scanningAuto;
     if(quotaEl){
       if(state==='unavailable'){
-        quotaEl.textContent='Automatic player-motion detection is unavailable in this browser. Select an interval and use Ask coach.';
+        quotaEl.textContent='Automatic detection unavailable in this browser · use Ask coach.';
       }else if(state==='capped'){
-        quotaEl.textContent='Automatic coach limit reached: 0 of 2 remaining for this clip. Manual Ask coach stays available.';
+        quotaEl.textContent='0 of 2 automatic reviews remaining · Ask coach stays available.';
       }else{
-        quotaEl.textContent=`Auto detect & ask: ${stats.remaining} of 2 automatic review${stats.remaining===1?'':'s'} remaining for this clip · finds main-player motion locally.`;
+        quotaEl.textContent=`${stats.remaining} of 2 automatic review${stats.remaining===1?'':'s'} remaining`;
       }
     }
   }

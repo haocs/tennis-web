@@ -40,23 +40,19 @@ All sampling and window-ranking math lives in pure functions in `static/autofocu
 1. **Bounded sample schedule (`planAutoCoachSampleTimes(duration, maxSamples = 16)`)**:
    - For clip duration $D > 0$: selects $N = \text{clamp}(\text{round}(D / 1.5), 4, 16)$ interior timestamps (for very short clips $D < 1.0\text{ s}$, $N = \text{clamp}(\text{floor}(D / 0.2), 2, 4)$).
    - For clips where uniform spacing $D / N \le 2.2\text{ s}$ ($D \le 35.2\text{ s}$ at $N = 16$), places $N$ uniform interior timestamps $t_i = D \cdot \frac{i + 0.5}{N}$.
-   - For longer clips where uniform spacing would exceed the $2.5\text{ s}$ motion-continuity horizon ($D / N > 2.2\text{ s}$, e.g. $41\text{ s}, 60\text{ s}, 90\text{ s}$), places $\lfloor N / 2 \rfloor \le 8$ two-sample probes ($\le 16$ total samples) across the clip with a bounded $1.0\text{ s}$ intra-pair interval ($\Delta t \le 2.5\text{ s}$) so every probe measures true primary-player velocity without exceeding the 16-frame scan budget.
+   - For longer clips where uniform spacing would exceed the $2.5\text{ s}$ motion-continuity horizon ($D / N > 2.2\text{ s}$, e.g. $41\text{ s}, 60\text{ s}, 90\text{ s}$), places $P = \max(2, \lfloor N / 2 \rfloor) \le 8$ two-sample probes ($\le 16$ total samples) centered at $c_p = D \cdot \frac{p + 0.5}{P}$ with timestamps $\text{clamp}(c_p \mp 0.5\text{ s}, m, D - m)$ ($m = \min(0.1\text{ s}, 0.02 D)$, intra-pair $\Delta t \le 1.0\text{ s} \le 2.5\text{ s}$) and propagates the second sample's measured `motionScore` ($1.0\times$) back to the leading sample of the pair so every probe measures true primary-player velocity without exceeding the 16-frame scan budget.
    - Hard ceiling of **16 frames per scan**, avoiding `0` and `D` boundary black/undecodable edge frames.
 2. **Candidate window construction and 0 / 1 / 2 selection (`selectAutoCoachWindows(samples, duration, options)`)**:
-   - **Window span**: $W = \text{clamp}(D \times 0.30, 2.5, 8.0)$ seconds, clamped to $[0.1, \min(30, D)]$ (if $D < 2.5\text{ s}$, $W = D$).
+   - **Window span**: $W = \text{clamp}(D \times 0.3, 2.5, 8.0)$ seconds, clamped to $[0.1, \min(30, D)]$ (if $D < 2.5\text{ s}$, $W = D$).
    - **Eligibility thresholds (never manufacturing windows without evidence)**:
-     - Evaluates candidate windows $[s, e] \subseteq [0, D]$ of length $W$ anchored around sample timestamps and activity peaks.
-     - Requires at least `minDetectedSamples` ($\ge 2$ detected primary-person samples when $N \ge 4$ and $D \ge 1.5\text{ s}$; $\ge 1$ high-prominence sample when $D < 1.5\text{ s}$).
-     - Requires window mean activity $\ge 0.24$ (`minWindowScore`) and peak motion $\ge 0.08$ (`minMotionScore`, when $\ge 2$ samples exist).
-     - Clips with no persondetections or only tiny/static background boxes return **`[]` (0 windows)**. Clips with only one active segment return **1 window**.
-   - **Ranking and non-overlapping diversity**:
-     - Eligible windows are ranked by descending window score (mean activity weighted by active sample coverage and peak motion, tie-broken by earlier `start`).
-     - Greedily selects up to `maxWindows = Math.min(2, remainingSlots)` windows.
-     - A second window is selected **only if**:
-       - `maxWindows >= 2` and $D \ge 5.0\text{ s}$,
-       - It is strictly non-overlapping with the first window (`end1 <= start2` or `end2 <= start1`),
-       - Its center is separated from the first window's center by at least $\max(2.5\text{ s}, 0.85 W)$, and
-       - Its score independently clears `minWindowScore` and is at least `0.45 * firstWindow.score`.
+     - Evaluates candidate windows $[s, e] \subseteq [0, D]$ of length $W$ anchored around sample timestamps and midpoints.
+     - Requires at least `minDetected` ($\ge 2$ detected primary-person samples when $N \ge 4$ and $D \ge 1.5\text{ s}$; $\ge 1$ high-prominence sample with `presenceScore >= 0.45` when $D < 1.5\text{ s}$ or $N < 4$).
+     - Requires window score $S = 0.50 \cdot \text{meanActivity} + 0.30 \cdot \text{detectedMeanActivity} + 0.20 \cdot \text{peakMotion} \ge 0.24$ (`minWindowScore`) and peak motion $\ge 0.08$ (`minMotionScore`, when $\ge 2$ detected samples exist), ranked by $S + 0.03 \cdot \text{centerAlign}$.
+     - Clips with no person detections or only tiny/static background boxes return **`[]` (0 windows)**. Clips with only one active segment return **1 window**.
+   - **Ranking, non-overlapping diversity, and retry exclusion**:
+     - Eligible windows are ranked by descending `rankingScore` (tie-broken by earlier `start`).
+     - Consumed or in-flight automatic coaching intervals for the current published clip (`ai` jobs in `queued`, `leased`, `calling`, `completed`, `needs_review`, or `failed` with `provider_called: true`, plus unsubmitted `auto_detect` `render` jobs in `queued`, `leased`, or `completed`) are passed as `excludedIntervals`. Pre-call failed or cancelled `render` / `ai` jobs are **not** excluded so their intervals remain eligible on retry.
+     - Greedily selects up to `maxWindows = Math.min(2, remainingSlots)` windows that are non-overlapping (`cand.end <= ref.start - minGap` or `cand.start >= ref.end + minGap`, where `minGap = 0.5 s` for $D \ge 9.0\text{ s}$ else `0`) and center-separated by at least $\max(2.5\text{ s}, 0.85 \min(W, W_{\text{ref}}))$ from both `excludedIntervals` and any previously chosen window in the current scan, with score $\ge 0.45 \times \text{topEligibleWindow.score}$ whenever at least one window is already excluded or chosen (and $D \ge 5.0\text{ s}$ for a second distinct window). If no distinct eligible moment remains after excluding already reviewed/in-flight intervals, returns **`[]` (0 windows)** rather than duplicating the already reviewed interval.
      - Selected windows are returned in chronological order (`start` ascending), each with rounded clip-local `[start, end]` (`0.001 s` precision) and canonical original-recording `[original_start, original_end]` (`clip.original_start_seconds + start/end`, clamped to `[clip.original_start_seconds, clip.original_end_seconds]`).
 
 ## Resource bounds, lifecycle, and Watch Auto focus coexistence
@@ -76,8 +72,8 @@ All sampling and window-ranking math lives in pure functions in `static/autofocu
 ## Clip Study UX, privacy/consent, and immutable context
 
 - **Controls in `#coaching-panel`**:
-  - Adds **Auto detect & ask** (`#coach-auto-ask`) alongside **Ask coach** (`#coach-ask`), plus a **Cancel scan** button (`#coach-auto-cancel`, visible while scanning) and a concise quota status line (`#coach-auto-quota`, e.g. `Auto detect: up to 2 reviews per clip (2 of 2 remaining)`).
-  - Uses the same explicit OpenAI frame/question disclosure already shown in **Ask a coach** (`Sends up to 32 stills and your question to OpenAI`, `consent: true`).
+  - Adds **Auto detect & ask** (`#coach-auto-ask`) alongside **Ask coach** (`#coach-ask`), plus a **Cancel scan** button (`#coach-auto-cancel`, visible while scanning) and a concise quota status line (`#coach-auto-quota`, e.g. `2 of 2 automatic reviews remaining`).
+  - Displays a concise two-mode disclosure covering both manual and automatic coaching (`Ask coach uses your selected interval (0.1–30s); Auto detect & ask scans the clip locally for up to 2 player-motion intervals. Applies your zoom and playback speed, sending up to 32 stills per review and your question to OpenAI.`, `consent: true`).
 - **Immutable context snapshot at action start**:
   - Clicking **Auto detect & ask** captures an immutable snapshot of:
     - `source_id`, `publication` (`session.published_at`), and `clip_id`

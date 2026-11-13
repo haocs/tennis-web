@@ -2957,7 +2957,8 @@ def test_clip_study_auto_coach_detection_cap_cancellation_and_manual_coexistence
     expect(auto_btn).to_be_enabled()
     expect(auto_btn).to_have_attribute('data-auto-coach-state', 'ready')
     expect(auto_btn).to_have_attribute('data-auto-coach-remaining', '2')
-    expect(page.locator('#coach-auto-quota')).to_contain_text('2 of 2 automatic reviews remaining')
+    expect(page.locator('#coaching-panel .study-muted').first).to_contain_text('sending up to 32 stills per review and your question to OpenAI')
+    expect(page.locator('#coach-auto-quota')).to_have_text('2 of 2 automatic reviews remaining')
 
     # 1. Empty court / static scene -> 0 windows selected, 0 jobs created, truthful guidance shown.
     auto_btn.click()
@@ -3052,10 +3053,13 @@ def test_clip_study_auto_coach_detection_cap_cancellation_and_manual_coexistence
     expect(page.locator('#coach-history')).to_contain_text('Auto summary 1')
     expect(page.locator('#coach-history')).to_contain_text('Ready · Auto-detected')
 
-    # 4. With 1 slot remaining, clicking Auto detect & ask requests at most 1 window and reaches the 2/2 cap.
+    # 4. With 1 slot remaining (exp-1 succeeded, exp-2 failed), clicking Auto detect & ask excludes exp-1's interval, selects the other eligible burst (exp-2's region), and reaches the 2/2 cap.
     auto_btn.click()
     page.wait_for_function('() => document.querySelector("#coach-history")?.innerText.includes("Preparing clip…")')
     assert len(export_calls) == 3
+    assert export_calls[2]['start'] >= export_calls[0]['end'], f'Retry must not duplicate consumed first interval: {export_calls[:3]}'
+    assert export_calls[2]['start'] == pytest.approx(export_calls[1]['start'], abs=0.05)
+    assert export_calls[2]['end'] == pytest.approx(export_calls[1]['end'], abs=0.05)
     # Complete exp-3 -> advances to ai-2 -> reaches 2 of 2 cap.
     state['jobs'][-1].update(state='completed', version=2, result={'artifact_directory': 'f3'})
     page.evaluate('() => window.Coach.open(model.session, model.session.clips[0])')
@@ -3066,7 +3070,7 @@ def test_clip_study_auto_coach_detection_cap_cancellation_and_manual_coexistence
     expect(auto_btn).to_have_attribute('data-auto-coach-state', 'capped')
     expect(auto_btn).to_have_attribute('data-auto-coach-remaining', '0')
     expect(auto_btn).to_be_disabled()
-    expect(page.locator('#coach-auto-quota')).to_contain_text('0 of 2 remaining for this clip')
+    expect(page.locator('#coach-auto-quota')).to_contain_text('0 of 2 automatic reviews remaining')
 
     # Reopening Clip Study preserves the capped state.
     page.get_by_role('button', name='← Back to review', exact=True).click()
@@ -3160,6 +3164,13 @@ def test_clip_study_auto_coach_long_clip_watchdog_and_stale_abort_regressions(br
                 detections = [box(0.66 - shift, 0.32, 0.17, 0.44)];
               } else {
                 detections = [box(0.45, 0.35, 0.16, 0.42)];
+              }
+            } else if (scene === 'long_60s_one_burst') {
+              if (t >= 9.5 && t <= 13.0) {
+                const shift = ((t - 9.5) / 3.5) * 0.22;
+                detections = [box(0.28 + shift, 0.34, 0.16, 0.42)];
+              } else {
+                detections = [];
               }
             }
             setTimeout(() => {
@@ -3319,6 +3330,63 @@ def test_clip_study_auto_coach_long_clip_watchdog_and_stale_abort_regressions(br
     assert w1['end'] <= w2['start']
     assert w1['start'] < 20.0 and w2['start'] >= 35.0
 
+    # 2b. Retry diversity on single-burst vs pre-call failed/cancelled intervals:
+    # First: if w1 failed pre-call (e.g. AI failed before calling, provider_called not true) and w2 was cancelled, both intervals are eligible again on retry!
+    state['jobs'] = [
+        dict(
+            id='exp-precall-1',
+            version=2,
+            role='render',
+            state='completed',
+            asked_at=1700025001.0,
+            updated=1700025002.0,
+            body=dict(source_id=ID, publication=publication, clip_id=CLIP, start=w1['start'], end=w1['end'], original_start=w1['start'], original_end=w1['end'], speed=0.5, crop=[0, 0, 1, 1], quality='balanced', question='Q1', auto_detect=True, auto_slot=1, player_context=None),
+            result={'artifact_directory': 'f-pre1'},
+        ),
+        dict(
+            id='ai-precall-1',
+            version=2,
+            role='ai',
+            state='failed',
+            asked_at=1700025003.0,
+            updated=1700025004.0,
+            body=dict(source_id=ID, publication=publication, clip_id=CLIP, export_id='exp-precall-1', start=w1['start'], end=w1['end'], original_start=w1['start'], original_end=w1['end'], prompt='Q1', auto_detect=True, evidence_frames=[]),
+            result={'error': 'Worker preflight failed'},
+        ),
+        dict(
+            id='exp-cancel-2',
+            version=2,
+            role='render',
+            state='cancelled',
+            asked_at=1700025005.0,
+            updated=1700025006.0,
+            body=dict(source_id=ID, publication=publication, clip_id=CLIP, start=w2['start'], end=w2['end'], original_start=w2['start'], original_end=w2['end'], speed=0.5, crop=[0, 0, 1, 1], quality='balanced', question='Q2', auto_detect=True, auto_slot=2, player_context=None),
+            result={},
+        ),
+    ]
+    export_calls.clear()
+    page.evaluate("""() => {
+      window.__scanScene = 'long_60s_one_burst';
+      window.Coach.open(model.session, model.session.clips[0]);
+    }""")
+    expect(auto_btn).to_have_attribute('data-auto-coach-remaining', '2')
+    auto_btn.click()
+    page.wait_for_function('() => document.querySelector("#coach-auto-ask")?.dataset.autoCoachState === "submitting"')
+    assert len(export_calls) == 1
+    assert export_calls[0]['start'] < 20.0 and export_calls[0]['end'] <= 22.0
+
+    # Now w1 is in-flight/consumed (exp-long-1 queued) and no second burst exists in 'long_60s_one_burst':
+    # Mark exp-long-1 completed -> advances to ai -> 1 of 2 used (1 remaining), then click Auto detect & ask again -> must select 0 windows and NOT duplicate w1!
+    state['jobs'][-1].update(state='completed', version=2, result={'artifact_directory': 'f-one-1'})
+    page.evaluate('() => window.Coach.open(model.session, model.session.clips[0])')
+    page.wait_for_function('() => document.querySelector("#coach-auto-ask")?.dataset.autoCoachState === "ready"')
+    expect(auto_btn).to_have_attribute('data-auto-coach-remaining', '1')
+    exports_before_rescan = len(export_calls)
+    auto_btn.click()
+    expect(page.locator('#coach-status')).to_contain_text('No additional player-motion moments detected in this clip. Adjust the interval and use Ask coach.')
+    assert len(export_calls) == exports_before_rescan, 'Must not submit duplicate export when sole eligible burst was already reviewed'
+    expect(auto_btn).to_have_attribute('data-auto-coach-remaining', '1')
+
     # 3. Stale rejected submission in advancePendingAutoExports after clip switch must NOT post the 2nd export!
     state['jobs'] = [
         dict(
@@ -3381,5 +3449,3 @@ def test_clip_study_auto_coach_long_clip_watchdog_and_stale_abort_regressions(br
     assert [c['export_id'] for c in ai_calls] == ['exp-stale-1'], f'Expected only first stale export to be attempted before switch, got {ai_calls}'
     assert not errors
     page.close()
-
-
