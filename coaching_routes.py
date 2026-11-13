@@ -30,6 +30,23 @@ def register_coaching(app,library,session):
     @app.errorhandler(QueueConflict)
     def conflict(e):return jsonify(error=str(e)),409
 
+    @routes.get('/api/coaching/workers')
+    def list_workers():
+        return jsonify(queue.worker_overview(enabled=bool(app.config['COACH_WORKER_TOKEN'])))
+
+    @routes.get('/api/coaching/config')
+    def get_config():
+        return jsonify(queue.ai_config())
+
+    @routes.put('/api/coaching/config')
+    def put_config():
+        b=request.get_json()
+        if not isinstance(b,dict) or not set(b)<= {'selection','version'}:
+            abort(400,'Expected a selection and version')
+        try:return jsonify(queue.update_ai_config(b.get('selection'),b.get('version')))
+        except QueueConflict as e:return jsonify(error=str(e),current=queue.ai_config()),409
+        except ValueError as e:abort(400,str(e))
+
     @routes.get('/api/coaching/sessions/<identity>')
     def list_coaching(identity):
         data=session(identity)
@@ -155,11 +172,27 @@ def register_coaching(app,library,session):
             return send_file(path,conditional=True,as_attachment=request.args.get('download')=='1',download_name=prefix+name)
         except ValueError:abort(404)
 
+    @routes.route('/api/coaching/worker/config', methods=['GET', 'POST'])
+    def worker_config():
+        worker()
+        if request.method == 'POST':
+            b = request.get_json()
+            if not isinstance(b, dict):
+                abort(400, 'Expected an object')
+            if b.get('worker_id') and b.get('role'):
+                try:
+                    queue.touch_worker_meta(b.get('role'), b.get('worker_id'), b.get('meta'))
+                except ValueError as e:
+                    abort(400, str(e))
+        return jsonify(ai_config=queue.worker_ai_config())
+
     @routes.post('/api/coaching/worker/<role>/claim')
     def claim(role):
         worker();b=request.get_json()
         if not isinstance(b,dict):abort(400,'Expected an object')
-        try:return jsonify(job=queue.claim(role,b.get('worker_id'),b.get('capabilities')))
+        try:
+            claimed = queue.claim(role,b.get('worker_id'),b.get('capabilities'),b.get('meta'))
+            return jsonify(job=claimed, config_version=queue.worker_ai_config()['version'])
         except QueueConflict:raise
         except ValueError as e:abort(400,str(e))
 
@@ -169,7 +202,8 @@ def register_coaching(app,library,session):
         if not isinstance(b,dict):abort(400,'Expected an object')
         job=get(identity);result=b.get('result')
         if action=='complete' and job['state']=='completed':
-            return jsonify(queue.worker_update(identity,b.get('token'),action,result))
+            updated = queue.worker_update(identity,b.get('token'),action,result,b.get('meta'))
+            return jsonify(**updated, config_version=queue.worker_ai_config()['version'])
         if action=='evidence':
             if job['body'].get('purpose')=='learning_plan':abort(400,'Learning plan requests do not use frame evidence manifests')
             try:
@@ -218,7 +252,9 @@ def register_coaching(app,library,session):
                 result={k:result[k] for k in ('answer','analysis_mode','model','elapsed_seconds','usage') if k in result}
         elif action=='fail':
             result={'error':str((result or {}).get('error','Worker failed'))[:500]}
-        try:return jsonify(queue.worker_update(identity,b.get('token'),action,result))
+        try:
+            updated = queue.worker_update(identity,b.get('token'),action,result,b.get('meta'))
+            return jsonify(**updated, config_version=queue.worker_ai_config()['version'])
         except QueueConflict:raise
         except ValueError as e:abort(400,str(e))
 

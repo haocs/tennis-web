@@ -79,7 +79,7 @@ The home page groups overlapping recordings and recordings starting within 30 mi
 
 ## Home summary and Processing navigation
 
-Top navigation orders **Library**, **Learning**, and **Processing**, with a live status dot on **Processing** indicating ready/online (`green`), paused/stale/unavailable (`yellow`), or error/attention-needed (`red`). Set `TENNIS_PROCESSING_ROOM_URL` to your processing control portal in private deployment settings; without this setting, `/processing` provides a local read-only worker/queue status page. Detailed worker and queue status stay on `/processing` and refresh every 15 seconds.
+Top navigation orders **Library**, **Learning**, and **Processing**, with a live status dot on **Processing** indicating ready/online (`green`), paused/stale/unavailable (`yellow`), or error/attention-needed (`red`). Set `TENNIS_PROCESSING_ROOM_URL` to your external processing control portal in private deployment settings to add a handoff link in `/processing`; Courtside's `/processing` page organizes live worker cards into category shelves (**Video processing** and **Coaching & media export**) refreshing every 15 seconds, exposes a **Default model** dropdown on the **AI coach** card so connected coaching workers adopt provider/model changes without restarting, and lists recordings below under **Review cut**.
 
 The home summary row provides clickable counted items for **Sessions** (grouped practice sessions), **Clips** (all clip cards), **Practice** (total practice minutes and video count, loading all processed video cards), and **Likes & highlights** (deduplicated union of liked videos, liked clips, and clips with active in-scope highlights), alongside **Players** (player count and avatar circles) and **Courts** (court count) management dialogs.
 
@@ -117,7 +117,7 @@ Recording date/time and GPS coordinates come from iPhone metadata extracted by t
 
 ## Backups and restore
 
-For a complete application backup, stop the website container and copy its entire private state directory/volume, including `website.sqlite3`, `annotations.sqlite3`, `coaching.sqlite3` and any WAL/SHM companions. Retain coaching evidence storage alongside it. Reaction changes and Moment history live in `annotations.sqlite3`; a `website.sqlite3` backup alone does not include them. Back up published media separately.
+For a complete application backup, stop the website container and copy its entire private state directory/volume, including `website.sqlite3`, `annotations.sqlite3`, `coaching.sqlite3` and any WAL/SHM companions. Retain coaching evidence storage alongside it. Reaction changes and Moment history live in `annotations.sqlite3`, and `coaching.sqlite3` stores coaching queues, response history, and the shared default AI model setting; a `website.sqlite3` backup alone does not include them. Back up published media separately.
 
 The following utility backs up **only `website.sqlite3`**, including committed WAL changes, without copying media:
 

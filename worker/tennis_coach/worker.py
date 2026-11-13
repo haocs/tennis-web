@@ -92,6 +92,136 @@ def configured_providers(config):
     return resolved
 
 
+WORKER_VERSION = '0.5.0'
+
+
+class _HttpStatusError(ValueError):
+    def __init__(self, code, detail):
+        self.code = code
+        super().__init__(f'Coaching server HTTP {code}: {detail}')
+
+
+def effective_job_config(base_config, remote_ai_config):
+    """Merge non-secret server AI config onto local worker config without mutating base_config."""
+    cfg = dict(base_config)
+    if not isinstance(remote_ai_config, dict):
+        return cfg
+    selection = str(remote_ai_config.get('selection') or '').strip()
+    raw_provider = remote_ai_config.get('provider')
+    if selection in ('', 'worker_default') or not raw_provider:
+        return cfg
+    provider = PROVIDER_ALIASES.get(str(raw_provider).strip().lower())
+    if not provider:
+        return cfg
+    raw_model = str(remote_ai_config.get('model') or '').strip() or None
+    model = raw_model if raw_model and re.fullmatch(r'[A-Za-z0-9._-]{1,64}', raw_model) else None
+    local_providers = configured_providers(base_config)
+    # Preserve any legacy single-provider 'model' for non-selected providers if codex isn't selected.
+    if 'model' in base_config and 'codex' in local_providers and not base_config.get('codex_model') and local_providers == ['codex']:
+        cfg['codex_model'] = base_config['model']
+    cfg['providers'] = [provider] + [p for p in local_providers if p != provider]
+    if provider == 'antigravity':
+        cfg['antigravity_model'] = model or ''
+    elif provider == 'codex':
+        cfg['codex_model'] = model or ''
+        cfg.pop('model', None)
+    elif provider == 'gemini':
+        cfg['gemini_model'] = model or str(base_config.get('gemini_model') or 'gemini-2.5-flash')
+    return cfg
+
+
+def active_selection_summary(base_config, remote_ai_config):
+    """Return (selection, label, providers_list) for worker status metadata and logs."""
+    eff = effective_job_config(base_config, remote_ai_config)
+    providers = configured_providers(eff)
+    sel = 'worker_default'
+    if isinstance(remote_ai_config, dict):
+        raw_sel = str(remote_ai_config.get('selection') or '').strip()
+        raw_prov = PROVIDER_ALIASES.get(str(remote_ai_config.get('provider') or '').strip().lower())
+        raw_model = str(remote_ai_config.get('model') or '').strip()
+        if raw_sel == 'worker_default':
+            sel = 'worker_default'
+        elif raw_prov and raw_model and re.fullmatch(r'[A-Za-z0-9._-]{1,64}', raw_model):
+            sel = f'{raw_prov}:{raw_model}'
+        elif raw_prov:
+            sel = raw_prov
+    primary = providers[0]
+    names = {'antigravity': 'Antigravity', 'codex': 'ChatGPT', 'gemini': 'Gemini API'}
+    model_val = ''
+    if primary == 'antigravity':
+        model_val = str(eff.get('antigravity_model') or '').strip()
+    elif primary == 'codex':
+        model_val = str(eff.get('codex_model') or eff.get('model') or '').strip()
+    elif primary == 'gemini':
+        model_val = str(eff.get('gemini_model') or 'gemini-2.5-flash').strip()
+    if sel == 'worker_default':
+        label = f"Worker default ({names.get(primary, primary)})"
+    elif model_val:
+        label = f"{names.get(primary, primary)} · {model_val}"
+    else:
+        label = f"{names.get(primary, primary)} default"
+    label = label.replace('/', ' ').replace('\\', ' ')[:80]
+    return sel, label, providers
+
+
+def _resolve_antigravity_binary(config):
+    if 'antigravity' in config:
+        return (config.get('antigravity') or '').strip() or None
+    agy = shutil.which('agy')
+    if agy:
+        return agy
+    for candidate in ('/opt/homebrew/bin/agy', '/usr/local/bin/agy'):
+        if Path(candidate).is_file():
+            return candidate
+    return None
+
+
+def discover_antigravity_models(config):
+    """Best-effort one-time discovery of available Antigravity models via CLI."""
+    try:
+        has_agy = bool(config.get('antigravity')) or ('antigravity' in configured_providers(config))
+    except ValueError:
+        has_agy = False
+    if not has_agy:
+        return []
+    agy = _resolve_antigravity_binary(config)
+    if not agy:
+        return []
+    env = os.environ.copy()
+    for key in ('OPENAI_API_KEY', 'CODEX_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY'):
+        env.pop(key, None)
+    try:
+        done = subprocess.run([agy, 'models'], capture_output=True, text=True, env=env, timeout=8)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if done.returncode != 0:
+        return []
+    items = []
+    seen = set()
+    for raw_line in (done.stdout or '').splitlines():
+        segment = raw_line.rsplit('\r', 1)[-1].strip()
+        cleaned = re.sub(r'\x1b\[[0-9;]*[A-Za-z]', '', segment).strip()
+        m = re.match(r'^([a-z0-9][a-z0-9._-]{1,63})\s{2,}(.+)$', cleaned)
+        if not m:
+            continue
+        model_id, display = m.group(1), m.group(2).strip()
+        if '/' in display or '\\' in display or not display:
+            continue
+        selection = f'antigravity:{model_id}'
+        if selection in seen:
+            continue
+        seen.add(selection)
+        items.append({
+            'selection': selection,
+            'provider': 'antigravity',
+            'model': model_id,
+            'label': f'Antigravity · {display[:60]}',
+        })
+        if len(items) >= 25:
+            break
+    return items
+
+
 def atomic(path,data):
     path.parent.mkdir(parents=True,exist_ok=True)
     temp=path.with_suffix('.tmp');temp.write_text(json.dumps(data,indent=2));temp.replace(path)
@@ -363,15 +493,7 @@ def _run_codex(config, providers, local, prompt, schema, files, call_boundary):
 
 
 def _run_antigravity(config, providers, local, prompt, schema, files, call_boundary):
-    if 'antigravity' in config:
-        agy = (config.get('antigravity') or '').strip() or None
-    else:
-        agy = shutil.which('agy')
-        if not agy:
-            for candidate in ('/opt/homebrew/bin/agy', '/usr/local/bin/agy'):
-                if Path(candidate).is_file():
-                    agy = candidate
-                    break
+    agy = _resolve_antigravity_binary(config)
     if not agy:
         raise ProviderFallbackError('Install Antigravity CLI (agy) and sign in on this Mac')
     env = os.environ.copy()
@@ -673,16 +795,88 @@ class Worker:
         else:
             self.identity='coach-'+role+'-'+uuid.uuid4().hex[:16];atomic(identity_file,{'id':self.identity})
         self.stop=threading.Event()
+        self._config_lock=threading.Lock()
+        self.remote_ai_config=None
+        remote_file=self.root/'remote-config.json'
+        if role=='ai' and remote_file.is_file():
+            try:
+                loaded=json.loads(remote_file.read_text())
+                if isinstance(loaded,dict):
+                    self.remote_ai_config=loaded
+            except (OSError,ValueError):
+                pass
+        self._config_synced_once=False
+        self._remote_config_unsupported=False
+        self._discovered_models=None
+
+    def _http_error(self,error):
+        try:detail=json.loads(error.read(8192)).get('error','Request rejected')
+        except (ValueError,AttributeError):detail='Request rejected'
+        detail=redact_secrets(detail,self.config)[:500]
+        return _HttpStatusError(error.code,detail)
 
     def api(self,path,body):
         req=urllib.request.Request(self.config['server_url'].rstrip('/')+'/api/coaching/'+path,data=json.dumps(body).encode(),headers={'Content-Type':'application/json','X-Tennis-Request':'1','Authorization':'Bearer '+self.config['worker_token']})
         try:
             with urllib.request.urlopen(req,timeout=20) as r:return json.load(r)
         except urllib.error.HTTPError as error:
-            try:detail=json.loads(error.read(8192)).get('error','Request rejected')
-            except (ValueError,AttributeError):detail='Request rejected'
-            detail=redact_secrets(detail,self.config)[:500]
-            raise ValueError(f'Coaching server HTTP {error.code}: {detail}') from None
+            raise self._http_error(error) from None
+
+    def worker_meta(self,include_models=False):
+        if self.role!='ai':
+            return {'worker_version':WORKER_VERSION}
+        with self._config_lock:
+            remote=dict(self.remote_ai_config) if isinstance(self.remote_ai_config,dict) else None
+        sel,label,providers=active_selection_summary(self.config,remote)
+        meta={
+            'worker_version':WORKER_VERSION,
+            'providers':providers,
+            'active_selection':sel,
+            'active_model_label':label,
+        }
+        if isinstance(remote,dict) and type(remote.get('version')) is int:
+            meta['config_version']=remote['version']
+        if include_models and self._discovered_models:
+            meta['available_models']=list(self._discovered_models)
+        return meta
+
+    def load_remote_config(self,acknowledge=False):
+        if self.role!='ai':
+            return False
+        try:
+            data=self.api('worker/config',{})
+        except ValueError as error:
+            if getattr(error,'code',None)==404 or 'HTTP 404' in str(error):
+                self._remote_config_unsupported=True
+                return False
+            raise
+        cfg=data.get('ai_config') if isinstance(data,dict) else None
+        if not isinstance(cfg,dict):
+            return False
+        with self._config_lock:
+            self.remote_ai_config=cfg
+            atomic(self.root/'remote-config.json',cfg)
+            self._config_synced_once=True
+            self._remote_config_unsupported=False
+        if acknowledge:
+            try:
+                self.api('worker/config',{'worker_id':self.identity,'role':self.role,'meta':self.worker_meta(include_models=True)})
+            except ValueError as error:
+                if getattr(error,'code',None)!=404 and 'HTTP 404' not in str(error):
+                    raise
+        return True
+
+    def maybe_sync_config(self,response=None,acknowledge=False):
+        if self.role!='ai':
+            return False
+        server_version=response.get('config_version') if isinstance(response,dict) else None
+        if type(server_version) is int:
+            self._remote_config_unsupported=False
+        with self._config_lock:
+            applied=self.remote_ai_config.get('version') if isinstance(self.remote_ai_config,dict) else None
+        if (not self._config_synced_once and not self._remote_config_unsupported) or (type(server_version) is int and server_version!=applied):
+            return self.load_remote_config(acknowledge=acknowledge)
+        return False
 
     def state(self,**value):
         atomic(self.root/'state.json',dict(worker_id=self.identity,role=self.role,updated=time.time(),**value))
@@ -702,32 +896,54 @@ class Worker:
         try:self.storage_ready()
         except Exception:
             self.state(status='storage_unavailable');return False
-        response=self.api('worker/'+self.role+'/claim',{'worker_id':self.identity,'capabilities':[CAPABILITY,LEARNING_PLAN_CAPABILITY] if self.role=='ai' else [RENDER_SHARE_CAPABILITY,RENDER_SHARE_V1_CAPABILITY]});job=response['job']
-        if not job:self.state(status='ready');return False
+        if self.role=='ai':
+            if self._discovered_models is None:
+                self._discovered_models=discover_antigravity_models(self.config)
+            if not self._config_synced_once and not self._remote_config_unsupported:
+                self.maybe_sync_config(acknowledge=False)
+        response=self.api('worker/'+self.role+'/claim',{'worker_id':self.identity,'capabilities':[CAPABILITY,LEARNING_PLAN_CAPABILITY] if self.role=='ai' else [RENDER_SHARE_CAPABILITY,RENDER_SHARE_V1_CAPABILITY],'meta':self.worker_meta(include_models=True)});job=response['job']
+        self.maybe_sync_config(response,acknowledge=(job is None))
+        if not job:
+            if self.role=='ai':
+                self.state(status='ready',**self.worker_meta())
+            else:
+                self.state(status='ready')
+            return False
+        if self.role=='ai':
+            with self._config_lock:
+                job_config=effective_job_config(self.config,self.remote_ai_config)
+        else:
+            job_config=self.config
         identity=job['id'];local=self.root/'jobs'/identity/hashlib.sha256(job['token'].encode()).hexdigest()[:24];local.mkdir(parents=True,exist_ok=True)
         self.state(status='working',job_id=identity);atomic(local/'job.json',job)
         quit_beat=threading.Event()
         def beat():
             while not quit_beat.wait(20):
-                try:self.api('worker/jobs/'+identity+'/heartbeat',{'token':job['token']})
-                except Exception:self.state(status='connection_lost',job_id=identity)
+                try:
+                    hb=self.api('worker/jobs/'+identity+'/heartbeat',{'token':job['token'],'meta':self.worker_meta()})
+                except Exception:
+                    self.state(status='connection_lost',job_id=identity)
+                    continue
+                if self.role=='ai':
+                    try:self.maybe_sync_config(hb,acknowledge=True)
+                    except Exception:pass
         thread=threading.Thread(target=beat,daemon=True);thread.start()
         try:
             if self.role=='ai':
                 # All local preflight checks happen before the non-retryable provider boundary.
                 def before_call(manifest):
                     if manifest:self.api('worker/jobs/'+identity+'/evidence',{'token':job['token'],'result':manifest})
-                    self.api('worker/jobs/'+identity+'/calling',{'token':job['token']})
-                result=analyze(self.config,job,local,before_call)
-            else:result=render(self.config,job,local)
+                    self.api('worker/jobs/'+identity+'/calling',{'token':job['token'],'meta':self.worker_meta()})
+                result=analyze(job_config,job,local,before_call)
+            else:result=render(job_config,job,local)
             atomic(local/'result.json',result)
-            self.api('worker/jobs/'+identity+'/complete',{'token':job['token'],'result':result if self.role=='ai' else None})
+            self.api('worker/jobs/'+identity+'/complete',{'token':job['token'],'result':result if self.role=='ai' else None,'meta':self.worker_meta()})
             self.state(status='completed',job_id=identity)
         except Exception as e:
             # Keep private diagnostics locally. Never ship raw provider stderr or file paths.
             (local/'error.txt').write_text(redact_secrets(str(e),self.config))
             message=redact_secrets(str(e),self.config) if isinstance(e,ValueError) else 'Worker failed. Check the private worker log.'
-            try:self.api('worker/jobs/'+identity+'/fail',{'token':job['token'],'result':{'error':message}})
+            try:self.api('worker/jobs/'+identity+'/fail',{'token':job['token'],'result':{'error':message},'meta':self.worker_meta()})
             except Exception:pass
             self.state(status='failed',job_id=identity,error=message)
         finally:quit_beat.set();thread.join(timeout=1)

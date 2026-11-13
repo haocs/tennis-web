@@ -178,3 +178,23 @@ website container changes:
   `schema_version: 1` for learning plans).
 - Evidence pinning and `/calling` state transitions occur at most once per job before
   the first provider call starts; timed-out provider calls never trigger a fallback call.
+
+## Processing Room live config sync
+
+AI workers stay synchronized with the Processing Room's **Default model** setting
+without restarting or storing provider credentials/paths on the NAS:
+
+- On startup, each 5-second idle `claim`, and each 20-second active job `heartbeat`,
+  the server returns `config_version`. When the version changes, the AI worker
+  fetches the latest non-secret preference via `GET /api/coaching/worker/config`,
+  saves `local_state/ai/remote-config.json`, and acknowledges its applied state via
+  `POST /api/coaching/worker/config` (and on `claim` / `heartbeat`) so the Processing
+  Room updates cleanly to `Synced`.
+- Before running a newly claimed AI job, `effective_job_config` snapshots the synced
+  provider and optional model ahead of the remaining locally configured `providers`
+  fallback list so mid-job config changes never mutate an active request and local
+  fallbacks stay intact.
+- Selecting **Worker config default** (`worker_default`) uses the worker's local
+  `config.json` unchanged. When connected to an older server that returns `HTTP 404`
+  on `/api/coaching/worker/config`, the worker degrades gracefully to local
+  `config.json` without errors.

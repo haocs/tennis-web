@@ -2,7 +2,7 @@
 const $ = (q, root=document) => root.querySelector(q);
 const $$ = (q, root=document) => [...root.querySelectorAll(q)];
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const model = {sessions:[], practiceGroups:[], courts:[], players:[], homePlayer:'', clipPlayer:'', selectingClips:false, selectedClips:new Set(), session:null, status:null, sort:'original', likedOnly:false, mode:'full', current:null, autoplay:false, query:'', homeSort:'latest', homeView:'sessions', busy:new Set()};
+const model = {sessions:[], practiceGroups:[], courts:[], players:[], homePlayer:'', clipPlayer:'', selectingClips:false, selectedClips:new Set(), session:null, status:null, coachingWorkers:null, savingAiConfig:false, sort:'original', likedOnly:false, mode:'full', current:null, autoplay:false, query:'', homeSort:'latest', homeView:'sessions', busy:new Set()};
 let toastTimer;
 function toast(message){ $('#toast').textContent=message; $('#toast').classList.add('visible'); clearTimeout(toastTimer); toastTimer=setTimeout(()=>$('#toast').classList.remove('visible'),6000); }
 function time(seconds, precise=false){ const n=Math.max(0, Number(seconds)||0); const ms=Math.round(n*1000); const whole=precise?Math.floor(ms/1000):Math.round(n); const h=Math.floor(whole/3600), m=Math.floor(whole%3600/60),s=whole%60; return (h?h+':'+String(m).padStart(2,'0'):String(m))+':'+String(s).padStart(2,'0')+(precise?'.'+String(ms%1000).padStart(3,'0'):''); }
@@ -42,12 +42,94 @@ function workerStatusHTML(){
  const detail=s?.current_video||(!warning&&s?.progress?.total?`${s.progress.current} / ${s.progress.total} ${s.progress.unit||''}`:'');
  return `<a class="worker-status${warning?' warning':''}" href="${esc($('#main').dataset.processingUrl)}" aria-label="${esc(title)} — Open Processing Room"><span class="status-orb status-${info.color}${warning?' warning':''}${info.color==='red'?' danger':''}" aria-hidden="true"><span class="dot"></span></span><span class="worker-status-copy"><strong>${esc(title)}</strong>${detail?`<span>${esc(detail)}</span>`:''}</span><span class="worker-status-link">Processing Room ↗</span></a>`;
 }
+function providerDisplayName(p){ return ({antigravity:'Antigravity',codex:'ChatGPT',gemini:'Gemini'})[p]||p; }
+function workerClock(epoch){ return epoch?new Date(epoch*1000).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}):'Unavailable'; }
+function aiModelOptionsHTML(cfg){
+ if(!cfg||!Array.isArray(cfg.options)||!cfg.options.length)return '';
+ const groups=new Map();
+ for(const opt of cfg.options){
+  const g=opt.group||'Default';
+  if(!groups.has(g))groups.set(g,[]);
+  groups.get(g).push(opt);
+ }
+ let html='';
+ for(const [group,items] of groups.entries()){
+  const optsHTML=items.map(opt=>`<option value="${esc(opt.selection)}"${opt.selection===cfg.selection?' selected':''}>${esc(opt.label)}</option>`).join('');
+  html+=group==='Default'?optsHTML:`<optgroup label="${esc(group)}">${optsHTML}</optgroup>`;
+ }
+ return html;
+}
+function roleWorkerState(role){
+ const cw=model.coachingWorkers;
+ const workers=(cw?.workers||[]).filter(w=>w.role===role);
+ const online=workers.filter(w=>w.online);
+ const latest=[...workers].sort((a,b)=>(b.updated||0)-(a.updated||0))[0]||null;
+ return {cw,workers,online,latest};
+}
+function aiWorkerCardHTML(){
+ const {cw,workers,online,latest}=roleWorkerState('ai');
+ const q=cw?.queue?.ai||{queued:0,active:0,needs_review:0};
+ const cfg=cw?.ai_config;
+ const color=q.needs_review>0||(online.length&&online.every(w=>w.status==='failed'))?'red':online.length?'green':'yellow';
+ const warning=color!=='green';
+ const working=online.some(w=>w.status==='leased'||w.status==='calling')||q.active>0;
+ const badge=!cw?'CHECKING':cw.error?'STATUS UNAVAILABLE':!cw.enabled?'NOT CONFIGURED':working?'WORKING':online.length?'ONLINE':latest?'OFFLINE':'WAITING FOR WORKER';
+ const title=q.needs_review>0?'Needs review':working?'Working':online.length?'Ready':!cw?'Checking…':cw.error?'Unavailable':!cw.enabled?'Not configured':latest?'Offline':'Waiting for worker';
+ const subParts=[];
+ if(workers.length>1)subParts.push(`${online.length}/${workers.length} online`);
+ if(q.needs_review>0)subParts.push(`${q.needs_review} request${q.needs_review===1?'':'s'} need review`);
+ else if(q.active||q.queued){
+  const bits=[];
+  if(q.active)bits.push(`${q.active} active`);
+  if(q.queued)bits.push(`${q.queued} queued`);
+  subParts.push(bits.join(' · '));
+ }else if(!cw?.enabled&&cw&&!cw.error)subParts.push('Set COACH_WORKER_TOKEN');
+ else if(!online.length&&latest)subParts.push('Check the AI coaching worker.');
+ else if(!online.length&&cw&&!cw.error)subParts.push('No AI worker connected yet.');
+ const primary=online[0]||latest;
+ const providers=Array.isArray(primary?.meta?.providers)?primary.meta.providers:[];
+ if(providers.length)subParts.push(providers.map(providerDisplayName).join(' → '));
+ if(cfg&&online.length&&!cw?.error){
+  const allSynced=online.every(w=>w.meta?.config_version===cfg.version);
+  if(allSynced&&cfg.version>0)subParts.push('Synced');
+  else if(!allSynced&&(cfg.version>0||online.some(w=>typeof w.meta?.config_version==='number')))subParts.push('Syncing on next heartbeat…');
+ }
+ const heartbeat=latest?.updated?`Heartbeat ${esc(workerClock(latest.updated))}`:'No heartbeat';
+ const selectHTML=cfg?.options?.length?`<div class="worker-control-row"><label for="coaching-default-model">Default model</label><select id="coaching-default-model" aria-label="Default model" ${model.savingAiConfig?'disabled':''}>${aiModelOptionsHTML(cfg)}</select></div>`:'';
+ return `<article class="status-panel worker-card" id="worker-card-ai" data-worker-role="ai"><div class="worker-card-main"><div class="status-orb status-${color}${warning?' warning':''}${color==='red'?' danger':''}"><span class="dot"></span></div><div class="status-copy"><div class="status-title">AI coach · ${esc(title)}</div><div class="status-subtitle">${esc(subParts.join(' · '))}</div></div><div class="status-aside">${esc(badge)}<br>${heartbeat}</div></div>${selectHTML}</article>`;
+}
+function renderWorkerCardHTML(){
+ const {cw,workers,online,latest}=roleWorkerState('render');
+ const q=cw?.queue?.render||{queued:0,active:0};
+ const color=online.length&&online.every(w=>w.status==='failed')?'red':online.length?'green':'yellow';
+ const warning=color!=='green';
+ const working=online.some(w=>w.status==='leased')||q.active>0;
+ const badge=!cw?'CHECKING':cw.error?'STATUS UNAVAILABLE':!cw.enabled?'NOT CONFIGURED':working?'WORKING':online.length?'ONLINE':latest?'OFFLINE':'WAITING FOR WORKER';
+ const title=working?'Working':online.length?'Ready':!cw?'Checking…':cw.error?'Unavailable':!cw.enabled?'Not configured':latest?'Offline':'Waiting for worker';
+ const subParts=[];
+ if(workers.length>1)subParts.push(`${online.length}/${workers.length} online`);
+ if(q.active||q.queued){
+  const bits=[];
+  if(q.active)bits.push(`${q.active} active`);
+  if(q.queued)bits.push(`${q.queued} queued`);
+  subParts.push(bits.join(' · '));
+ }else if(!cw?.enabled&&cw&&!cw.error)subParts.push('Set COACH_WORKER_TOKEN');
+ else if(!online.length&&latest)subParts.push('Check the media export worker.');
+ else if(!online.length&&cw&&!cw.error)subParts.push('No media export worker connected yet.');
+ const hasShareV2=workers.some(w=>Array.isArray(w.capabilities)&&w.capabilities.includes('share-export-v2'));
+ if(workers.length)subParts.push(hasShareV2?'Coaching frames · HDR interval download':'Clip study exports · coaching frames');
+ const heartbeat=latest?.updated?`Heartbeat ${esc(workerClock(latest.updated))}`:'No heartbeat';
+ return `<article class="status-panel worker-card" id="worker-card-render" data-worker-role="render"><div class="worker-card-main"><div class="status-orb status-${color}${warning?' warning':''}${color==='red'?' danger':''}"><span class="dot"></span></div><div class="status-copy"><div class="status-title">Media export · ${esc(title)}</div><div class="status-subtitle">${esc(subParts.join(' · '))}</div></div><div class="status-aside">${esc(badge)}<br>${heartbeat}</div></div></article>`;
+}
+function processingShelvesHTML(){
+ return `<div class="worker-shelf" data-shelf="video-processing"><h2>Video processing</h2><div class="worker-shelf-grid worker-shelf-single">${statusHTML()}</div></div><div class="worker-shelf" data-shelf="coaching"><h2>Coaching &amp; media export</h2><div class="worker-shelf-grid worker-shelf-two">${aiWorkerCardHTML()}${renderWorkerCardHTML()}</div></div>`;
+}
 function processingRoom(){
  model.session=null;nav();document.title='Processing Room — Courtside';
  const portalUrl=$('#main')?.dataset.processingUrl||'/processing';
  const externalHandoff=portalUrl!=='/processing'?`<div class="processing-portal-handoff"><a class="button small" id="processing-portal-link" href="${esc(portalUrl)}">Open Processing Server Portal ↗</a></div>`:'';
  const recordingsHTML=model.sessions.length?`<div class="processing-cut-list">${model.sessions.map(s=>`<article class="processing-cut-item" data-session-id="${esc(s.id)}"><div><strong><a href="/review/${s.id}">${esc(s.title)}</a></strong><span class="processing-cut-meta">${esc(dateText(s))} · ${s.clips.length} ${s.clips.length===1?'clip':'clips'} · ${time(s.video.duration_seconds)} kept · ${time(s.removed_seconds)} removed</span></div><a class="button small" href="/review/${s.id}/cuts">Review cut</a></article>`).join('')}</div>`:'<p class="note-empty">No processed recordings yet.</p>';
- $('#main').innerHTML=`<div class="review-breadcrumb"><a href="/">Library</a><span>/</span>Processing Room</div><div class="processing-room-header"><h1>Processing Room</h1>${externalHandoff}</div><section id="processing-status" aria-label="Processing status">${statusHTML()}</section><section id="processing-cut-reviews" class="notes-panel" aria-label="Review cut"><h2>Review cut</h2>${recordingsHTML}</section>`;applyBars();
+ $('#main').innerHTML=`<div class="review-breadcrumb"><a href="/">Library</a><span>/</span>Processing Room</div><div class="processing-room-header"><h1>Processing Room</h1>${externalHandoff}</div><section id="processing-status" aria-label="Worker status">${processingShelvesHTML()}</section><section id="processing-cut-reviews" class="notes-panel" aria-label="Review cut"><h2>Review cut</h2>${recordingsHTML}</section>`;applyBars();
 }
 
 function applyBars(){ $$('.progress-fill').forEach(el=>el.style.width=`${el.dataset.progress}%`); }
@@ -316,12 +398,83 @@ $('#edit-form').addEventListener('submit',async event=>{
  }catch(error){if(model.editGen===editGen)$('#edit-error').textContent=detailsSaved?`Details saved, but note could not be saved: ${error.message}`:error.message;/* Keep the captured entity and draft on conflict. */}
  finally{model.editSaving=false;button.disabled=false;$('#close-edit').disabled=false;}
 });
-async function refreshStatus(){try{model.status=await api('/api/status');updateProcessingDot();const panel=$('#processing-status');if(panel){panel.innerHTML=location.pathname==='/processing'?statusHTML():workerStatusHTML();applyBars();}}catch(error){model.status={available:false,error:true};updateProcessingDot();const panel=$('#processing-status');if(panel){panel.innerHTML=location.pathname==='/processing'?statusHTML():workerStatusHTML();}}}
+async function refreshCoachingWorkers(){
+ try{model.coachingWorkers=await api('/api/coaching/workers');}
+ catch(error){model.coachingWorkers={enabled:false,error:true,workers:[],queue:{ai:{queued:0,active:0,needs_review:0},render:{queued:0,active:0}},ai_config:model.coachingWorkers?.ai_config||null};}
+ return model.coachingWorkers;
+}
+function renderProcessingStatusPanel(){
+ const panel=$('#processing-status');
+ if(!panel)return;
+ if(location.pathname==='/processing'){
+  if(model.savingAiConfig)return;
+  if(document.activeElement?.id==='coaching-default-model'){
+   const tmp=document.createElement('div');
+   tmp.innerHTML=processingShelvesHTML();
+   const nextVideo=tmp.querySelector('[data-shelf="video-processing"]'),curVideo=panel.querySelector('[data-shelf="video-processing"]');
+   if(nextVideo&&curVideo)curVideo.innerHTML=nextVideo.innerHTML;
+   const nextRender=tmp.querySelector('#worker-card-render'),curRender=panel.querySelector('#worker-card-render');
+   if(nextRender&&curRender)curRender.replaceWith(nextRender);
+   const nextMain=tmp.querySelector('#worker-card-ai .worker-card-main'),curMain=panel.querySelector('#worker-card-ai .worker-card-main');
+   if(nextMain&&curMain)curMain.replaceWith(nextMain);
+   applyBars();
+   return;
+  }
+  panel.innerHTML=processingShelvesHTML();
+ }else{
+  panel.innerHTML=workerStatusHTML();
+ }
+ applyBars();
+}
+async function refreshStatus(){
+ const onProc=location.pathname==='/processing';
+ const [status]=await Promise.all([
+  api('/api/status').catch(()=>({available:false,error:true})),
+  onProc?refreshCoachingWorkers():Promise.resolve(null),
+ ]);
+ model.status=status;
+ updateProcessingDot();
+ renderProcessingStatusPanel();
+}
+document.addEventListener('change',async event=>{
+ const select=event.target.closest?.('#coaching-default-model');
+ if(!select||model.savingAiConfig)return;
+ const cfg=model.coachingWorkers?.ai_config;
+ if(!cfg)return;
+ const selection=select.value;
+ model.savingAiConfig=true;
+ select.disabled=true;
+ let refreshedAfterSave=false;
+ try{
+  const updated=await api('/api/coaching/config',{method:'PUT',body:JSON.stringify({selection,version:cfg.version})});
+  if(!model.coachingWorkers)model.coachingWorkers={enabled:true,workers:[],queue:{ai:{queued:0,active:0,needs_review:0},render:{queued:0,active:0}}};
+  model.coachingWorkers.ai_config=updated;
+  await refreshCoachingWorkers();
+  if(!model.coachingWorkers.ai_config)model.coachingWorkers.ai_config=updated;
+  refreshedAfterSave=true;
+  toast('Default AI model updated.');
+ }catch(error){
+  if(error.status===409&&error.current){
+   if(!model.coachingWorkers)model.coachingWorkers={enabled:true,workers:[],queue:{ai:{queued:0,active:0,needs_review:0},render:{queued:0,active:0}}};
+   model.coachingWorkers.ai_config=error.current;
+  }else if(!refreshedAfterSave){
+   await refreshCoachingWorkers();
+  }
+  toast(error.message);
+ }finally{
+  model.savingAiConfig=false;
+  if(location.pathname==='/processing'&&$('#processing-status')){
+   $('#processing-status').innerHTML=processingShelvesHTML();
+   applyBars();
+   $('#coaching-default-model')?.focus();
+  }
+ }
+});
 async function refreshShared(){if(location.pathname.endsWith('/compare'))return;if(document.hidden||['/processing','/learning'].includes(location.pathname)||location.pathname.startsWith('/processing/cuts/')||/^\/review\/[a-f0-9]{64}\/(cuts|compare)$/.test(location.pathname))return;try{if(model.session){const fresh=await api(`/api/sessions/${model.session.id}`);const playersChanged=JSON.stringify([fresh.players,fresh.player_assignment,fresh.clips.map(c=>[c.main_player,c.player_assignment])])!==JSON.stringify([model.session.players,model.session.player_assignment,model.session.clips.map(c=>[c.main_player,c.player_assignment])]);const changed=playersChanged||fresh.clips.some((c,i)=>c.like.version!==model.session.clips[i]?.like.version||c.details.version!==model.session.clips[i]?.details.version||c.highlighted!==model.session.clips[i]?.highlighted||c.highlight_count!==model.session.clips[i]?.highlight_count)||fresh.like.version!==model.session.like.version;model.session.players=fresh.players;model.session.recording_players=fresh.recording_players;model.session.player_assignment=fresh.player_assignment;model.session.like=fresh.like;model.session.overrides=fresh.overrides;model.session.title=fresh.title;model.session.location_label=fresh.location_label;model.session.court=fresh.court;model.session.court_status=fresh.court_status;model.session.court_name=fresh.court_name;fresh.clips.forEach(c=>{const current=model.session.clips.find(v=>v.id===c.id);if(current){current.like=c.like;current.highlighted=c.highlighted;current.highlight_count=c.highlight_count;current.highlights=c.highlights;current.title=c.title;current.details=c.details;current.main_player=c.main_player;current.players=c.players;current.player_assignment=c.player_assignment;}});updateReviewHeading();$('#review-location').textContent='⌾ '+locationText(fresh);if(changed){if(playersChanged){model.players=(await api('/api/players')).players;PlayerUI.syncReview();updatePlayerDownload();}refreshLikeButtons();renderClipList();}}else{const data=await api('/api/sessions');const fingerprint=JSON.stringify([data.players,data.courts,data.practice_groups,data.sessions.map(s=>[s.id,s.published_at,s.recorded_at_iso,s.like,s.overrides,s.players,s.player_assignment,s.clips.map(c=>[c.like,c.highlighted,c.highlight_count,c.main_player,c.player_assignment])])]);if(fingerprint!==model.fingerprint){model.fingerprint=fingerprint;model.sessions=data.sessions;model.practiceGroups=data.practice_groups||[];model.courts=data.courts||[];model.players=data.players||[];model.libraryAvailable=data.library_available;model.invalidSessions=data.invalid_sessions;PlayerUI.syncHome();homeResults();nav();CourtUI.renderSaved();}}}catch(error){/* Keep the current player and last loaded library during a transient outage. */}}
 window.addEventListener('hashchange',()=>{if(!model.session&&location.pathname==='/'){model.homeView=homeViewFromLocation();if($('#session-grid'))homeResults();else home();}});
 window.addEventListener('popstate',()=>{if(!model.session&&location.pathname==='/'){model.homeView=homeViewFromLocation();if($('#session-grid'))homeResults();else home();}});
 window.addEventListener('focus',()=>{refreshStatus();refreshShared();});
-async function boot(){try{const [data,status]=await Promise.all([api('/api/sessions'),api('/api/status').catch(()=>({available:false,error:true}))]);model.sessions=data.sessions;model.practiceGroups=data.practice_groups||[];model.courts=data.courts||[];model.players=data.players||[];model.libraryAvailable=data.library_available;model.invalidSessions=data.invalid_sessions;model.status=status;updateProcessingDot();const cutAlias=location.pathname.match(/^\/processing\/cuts\/([a-f0-9]{64})$/);const match=location.pathname.match(/^\/review\/([a-f0-9]{64})(\/(?:cuts|compare))?$/);if(cutAlias||match){const sid=cutAlias?cutAlias[1]:match[1];const isCompare=match?.[2]==='/compare';const isCuts=Boolean(cutAlias||match?.[2]==='/cuts');const s=await api(`/api/sessions/${sid}`);if(isCompare){await CutCompare.mount(s);document.title=`Compare versions · ${s.title} — Courtside`;}else if(isCuts){await NoteUI.cuts(s);document.title=`Review cut · ${s.title} — Courtside`;}else review(s);}else if(location.pathname==='/processing')processingRoom();else if(location.pathname==='/learning')LearningUI.mount();else home();setInterval(refreshStatus,15000);setInterval(refreshShared,10000);}catch(error){$('#main').innerHTML=`<div class="empty"><p class="eyebrow">COURTSIDE</p><h1>We couldn’t open the library.</h1><p>${esc(error.message)}</p><a href="/" class="button primary">Try again</a></div>`;}}
+async function boot(){try{const isProc=location.pathname==='/processing';const [data,status]=await Promise.all([api('/api/sessions'),api('/api/status').catch(()=>({available:false,error:true})),isProc?refreshCoachingWorkers():Promise.resolve(null)]);model.sessions=data.sessions;model.practiceGroups=data.practice_groups||[];model.courts=data.courts||[];model.players=data.players||[];model.libraryAvailable=data.library_available;model.invalidSessions=data.invalid_sessions;model.status=status;updateProcessingDot();const cutAlias=location.pathname.match(/^\/processing\/cuts\/([a-f0-9]{64})$/);const match=location.pathname.match(/^\/review\/([a-f0-9]{64})(\/(?:cuts|compare))?$/);if(cutAlias||match){const sid=cutAlias?cutAlias[1]:match[1];const isCompare=match?.[2]==='/compare';const isCuts=Boolean(cutAlias||match?.[2]==='/cuts');const s=await api(`/api/sessions/${sid}`);if(isCompare){await CutCompare.mount(s);document.title=`Compare versions · ${s.title} — Courtside`;}else if(isCuts){await NoteUI.cuts(s);document.title=`Review cut · ${s.title} — Courtside`;}else review(s);}else if(isProc)processingRoom();else if(location.pathname==='/learning')LearningUI.mount();else home();setInterval(refreshStatus,15000);setInterval(refreshShared,10000);}catch(error){$('#main').innerHTML=`<div class="empty"><p class="eyebrow">COURTSIDE</p><h1>We couldn’t open the library.</h1><p>${esc(error.message)}</p><a href="/" class="button primary">Try again</a></div>`;}}
 document.addEventListener('error',event=>{if(event.target.matches?.('img.clip-poster')){event.target.hidden=true;event.target.parentElement.classList.add('thumbnail-unavailable');}},true);
 CourtUI.init();
 PlayerUI.init();

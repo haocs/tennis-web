@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 import shutil
 import threading
+import time
 
 import pytest
 from playwright.sync_api import sync_playwright, expect
@@ -3892,6 +3893,136 @@ def test_coaching_subject_selector_auto_coach_reopen_followup_and_learning(brows
         for check_w in (320, 390, 1280):
             page.set_viewport_size({'width': check_w, 'height': 844})
             assert not page.evaluate('document.documentElement.scrollWidth > innerWidth'), f'Learning overflow at {check_w}px'
+        assert not errors
+        page.close()
+    finally:
+        server.shutdown()
+        thread.join()
+
+
+def test_processing_room_worker_shelves_and_default_ai_model(browser, tmp_path):
+    from app import create_app
+    from worker.tennis_coach.annotations import CAPABILITY, LEARNING_PLAN_CAPABILITY, RENDER_SHARE_CAPABILITY, RENDER_SHARE_V1_CAPABILITY
+
+    app, root, data = setup.__wrapped__(tmp_path / 'proc-shelves-ui')
+    status_file = tmp_path / 'Processing-status.json'
+    status_file.write_text(json.dumps({
+        'service': 'Running',
+        'stage': 'Idle',
+        'heartbeat': time.time(),
+        'files': [],
+    }))
+    worker_secret = 'proc-ui-worker-token'
+    app = create_app({
+        'TESTING': True,
+        'LIBRARY_ROOT': str(root),
+        'DATA_ROOT': app.config['DATA_ROOT'],
+        'STATUS_FILE': str(status_file),
+        'COACH_WORKER_TOKEN': worker_secret,
+    })
+    c = app.test_client()
+    wh = {'X-Tennis-Request': '1', 'Authorization': f'Bearer {worker_secret}'}
+    assert c.post('/api/coaching/worker/ai/claim', json={
+        'worker_id': 'mac-ai-1',
+        'capabilities': [CAPABILITY, LEARNING_PLAN_CAPABILITY],
+        'meta': {
+            'worker_version': '0.5.0',
+            'providers': ['antigravity', 'codex', 'gemini'],
+            'active_selection': 'worker_default',
+            'active_model_label': 'Worker default (Antigravity)',
+            'config_version': 0,
+            'available_models': [{
+                'selection': 'antigravity:gemini-4-hydrogen-high',
+                'provider': 'antigravity',
+                'model': 'gemini-4-hydrogen-high',
+                'label': 'Antigravity · Gemini 4 Hydrogen (High)',
+            }],
+        },
+    }, headers=wh).status_code == 200
+    assert c.post('/api/coaching/worker/render/claim', json={
+        'worker_id': 'mac-render-1',
+        'capabilities': [RENDER_SHARE_CAPABILITY, RENDER_SHARE_V1_CAPABILITY],
+        'meta': {'worker_version': '0.5.0'},
+    }, headers=wh).status_code == 200
+
+    server = make_server('127.0.0.1', 0, app, threaded=True)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f'http://127.0.0.1:{server.server_port}'
+    try:
+        page = browser.new_page(viewport={'width': 1280, 'height': 900})
+        page.set_default_timeout(6000)
+        errors = []
+        page.on('pageerror', lambda err: errors.append(str(err)))
+
+        page.goto(base_url + '/processing')
+        expect(page.get_by_role('heading', name='Processing Room', exact=True)).to_be_visible()
+
+        # 1. Verify two worker shelves plus Review cut section in order.
+        shelves = page.locator('#processing-status .worker-shelf')
+        expect(shelves).to_have_count(2)
+        expect(shelves.nth(0).locator('h2')).to_have_text('Video processing')
+        expect(shelves.nth(1).locator('h2')).to_have_text('Coaching & media export')
+        expect(page.locator('#worker-card-ai')).to_contain_text('AI coach · Ready')
+        expect(page.locator('#worker-card-ai')).to_contain_text('Antigravity → ChatGPT → Gemini')
+        expect(page.locator('#worker-card-render')).to_contain_text('Media export · Ready')
+        expect(page.locator('#worker-card-render')).to_contain_text('HDR interval download')
+        expect(page.locator('#processing-cut-reviews')).to_be_visible()
+
+        box_s1 = shelves.nth(0).bounding_box()
+        box_s2 = shelves.nth(1).bounding_box()
+        box_cuts = page.locator('#processing-cut-reviews').bounding_box()
+        assert box_s1['y'] < box_s2['y'] < box_cuts['y']
+
+        # 2. Change default AI model via dropdown -> persists, shows syncing state, survives reload.
+        model_select = page.locator('#coaching-default-model')
+        expect(model_select).to_have_value('worker_default')
+        model_select.select_option('antigravity:gemini-4-hydrogen-high')
+        expect(page.locator('#toast')).to_have_text('Default AI model updated.')
+        expect(page.locator('#worker-card-ai')).to_contain_text('Syncing on next heartbeat…')
+
+        page.reload()
+        expect(page.locator('#coaching-default-model')).to_have_value('antigravity:gemini-4-hydrogen-high')
+        expect(page.locator('#worker-card-ai')).to_contain_text('Syncing on next heartbeat…')
+
+        # 3. Worker fetches updated config and acknowledges version 1 -> status updates to Synced.
+        cfg_resp = c.get('/api/coaching/worker/config', headers={'Authorization': f'Bearer {worker_secret}'})
+        assert cfg_resp.status_code == 200 and cfg_resp.json['ai_config']['version'] == 1
+        assert c.post('/api/coaching/worker/config', json={
+            'worker_id': 'mac-ai-1',
+            'role': 'ai',
+            'meta': {
+                'worker_version': '0.5.0',
+                'providers': ['antigravity', 'codex', 'gemini'],
+                'active_selection': 'antigravity:gemini-4-hydrogen-high',
+                'config_version': 1,
+            },
+        }, headers=wh).status_code == 200
+        page.evaluate('() => refreshStatus()')
+        expect(page.locator('#worker-card-ai')).to_contain_text('Synced')
+        expect(page.locator('#worker-card-ai')).not_to_contain_text('Syncing on next heartbeat…')
+
+        # 4. Focused #coaching-default-model is not clobbered by background refreshStatus().
+        page.locator('#coaching-default-model').focus()
+        page.evaluate('() => { window.__keptSelect = document.querySelector("#coaching-default-model"); }')
+        page.evaluate('() => refreshStatus()')
+        assert page.evaluate('() => document.querySelector("#coaching-default-model") === window.__keptSelect')
+
+        # 5. Concurrent server edit causes HTTP 409 and adopts current state cleanly.
+        assert c.put(
+            '/api/coaching/config',
+            json={'selection': 'gemini:gemini-2.5-pro', 'version': 1},
+            headers={'X-Tennis-Request': '1'},
+        ).status_code == 200
+        page.locator('#coaching-default-model').select_option('codex')
+        expect(page.locator('#toast')).to_contain_text('changed')
+        expect(page.locator('#coaching-default-model')).to_have_value('gemini:gemini-2.5-pro')
+
+        # 6. Zero horizontal overflow across desktop and mobile viewports.
+        for w in (1280, 390, 320):
+            page.set_viewport_size({'width': w, 'height': 844})
+            assert not page.evaluate('document.documentElement.scrollWidth > innerWidth'), f'Processing overflow at {w}px'
+
         assert not errors
         page.close()
     finally:

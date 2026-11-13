@@ -395,3 +395,271 @@ def test_learning_plan_supports_antigravity_and_gemini_without_images(tmp_path, 
     assert boundaries == [None]
     assert res['analysis_mode'] == 'learning_plan'
     assert json.loads(res['answer'])['schema_version'] == 1
+
+
+def test_worker_overview_and_optimistic_ai_config(setup):
+    app, root, data = setup
+    c = app.test_client()
+    # 1. Initially disabled when COACH_WORKER_TOKEN is unset.
+    res = c.get('/api/coaching/workers')
+    assert res.status_code == 200
+    assert res.json['enabled'] is False
+    assert res.json['workers'] == []
+    assert res.json['ai_config']['selection'] == 'worker_default'
+    assert res.json['ai_config']['version'] == 0
+    assert any(o['selection'] == 'antigravity:gemini-4-carbon-high' for o in res.json['ai_config']['options'])
+
+    # 2. Enable token and register ai + render workers with sanitized metadata.
+    app.config['COACH_WORKER_TOKEN'] = TOKEN
+    wh = {'X-Tennis-Request': '1', 'Authorization': f'Bearer {TOKEN}'}
+    claim_ai = c.post(
+        '/api/coaching/worker/ai/claim',
+        json={
+            'worker_id': 'mac-ai',
+            'capabilities': [CAPABILITY, LEARNING_PLAN_CAPABILITY],
+            'meta': {
+                'worker_version': '0.5.0',
+                'providers': ['antigravity', 'codex', 'gemini'],
+                'active_selection': 'worker_default',
+                'active_model_label': 'Worker default (Antigravity)',
+                'config_version': 0,
+                'secret_token': 'MUST-NEVER-LEAK',
+                'local_path': '/Users/private/secret',
+                'available_models': [
+                    {
+                        'selection': 'antigravity:gemini-4-hydrogen-high',
+                        'provider': 'antigravity',
+                        'model': 'gemini-4-hydrogen-high',
+                        'label': 'Antigravity · Gemini 4 Hydrogen (High)',
+                    },
+                    {
+                        'selection': 'bad:model/with/slash',
+                        'provider': 'antigravity',
+                        'model': 'bad/slash',
+                        'label': 'Invalid / Path',
+                    },
+                ],
+            },
+        },
+        headers=wh,
+    )
+    assert claim_ai.status_code == 200
+    assert claim_ai.json == {'job': None, 'config_version': 0}
+
+    claim_render = c.post(
+        '/api/coaching/worker/render/claim',
+        json={
+            'worker_id': 'mac-render',
+            'capabilities': ['share-export-v2', 'share-export-v1'],
+            'meta': {'worker_version': '0.5.0', 'config_version': True},
+        },
+        headers=wh,
+    )
+    assert claim_render.status_code == 200
+
+    overview = c.get('/api/coaching/workers').json
+    assert overview['enabled'] is True
+    assert [w['role'] for w in overview['workers']] == ['ai', 'render']
+    ai_w = overview['workers'][0]
+    render_w = overview['workers'][1]
+    assert ai_w['online'] is True and ai_w['meta']['providers'] == ['antigravity', 'codex', 'gemini']
+    assert 'secret_token' not in ai_w['meta'] and 'local_path' not in ai_w['meta']
+    # available_models stays out of workers[i].meta and merges into ai_config.options
+    assert 'available_models' not in ai_w['meta']
+    assert 'config_version' not in render_w['meta']  # boolean rejected
+    assert any(o['selection'] == 'antigravity:gemini-4-hydrogen-high' for o in overview['ai_config']['options'])
+    assert not any('bad/slash' in str(o) for o in overview['ai_config']['options'])
+
+    # 3. Optimistic PUT /api/coaching/config and rejection rules.
+    assert c.put('/api/coaching/config', json={'selection': 'codex', 'version': 0}).status_code == 415
+    assert c.put(
+        '/api/coaching/config',
+        json={'selection': 'codex', 'version': 0},
+        headers={'X-Tennis-Request': '1', 'Origin': 'https://evil.example'},
+    ).status_code == 403
+    for bad in (
+        {'selection': 'invalid-provider', 'version': 0},
+        {'selection': 'antigravity:bad/model', 'version': 0},
+        {'selection': 'codex', 'version': True},
+        {'selection': 'codex', 'version': 0, 'extra': 1},
+    ):
+        assert c.put('/api/coaching/config', json=bad, headers={'X-Tennis-Request': '1'}).status_code == 400
+
+    upd1 = c.put(
+        '/api/coaching/config',
+        json={'selection': 'antigravity:gemini-4-carbon-high', 'version': 0},
+        headers={'X-Tennis-Request': '1'},
+    )
+    assert upd1.status_code == 200
+    assert upd1.json['version'] == 1
+    assert upd1.json['provider'] == 'antigravity'
+    assert upd1.json['model'] == 'gemini-4-carbon-high'
+
+    stale = c.put(
+        '/api/coaching/config',
+        json={'selection': 'codex', 'version': 0},
+        headers={'X-Tennis-Request': '1'},
+    )
+    assert stale.status_code == 409
+    assert stale.json['current']['version'] == 1
+    assert stale.json['current']['selection'] == 'antigravity:gemini-4-carbon-high'
+
+    upd2 = c.put(
+        '/api/coaching/config',
+        json={'selection': 'codex', 'version': 1},
+        headers={'X-Tennis-Request': '1'},
+    )
+    assert upd2.status_code == 200 and upd2.json['version'] == 2
+
+    # Worker config endpoints require valid bearer auth.
+    assert c.get('/api/coaching/worker/config').status_code == 403
+    assert c.post('/api/coaching/worker/config', json={}, headers={'X-Tennis-Request': '1'}).status_code == 403
+    wcfg = c.get('/api/coaching/worker/config', headers={'Authorization': f'Bearer {TOKEN}'}).json
+    assert wcfg['ai_config']['selection'] == 'codex' and wcfg['ai_config']['version'] == 2
+
+
+def test_effective_job_config_prioritizes_selected_provider_and_preserves_fallbacks():
+    from worker.tennis_coach.worker import effective_job_config
+
+    base = {
+        'providers': ['antigravity', 'codex', 'gemini'],
+        'antigravity_model': 'gemini-3.8-flash-medium',
+        'codex_model': 'gpt-5-codex',
+        'gemini_model': 'gemini-2.5-flash',
+    }
+    unchanged = effective_job_config(base, {'selection': 'worker_default', 'provider': None, 'model': None})
+    assert unchanged == base and unchanged is not base
+
+    select_codex = effective_job_config(base, {'selection': 'codex', 'provider': 'codex', 'model': None})
+    assert select_codex['providers'] == ['codex', 'antigravity', 'gemini']
+    assert select_codex['codex_model'] == ''
+    assert base['codex_model'] == 'gpt-5-codex'
+
+    select_agy = effective_job_config(
+        base,
+        {'selection': 'antigravity:gemini-4-carbon-high', 'provider': 'antigravity', 'model': 'gemini-4-carbon-high'},
+    )
+    assert select_agy['providers'] == ['antigravity', 'codex', 'gemini']
+    assert select_agy['antigravity_model'] == 'gemini-4-carbon-high'
+
+    select_gemini = effective_job_config(
+        base,
+        {'selection': 'gemini:gemini-2.5-pro', 'provider': 'gemini', 'model': 'gemini-2.5-pro'},
+    )
+    assert select_gemini['providers'] == ['gemini', 'antigravity', 'codex']
+    assert select_gemini['gemini_model'] == 'gemini-2.5-pro'
+
+
+def test_worker_live_config_sync_via_claim_heartbeat_and_404_compat(setup, tmp_path, monkeypatch):
+    import threading
+    from werkzeug.serving import make_server
+
+    app, c, data, ai_job, folder = prepared(setup)
+    server = make_server('127.0.0.1', 0, app, threaded=True)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f'http://127.0.0.1:{server.server_port}'
+    try:
+        local_state = tmp_path / 'worker-state'
+        worker_cfg = {
+            'server_url': base_url,
+            'worker_token': TOKEN,
+            'artifact_root': app.config['COACH_MEDIA_ROOT'],
+            'local_state': str(local_state),
+            'worker_id': 'test-mac',
+            'providers': ['antigravity', 'codex', 'gemini'],
+            'antigravity': 'fake-agy',
+            'codex': 'fake-codex',
+            'gemini_api_key': 'secret-gemini-key',
+        }
+        seen_providers = []
+
+        monkeypatch.setattr(
+            'worker.tennis_coach.worker.subprocess.run',
+            lambda args, **kw: SimpleNamespace(
+                returncode=0,
+                stdout='gemini-4-carbon-high         Gemini 4 Carbon (High)\n',
+                stderr='',
+            ),
+        )
+
+        # Cancel initial queued AI job to test idle sync first, then queue real jobs.
+        c.put(f"/api/coaching/jobs/{ai_job['id']}", json={'action': 'cancel', 'version': ai_job['version']}, headers={'X-Tennis-Request': '1'})
+
+        # Update config on server to codex before first poll -> idle worker syncs immediately.
+        assert c.put('/api/coaching/config', json={'selection': 'codex', 'version': 0}, headers={'X-Tennis-Request': '1'}).status_code == 200
+        w = Worker(worker_cfg, 'ai')
+        assert w.once() is False
+        assert w.remote_ai_config['version'] == 1 and w.remote_ai_config['selection'] == 'codex'
+        overview = c.get('/api/coaching/workers').json
+        assert overview['workers'][0]['meta']['config_version'] == 1
+        assert overview['workers'][0]['meta']['active_selection'] == 'codex'
+        assert any(o['selection'] == 'antigravity:gemini-4-carbon-high' for o in overview['ai_config']['options'])
+
+        # Enqueue a job; during analyze(), update config to gemini and test mid-job heartbeat sync.
+        render_id = ai_job['body']['export_id']
+        j1 = post(c, 'requests', {'export_id': render_id, 'prompt': 'Check stance', 'consent': True, 'request_id': 'live-sync-job-001'})
+        assert j1.status_code == 201
+
+        def syncing_analyze(job_cfg, job, local, before_call):
+            seen_providers.append((list(job_cfg['providers']), job_cfg.get('gemini_model')))
+            manifest = evidence_manifest(job)
+            cache = Path(job_cfg['artifact_root']) / 'evidence/frames'
+            cache.mkdir(parents=True, exist_ok=True)
+            for frame in manifest['frames']:
+                (cache / f"{frame['sha256']}.jpg").write_bytes((folder / f"frame-{frame['order'] - 1:03d}.jpg").read_bytes())
+            before_call(manifest)
+            if len(seen_providers) == 1:
+                resp = c.put(
+                    '/api/coaching/config',
+                    json={'selection': 'gemini:gemini-2.5-pro', 'version': 1},
+                    headers={'X-Tennis-Request': '1'},
+                )
+                assert resp.status_code == 200
+                hb = w.api('worker/jobs/' + job['id'] + '/heartbeat', {'token': job['token'], 'meta': w.worker_meta()})
+                assert hb['config_version'] == 2
+                assert w.maybe_sync_config(hb, acknowledge=True) is True
+                # Running job keeps its pre-job snapshot (`codex` primary), while worker stored v2 for next job.
+                assert job_cfg['providers'][0] == 'codex'
+                assert w.remote_ai_config['version'] == 2
+            payload = dict(schema_version=2, summary='Job complete', suggestions=[suggestion(manifest)])
+            return dict(answer=json.dumps(payload), analysis_mode='timestamped_frames', model=job_cfg['providers'][0], elapsed_seconds=0.1, usage=None)
+
+        monkeypatch.setattr('worker.tennis_coach.worker.analyze', syncing_analyze)
+        assert w.once() is True
+        assert c.get(f"/api/coaching/jobs/{j1.json['id']}").json['state'] == 'completed'
+        assert seen_providers == [(['codex', 'antigravity', 'gemini'], None)]
+
+        # Next job automatically uses the live-reloaded Gemini 2.5 Pro selection without restart!
+        j2 = post(c, 'requests', {'export_id': render_id, 'prompt': 'Check follow through', 'consent': True, 'request_id': 'live-sync-job-002'})
+        assert j2.status_code == 201
+        assert w.once() is True
+        assert c.get(f"/api/coaching/jobs/{j2.json['id']}").json['state'] == 'completed'
+        assert seen_providers[-1] == (['gemini', 'antigravity', 'codex'], 'gemini-2.5-pro')
+        assert json.loads((local_state / 'ai' / 'remote-config.json').read_text())['selection'] == 'gemini:gemini-2.5-pro'
+
+        # Legacy server compatibility: HTTP 404 on /worker/config degrades cleanly without failing.
+        from worker.tennis_coach.worker import _HttpStatusError
+        real_api = w.api
+        legacy_calls = []
+
+        def legacy_api(path, body):
+            legacy_calls.append(path)
+            if path == 'worker/config':
+                raise _HttpStatusError(404, 'Not Found')
+            res = real_api(path, body)
+            if path.endswith('/claim') and isinstance(res, dict):
+                res = {k: v for k, v in res.items() if k != 'config_version'}
+            return res
+
+        monkeypatch.setattr(w, 'api', legacy_api)
+        w._config_synced_once = False
+        w._remote_config_unsupported = False
+        assert w.load_remote_config() is False
+        assert w._remote_config_unsupported is True
+        legacy_calls.clear()
+        assert w.once() is False
+        assert 'worker/config' not in legacy_calls
+    finally:
+        server.shutdown()
+        thread.join()

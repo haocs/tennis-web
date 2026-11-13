@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 from pathlib import Path
+import re
 import secrets
 import sqlite3
 import time
@@ -12,6 +13,106 @@ from coaching_annotations import Annotations
 from worker.tennis_coach.annotations import RENDER_SHARE_CAPABILITY
 
 MAX_AUTO_REVIEWS_PER_CLIP = 2
+
+VALID_PROVIDERS = ('codex', 'antigravity', 'gemini')
+PROVIDER_GROUPS = {
+    'antigravity': 'Antigravity',
+    'codex': 'ChatGPT (Codex)',
+    'gemini': 'Gemini API',
+}
+AI_MODEL_PRESETS = (
+    {'selection': 'worker_default', 'label': 'Worker config default', 'provider': None, 'model': None, 'group': 'Default'},
+    {'selection': 'antigravity', 'label': 'Antigravity · Account default', 'provider': 'antigravity', 'model': None, 'group': 'Antigravity'},
+    {'selection': 'antigravity:gemini-4-carbon-high', 'label': 'Antigravity · Gemini 4 Carbon (High)', 'provider': 'antigravity', 'model': 'gemini-4-carbon-high', 'group': 'Antigravity'},
+    {'selection': 'antigravity:gemini-4-carbon-medium', 'label': 'Antigravity · Gemini 4 Carbon (Medium)', 'provider': 'antigravity', 'model': 'gemini-4-carbon-medium', 'group': 'Antigravity'},
+    {'selection': 'antigravity:gemini-3.8-flash-high', 'label': 'Antigravity · Gemini 3.8 Flash (High)', 'provider': 'antigravity', 'model': 'gemini-3.8-flash-high', 'group': 'Antigravity'},
+    {'selection': 'antigravity:claude-sonnet-4-6', 'label': 'Antigravity · Claude Sonnet 4.6', 'provider': 'antigravity', 'model': 'claude-sonnet-4-6', 'group': 'Antigravity'},
+    {'selection': 'codex', 'label': 'ChatGPT (Codex) · Account default', 'provider': 'codex', 'model': None, 'group': 'ChatGPT (Codex)'},
+    {'selection': 'codex:gpt-5-codex', 'label': 'ChatGPT (Codex) · GPT-5 Codex', 'provider': 'codex', 'model': 'gpt-5-codex', 'group': 'ChatGPT (Codex)'},
+    {'selection': 'gemini:gemini-2.5-flash', 'label': 'Gemini API · Gemini 2.5 Flash', 'provider': 'gemini', 'model': 'gemini-2.5-flash', 'group': 'Gemini API'},
+    {'selection': 'gemini:gemini-2.5-pro', 'label': 'Gemini API · Gemini 2.5 Pro', 'provider': 'gemini', 'model': 'gemini-2.5-pro', 'group': 'Gemini API'},
+)
+
+
+def parse_ai_selection(selection):
+    """Validate and normalize a default AI provider/model selection string."""
+    if not isinstance(selection, str):
+        raise ValueError('Invalid default AI model selection')
+    cleaned = selection.strip()
+    if cleaned == 'worker_default':
+        return ('worker_default', None, None)
+    if cleaned in VALID_PROVIDERS:
+        return (cleaned, cleaned, None)
+    if ':' in cleaned:
+        provider, model = cleaned.split(':', 1)
+        if provider in VALID_PROVIDERS and re.fullmatch(r'[A-Za-z0-9._-]{1,64}', model):
+            return (f'{provider}:{model}', provider, model)
+    raise ValueError('Invalid default AI model selection')
+
+
+def _safe_label(value):
+    if not isinstance(value, str):
+        return None
+    label = value.strip()
+    if not 1 <= len(label) <= 80:
+        return None
+    if '/' in label or '\\' in label or any(ord(c) < 32 or ord(c) == 127 for c in label):
+        return None
+    return label
+
+
+def sanitize_worker_meta(meta):
+    """Whitelist non-private worker status metadata; strip paths, tokens, and unknown fields."""
+    if meta is None:
+        return None
+    if not isinstance(meta, dict):
+        raise ValueError('Invalid worker metadata')
+    out = {}
+    ver = meta.get('worker_version')
+    if isinstance(ver, str) and re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', ver.strip()):
+        out['worker_version'] = ver.strip()
+    providers = meta.get('providers')
+    if isinstance(providers, list):
+        clean_providers = []
+        for p in providers[:5]:
+            if isinstance(p, str) and p in VALID_PROVIDERS and p not in clean_providers:
+                clean_providers.append(p)
+        out['providers'] = clean_providers
+    sel = meta.get('active_selection')
+    if isinstance(sel, str):
+        try:
+            out['active_selection'] = parse_ai_selection(sel)[0]
+        except ValueError:
+            pass
+    label = _safe_label(meta.get('active_model_label'))
+    if label:
+        out['active_model_label'] = label
+    cfg_ver = meta.get('config_version')
+    if type(cfg_ver) is int and 0 <= cfg_ver <= 10**9:
+        out['config_version'] = cfg_ver
+    avail = meta.get('available_models')
+    if isinstance(avail, list):
+        clean_models = []
+        seen_sel = set()
+        for item in avail[:30]:
+            if not isinstance(item, dict):
+                continue
+            p = item.get('provider')
+            m = item.get('model')
+            s = item.get('selection')
+            lbl = _safe_label(item.get('label'))
+            if (
+                p in VALID_PROVIDERS
+                and isinstance(m, str)
+                and re.fullmatch(r'[A-Za-z0-9._-]{1,64}', m)
+                and s == f'{p}:{m}'
+                and lbl
+                and s not in seen_sel
+            ):
+                seen_sel.add(s)
+                clean_models.append({'selection': s, 'provider': p, 'model': m, 'label': lbl})
+        out['available_models'] = clean_models
+    return out
 
 
 class QueueConflict(ValueError):
@@ -102,8 +203,12 @@ class Coaching(Annotations):
             if 'asked_at' not in [r['name'] for r in db.execute('PRAGMA table_info(jobs)')]:
                 db.execute('ALTER TABLE jobs ADD COLUMN asked_at REAL')
             db.execute('CREATE TABLE IF NOT EXISTS workers(id TEXT PRIMARY KEY, role TEXT, updated REAL, status TEXT)')
-            if 'capabilities' not in [r['name'] for r in db.execute('PRAGMA table_info(workers)')]:
+            worker_cols = [r['name'] for r in db.execute('PRAGMA table_info(workers)')]
+            if 'capabilities' not in worker_cols:
                 db.execute("ALTER TABLE workers ADD COLUMN capabilities TEXT DEFAULT '[]'")
+            if 'meta' not in worker_cols:
+                db.execute("ALTER TABLE workers ADD COLUMN meta TEXT DEFAULT '{}'")
+            db.execute('CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL, version INTEGER NOT NULL, updated REAL NOT NULL)')
             self.init_annotations(db)
             db.commit()
 
@@ -246,6 +351,190 @@ class Coaching(Annotations):
         if not row: raise KeyError(identity)
         return self.decode(row)
 
+    def _decode_worker(self, row, now=None, include_available_models=False):
+        current = self.clock() if now is None else now
+        d = dict(row)
+        try:
+            caps = json.loads(d.get('capabilities') or '[]')
+            if not isinstance(caps, list):
+                caps = []
+        except (ValueError, TypeError):
+            caps = []
+        try:
+            meta = json.loads(d.get('meta') or '{}')
+            if not isinstance(meta, dict):
+                meta = {}
+        except (ValueError, TypeError):
+            meta = {}
+        if not include_available_models:
+            meta.pop('available_models', None)
+        return dict(
+            id=d['id'],
+            role=d['role'],
+            status=d['status'],
+            updated=d['updated'],
+            online=current - (d['updated'] or 0) < 90,
+            capabilities=caps,
+            meta=meta,
+        )
+
+    def worker_ai_config(self, db=None):
+        def _read(conn):
+            row = conn.execute("SELECT value, version, updated FROM settings WHERE key = 'ai_config'").fetchone()
+            if not row:
+                return dict(selection='worker_default', provider=None, model=None, version=0, updated_at=None)
+            try:
+                val = json.loads(row['value'])
+                if not isinstance(val, dict):
+                    val = {}
+            except (ValueError, TypeError):
+                val = {}
+            selection = val.get('selection', 'worker_default')
+            try:
+                norm_sel, provider, model = parse_ai_selection(selection)
+            except ValueError:
+                norm_sel, provider, model = 'worker_default', None, None
+            return dict(
+                selection=norm_sel,
+                provider=provider,
+                model=model,
+                version=int(row['version']),
+                updated_at=row['updated'],
+            )
+        if db is not None:
+            return _read(db)
+        with self.db() as conn:
+            return _read(conn)
+
+    def ai_config(self, db=None):
+        def _build(conn):
+            cfg = self.worker_ai_config(conn)
+            options = [dict(p) for p in AI_MODEL_PRESETS]
+            seen = {o['selection'] for o in options}
+            rows = conn.execute("SELECT meta FROM workers WHERE role = 'ai' ORDER BY id").fetchall()
+            extra = []
+            for r in rows:
+                try:
+                    meta = json.loads(r['meta'] or '{}')
+                except (ValueError, TypeError):
+                    meta = {}
+                avail = meta.get('available_models') if isinstance(meta, dict) else None
+                if not isinstance(avail, list):
+                    continue
+                for item in avail:
+                    if not isinstance(item, dict):
+                        continue
+                    sel = item.get('selection')
+                    prov = item.get('provider')
+                    mdl = item.get('model')
+                    lbl = _safe_label(item.get('label'))
+                    if (
+                        prov in VALID_PROVIDERS
+                        and isinstance(mdl, str)
+                        and re.fullmatch(r'[A-Za-z0-9._-]{1,64}', mdl)
+                        and sel == f'{prov}:{mdl}'
+                        and lbl
+                        and sel not in seen
+                    ):
+                        seen.add(sel)
+                        extra.append(dict(
+                            selection=sel,
+                            label=lbl,
+                            provider=prov,
+                            model=mdl,
+                            group=PROVIDER_GROUPS.get(prov, prov.title()),
+                        ))
+            extra.sort(key=lambda o: (o['group'], o['label']))
+            options.extend(extra)
+            if cfg['selection'] not in seen:
+                prov = cfg['provider']
+                options.append(dict(
+                    selection=cfg['selection'],
+                    label=f"{PROVIDER_GROUPS.get(prov, prov or 'Custom')} · {cfg['model']}" if cfg['model'] else cfg['selection'],
+                    provider=prov,
+                    model=cfg['model'],
+                    group=PROVIDER_GROUPS.get(prov, 'Custom'),
+                ))
+            return dict(**cfg, options=options)
+        if db is not None:
+            return _build(db)
+        with self.db() as conn:
+            return _build(conn)
+
+    def update_ai_config(self, selection, expected_version):
+        if type(expected_version) is not int or expected_version < 0:
+            raise ValueError('A current config version is required')
+        norm_selection, provider, model = parse_ai_selection(selection)
+        with self.db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            current = self.worker_ai_config(db)
+            if expected_version != current['version']:
+                raise QueueConflict('Default AI model changed in another browser. Reload before saving.')
+            new_version = current['version'] + 1
+            now = self.clock()
+            encoded = json.dumps({'selection': norm_selection, 'provider': provider, 'model': model})
+            db.execute(
+                """
+                INSERT INTO settings(key, value, version, updated) VALUES('ai_config', ?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                  value = excluded.value,
+                  version = excluded.version,
+                  updated = excluded.updated
+                """,
+                (encoded, new_version, now),
+            )
+            db.commit()
+            return self.ai_config(db)
+
+    def touch_worker_meta(self, role, worker, meta=None):
+        if role not in ('render', 'ai') or not isinstance(worker, str) or not 1 <= len(worker) <= 80:
+            raise ValueError('Invalid worker')
+        meta_clean = sanitize_worker_meta(meta)
+        with self.db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            now = self.clock()
+            db.execute(
+                """
+                INSERT INTO workers(id, role, updated, status, capabilities, meta)
+                VALUES(?, ?, ?, 'ready', '[]', ?)
+                ON CONFLICT(id) DO UPDATE SET
+                  role = excluded.role,
+                  updated = excluded.updated,
+                  meta = CASE WHEN ? THEN excluded.meta ELSE workers.meta END
+                """,
+                (worker, role, now, json.dumps(meta_clean or {}), 1 if meta_clean is not None else 0),
+            )
+            db.commit()
+
+    def worker_overview(self, enabled=True):
+        with self.db() as db:
+            now = self.clock()
+            worker_rows = db.execute('SELECT * FROM workers').fetchall()
+            workers = [self._decode_worker(r, now, include_available_models=False) for r in worker_rows]
+            workers.sort(key=lambda w: (0 if w['role'] == 'ai' else 1, w['id']))
+            queue_counts = {
+                'ai': {'queued': 0, 'active': 0, 'needs_review': 0},
+                'render': {'queued': 0, 'active': 0},
+            }
+            for r in db.execute("SELECT role, state, COUNT(*) AS cnt FROM jobs WHERE state IN ('queued','leased','calling','needs_review') GROUP BY role, state"):
+                role_name = r['role']
+                st = r['state']
+                cnt = int(r['cnt'])
+                if role_name == 'ai':
+                    if st == 'queued':
+                        queue_counts['ai']['queued'] += cnt
+                    elif st in ('leased', 'calling'):
+                        queue_counts['ai']['active'] += cnt
+                    elif st == 'needs_review':
+                        queue_counts['ai']['needs_review'] += cnt
+                elif role_name == 'render':
+                    if st == 'queued':
+                        queue_counts['render']['queued'] += cnt
+                    elif st == 'leased':
+                        queue_counts['render']['active'] += cnt
+            cfg = self.ai_config(db)
+        return dict(enabled=bool(enabled), workers=workers, queue=queue_counts, ai_config=cfg)
+
     def listing(self,source):
         with self.db() as db:
             rows=db.execute(
@@ -275,30 +564,45 @@ class Coaching(Annotations):
                 """,
                 (source,source),
             ).fetchall()
-            workers=[dict(r) for r in db.execute('SELECT * FROM workers')]
+            now=self.clock()
+            workers=[self._decode_worker(r,now) for r in db.execute('SELECT * FROM workers')]
         jobs=[self.decode(r) for r in rows]
         for job in jobs:
             for field in ('submitted_prompt','response_contract'):job['body'].pop(field,None)
-        return dict(jobs=jobs,workers=[dict(w,online=self.clock()-w['updated']<90) for w in workers])
+        return dict(jobs=jobs,workers=workers)
 
-    def claim(self,role,worker,capabilities=None):
+    def claim(self,role,worker,capabilities=None,meta=None):
         capabilities=[] if capabilities is None else capabilities
         if not isinstance(capabilities,list) or len(capabilities)>20 or any(not isinstance(c,str) or len(c)>80 for c in capabilities):raise ValueError('Invalid capabilities')
         if role not in ('render','ai') or not isinstance(worker,str) or not 1<=len(worker)<=80:
             raise ValueError('Invalid worker')
+        meta_clean=sanitize_worker_meta(meta)
         with self.db() as db:
             db.execute('BEGIN IMMEDIATE')
             now=self.clock()
             # Expired provider calls are ambiguous. Never automatically spend quota twice.
             db.execute("UPDATE jobs SET state=CASE WHEN state='calling' THEN 'needs_review' ELSE 'queued' END,token=NULL,version=version+1,updated=? WHERE role=? AND state IN ('leased','calling') AND expires<?",(now,role,now))
-            db.execute('INSERT OR REPLACE INTO workers(id,role,updated,status,capabilities) VALUES(?,?,?,?,?)',(worker,role,now,'ready',json.dumps(capabilities)))
+            db.execute(
+                """
+                INSERT INTO workers(id,role,updated,status,capabilities,meta)
+                VALUES(?,?,?,'ready',?,?)
+                ON CONFLICT(id) DO UPDATE SET
+                  role=excluded.role,
+                  updated=excluded.updated,
+                  status=excluded.status,
+                  capabilities=excluded.capabilities,
+                  meta=CASE WHEN ? THEN excluded.meta ELSE workers.meta END
+                """,
+                (worker,role,now,json.dumps(capabilities),json.dumps(meta_clean or {}),1 if meta_clean is not None else 0),
+            )
             row=db.execute("SELECT * FROM jobs WHERE role=? AND state='queued' AND (json_extract(body,'$.required_capability') IS NULL OR json_extract(body,'$.required_capability') IN (SELECT value FROM json_each(?))) ORDER BY updated LIMIT 1",(role,json.dumps(capabilities))).fetchone()
             if not row: db.commit(); return None
             token=secrets.token_urlsafe(32)
             db.execute("UPDATE jobs SET state='leased',worker=?,token=?,expires=?,version=version+1,updated=? WHERE id=?",(worker,token,now+90,now,row['id']))
             result=self.decode(db.execute('SELECT * FROM jobs WHERE id=?',(row['id'],)).fetchone(),True);db.commit();return result
 
-    def worker_update(self,identity,token,action,result=None):
+    def worker_update(self,identity,token,action,result=None,meta=None):
+        meta_clean=sanitize_worker_meta(meta)
         with self.db() as db:
             db.execute('BEGIN IMMEDIATE');row=db.execute('SELECT * FROM jobs WHERE id=?',(identity,)).fetchone()
             if row and token and row['token']==token and row['state']=='completed' and action=='complete':
@@ -324,8 +628,12 @@ class Coaching(Annotations):
                     result=dict(result or {},provider_called=True)
                 state='failed'
             elif action!='heartbeat':raise ValueError('Invalid worker action')
-            db.execute('UPDATE jobs SET state=?,result=?,expires=?,updated=?,version=version+1 WHERE id=?',(state,json.dumps(result) if result is not None else row['result'],self.clock()+90,self.clock(),identity))
-            db.execute('UPDATE workers SET updated=?,status=? WHERE id=?',(self.clock(),state,row['worker']))
+            now=self.clock()
+            db.execute('UPDATE jobs SET state=?,result=?,expires=?,updated=?,version=version+1 WHERE id=?',(state,json.dumps(result) if result is not None else row['result'],now+90,now,identity))
+            if meta_clean is not None:
+                db.execute('UPDATE workers SET updated=?,status=?,meta=? WHERE id=?',(now,state,json.dumps(meta_clean),row['worker']))
+            else:
+                db.execute('UPDATE workers SET updated=?,status=? WHERE id=?',(now,state,row['worker']))
             db.commit()
         return self.get(identity)
 
