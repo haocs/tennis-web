@@ -505,13 +505,21 @@ def test_autofocus_vendored_assets_mime_types_and_csp(setup):
                 ignored = not neg
         return ignored
 
+    dockerfile_sources = [
+        tok
+        for raw in (Path(__file__).resolve().parents[1] / 'Dockerfile').read_text().splitlines()
+        if raw.strip().startswith('COPY ')
+        for tok in [t for t in raw.strip().split()[1:] if not t.startswith('--')][:-1]
+    ]
     for required in [
+        *dockerfile_sources,
         'static/autofocus-core.js',
         'static/autofocus-worker.js',
         'static/vendor/mediapipe/LICENSE',
         'static/vendor/mediapipe/MANIFEST.json',
         *tuple(f'static/vendor/mediapipe/{name}' for name in manifest['files']),
     ]:
+        assert (Path(__file__).resolve().parents[1] / required).exists(), f'{required} missing on disk'
         assert not is_ignored(required), f'{required} must not be excluded by .dockerignore'
     assert is_ignored('tests/ui_player.py')
     assert is_ignored('docs/AUTO-FOCUS.md')
