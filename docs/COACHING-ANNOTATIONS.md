@@ -105,3 +105,12 @@ improvements with evidence and uncertainty. It does not require the model to
 invent a judgment for every frame. Earlier frozen prompts/responses stay unchanged.
 The server supplies the frozen prompt, so this remains compatible with coaching
 worker 0.2.0; no worker configuration or new queue is needed.
+
+## Schema v3 and optional pose enrichment (`v0.25.0` / worker `0.6.0`)
+
+- **Structured evidence v3 (`SCHEMA_VERSION = 3`, `SUPPORTED_SCHEMA_VERSIONS = (2, 3)`)**:
+  `PROMPT_VERSION = 'tennis-coach-evidence-v3'` adds optional `now_summary`, `primary_frame_id`, `stroke_phase` (`STROKE_PHASES`), `body_areas` (`BODY_AREAS`), and `focus_region` cues alongside `evidence_frame_ids` and `applies_to` while continuing to accept stored or worker-produced `schema_version: 2` responses without backfilling or mutating history.
+- **Optional render-worker pose extraction (`POSE_ENRICHMENT_SCHEMA_VERSION = 1`)**:
+  Render workers with the `[pose]` extra installed may write a size-bounded `pose.json` (`MAX_POSE_BYTES`) alongside `frames` during non-share coaching exports (`intent='share'` explicitly forbids `pose.json`, `prompt.txt`, and `frame-*.jpg`). On `complete`, the server validates `pose.json` via `validate_pose_artifact()` against the export's `frames` manifest and records `pose_status` (`ok`, `unavailable`, or `disabled`). Pose failure or missing dependencies never fail a coaching render export.
+- **Immutable retention & lazy pose serving**:
+  When `POST /api/coaching/requests` creates an AI request from a completed export, `map_pose_to_evidence()` re-anchors validated pose data to the immutable evidence manifest and stores it in SQLite `evidence_enrichment`. Queue listings (`listing()`) and job reads (`GET /api/coaching/jobs/<id>`) strip `pose_artifact` so polling stays compact; the Clip Study inspector lazy-loads `GET /api/coaching/evidence/<identity>/pose` (`has_pose_enrichment` signals availability). `DELETE /api/coaching/jobs/<id>` removes linked `evidence_enrichment` rows alongside `annotations`, `annotation_revisions`, and `evidence`.

@@ -162,5 +162,281 @@
     }
     return 'No main player assigned · choose a player above or use Saved players… to add one without changing clip assignment.';
   }
-  return {finite, clamp, clock, sampleTimes, sourceTime, panBounds, clampInterval, clampToInterval, resolveIntervalPlayback, coachingPrompt, copyText, crc32, zipFiles, normalizeSubjectHint, coachingSubjectOptions, resolveCoachingSubject, describeCoachingSubject};
+  const STROKE_PHASE_LABELS = {
+    split_step: 'Split step',
+    unit_turn: 'Unit turn',
+    backswing: 'Backswing',
+    forward_swing: 'Forward swing',
+    contact_window: 'Contact window',
+    follow_through: 'Follow-through',
+    recovery: 'Recovery',
+    serve_toss: 'Serve toss',
+    trophy_position: 'Trophy position',
+    other: 'Other phase',
+  };
+  const BODY_AREA_LABELS = {
+    hitting_arm: 'Hitting arm',
+    off_arm: 'Non-hitting arm',
+    shoulders_chest: 'Shoulders / chest',
+    hips_trunk: 'Hips / trunk',
+    knees_legs: 'Knees / legs',
+    feet_stance: 'Feet / stance',
+    head_eyes: 'Head / eyes',
+  };
+  const BODY_AREA_SEGMENTS = {
+    hitting_arm: [['left_shoulder', 'left_elbow'], ['left_elbow', 'left_wrist'], ['right_shoulder', 'right_elbow'], ['right_elbow', 'right_wrist']],
+    off_arm: [['left_shoulder', 'left_elbow'], ['left_elbow', 'left_wrist'], ['right_shoulder', 'right_elbow'], ['right_elbow', 'right_wrist']],
+    shoulders_chest: [['left_shoulder', 'right_shoulder'], ['left_shoulder', 'left_hip'], ['right_shoulder', 'right_hip']],
+    hips_trunk: [['left_shoulder', 'right_shoulder'], ['left_hip', 'right_hip'], ['left_shoulder', 'left_hip'], ['right_shoulder', 'right_hip']],
+    knees_legs: [['left_hip', 'left_knee'], ['left_knee', 'left_ankle'], ['right_hip', 'right_knee'], ['right_knee', 'right_ankle']],
+    feet_stance: [['left_knee', 'left_ankle'], ['right_knee', 'right_ankle']],
+    head_eyes: [['left_shoulder', 'nose'], ['right_shoulder', 'nose']],
+  };
+  const DEFAULT_BODY_SEGMENTS = [
+    ['left_shoulder', 'right_shoulder'],
+    ['left_hip', 'right_hip'],
+    ['left_shoulder', 'left_hip'],
+    ['right_shoulder', 'right_hip'],
+    ['left_shoulder', 'left_elbow'], ['left_elbow', 'left_wrist'],
+    ['right_shoulder', 'right_elbow'], ['right_elbow', 'right_wrist'],
+    ['left_hip', 'left_knee'], ['left_knee', 'left_ankle'],
+    ['right_hip', 'right_knee'], ['right_knee', 'right_ankle'],
+  ];
+
+  function normalizeCrop(crop) {
+    if (!Array.isArray(crop) || crop.length !== 4 || !crop.every(finite)) return [0, 0, 1, 1];
+    const cx = clamp(crop[0], 0, 1);
+    const cy = clamp(crop[1], 0, 1);
+    const cw = clamp(crop[2], 0, 1 - cx);
+    const ch = clamp(crop[3], 0, 1 - cy);
+    if (cw <= 0 || ch <= 0) return [0, 0, 1, 1];
+    return [cx, cy, cw, ch];
+  }
+
+  function evidenceToClipPoint(ex, ey, crop = [0, 0, 1, 1]) {
+    if (!finite(ex) || !finite(ey)) return null;
+    const [cx, cy, cw, ch] = normalizeCrop(crop);
+    return {
+      x: clamp(cx + clamp(ex, 0, 1) * cw, 0, 1),
+      y: clamp(cy + clamp(ey, 0, 1) * ch, 0, 1),
+    };
+  }
+
+  function evidenceToClipBox(box, crop = [0, 0, 1, 1]) {
+    let bx, by, bw, bh;
+    if (Array.isArray(box) && box.length === 4) {
+      [bx, by, bw, bh] = box;
+    } else if (box && typeof box === 'object') {
+      bx = box.x; by = box.y; bw = box.width; bh = box.height;
+    } else {
+      return null;
+    }
+    if (![bx, by, bw, bh].every(finite) || bw <= 0 || bh <= 0) return null;
+    if (bx < 0 || by < 0 || bx > 1 || by > 1 || bx + bw > 1.001 || by + bh > 1.001) return null;
+    const [cx, cy, cw, ch] = normalizeCrop(crop);
+    const nx = cx + bx * cw;
+    const ny = cy + by * ch;
+    return {
+      x: clamp(nx, 0, 1),
+      y: clamp(ny, 0, 1),
+      width: clamp(bw * cw, 0, Math.max(0, 1 - nx)),
+      height: clamp(bh * ch, 0, Math.max(0, 1 - ny)),
+    };
+  }
+
+  function letterboxRect(containerWidth, containerHeight, mediaWidth, mediaHeight) {
+    if (![containerWidth, containerHeight, mediaWidth, mediaHeight].every(v => finite(v) && v > 0)) {
+      return {left: 0, top: 0, width: 0, height: 0, scale: 0};
+    }
+    const scale = Math.min(containerWidth / mediaWidth, containerHeight / mediaHeight);
+    const width = mediaWidth * scale;
+    const height = mediaHeight * scale;
+    return {
+      left: (containerWidth - width) / 2,
+      top: (containerHeight - height) / 2,
+      width,
+      height,
+      scale,
+    };
+  }
+
+  function projectPointToStage(clipX, clipY, stageWidth, stageHeight, videoWidth, videoHeight, zoom = 1, panX = 0, panY = 0) {
+    if (!finite(clipX) || !finite(clipY)) return null;
+    const box = letterboxRect(stageWidth, stageHeight, videoWidth, videoHeight);
+    if (box.width <= 0 || box.height <= 0) return null;
+    const z = finite(zoom) && zoom > 0 ? zoom : 1;
+    const tx = finite(panX) ? panX : 0;
+    const ty = finite(panY) ? panY : 0;
+    return {
+      x: stageWidth / 2 + (clipX - 0.5) * box.width * z + tx,
+      y: stageHeight / 2 + (clipY - 0.5) * box.height * z + ty,
+    };
+  }
+
+  function projectBoxToStage(clipBox, stageWidth, stageHeight, videoWidth, videoHeight, zoom = 1, panX = 0, panY = 0) {
+    if (!clipBox || ![clipBox.x, clipBox.y, clipBox.width, clipBox.height].every(finite)) return null;
+    const tl = projectPointToStage(clipBox.x, clipBox.y, stageWidth, stageHeight, videoWidth, videoHeight, zoom, panX, panY);
+    const br = projectPointToStage(clipBox.x + clipBox.width, clipBox.y + clipBox.height, stageWidth, stageHeight, videoWidth, videoHeight, zoom, panX, panY);
+    if (!tl || !br) return null;
+    return {
+      left: tl.x,
+      top: tl.y,
+      width: Math.max(0, br.x - tl.x),
+      height: Math.max(0, br.y - tl.y),
+    };
+  }
+
+  function selectSuggestionRanges(appliesTo, clipOriginalStart, clipOriginalEnd, clipDuration) {
+    if (!Array.isArray(appliesTo) || !finite(clipOriginalStart)) return [];
+    const origEnd = finite(clipOriginalEnd) ? clipOriginalEnd : clipOriginalStart + (finite(clipDuration) ? clipDuration : 0);
+    const dur = finite(clipDuration) && clipDuration > 0 ? clipDuration : Math.max(0.1, origEnd - clipOriginalStart);
+    const out = [];
+    for (let i = 0; i < appliesTo.length; i++) {
+      const item = appliesTo[i];
+      if (!item || !finite(item.start_seconds) || !finite(item.end_seconds) || item.end_seconds < item.start_seconds) continue;
+      if (item.start_seconds > origEnd + 1e-6 || item.end_seconds < clipOriginalStart - 1e-6) continue;
+      const rawStart = clamp(item.start_seconds - clipOriginalStart, 0, dur);
+      const rawEnd = clamp(item.end_seconds - clipOriginalStart, 0, dur);
+      const bounds = clampInterval(rawStart, Math.max(rawStart, rawEnd), dur, 'end');
+      out.push({
+        index: out.length,
+        sourceIndex: i,
+        originalStart: item.start_seconds,
+        originalEnd: item.end_seconds,
+        start: bounds.start,
+        end: bounds.end,
+      });
+    }
+    return out;
+  }
+
+  function pickSuggestionRangeIndex(ranges, targetOriginalSeconds) {
+    if (!Array.isArray(ranges) || !ranges.length) return -1;
+    if (!finite(targetOriginalSeconds)) return 0;
+    const containing = ranges.findIndex(r => targetOriginalSeconds >= r.originalStart - 1e-6 && targetOriginalSeconds <= r.originalEnd + 1e-6);
+    if (containing >= 0) return containing;
+    let bestIdx = 0;
+    let bestDist = Infinity;
+    for (let i = 0; i < ranges.length; i++) {
+      const r = ranges[i];
+      const dist = Math.min(Math.abs(targetOriginalSeconds - r.originalStart), Math.abs(targetOriginalSeconds - r.originalEnd));
+      if (dist < bestDist) {
+        bestDist = dist;
+        bestIdx = i;
+      }
+    }
+    return bestIdx;
+  }
+
+  function resolveSparseOverlay({
+    suggestion = null,
+    frame = null,
+    poseFrame = null,
+    crop = [0, 0, 1, 1],
+    paused = false,
+    currentTime = 0,
+    historical = false,
+    overlayEnabled = true,
+    frameTolerance = 0.055,
+    minConfidence = 0.65,
+  } = {}) {
+    if (!overlayEnabled) return {visible: false, reason: 'disabled', focusBox: null, joints: {}, segments: [], label: 'Approximate body guide'};
+    if (historical) return {visible: false, reason: 'historical', focusBox: null, joints: {}, segments: [], label: 'Approximate body guide'};
+    if (!paused) return {visible: false, reason: 'playing', focusBox: null, joints: {}, segments: [], label: 'Approximate body guide'};
+    if (!frame || !finite(frame.clip_seconds) || !finite(currentTime)) {
+      return {visible: false, reason: 'no_frame', focusBox: null, joints: {}, segments: [], label: 'Approximate body guide'};
+    }
+    if (Math.abs(currentTime - frame.clip_seconds) > frameTolerance) {
+      return {visible: false, reason: 'off_frame', focusBox: null, joints: {}, segments: [], label: 'Approximate body guide'};
+    }
+
+    const focusBox = suggestion?.focus_region ? evidenceToClipBox(suggestion.focus_region, crop) : null;
+    let suppressedReason = '';
+    const acceptedRaw = {};
+    if (!poseFrame) {
+      suppressedReason = 'pose_unavailable';
+    } else if (poseFrame.subject_ambiguous) {
+      suppressedReason = 'subject_ambiguous';
+    } else if (!(poseFrame.person_count >= 1)) {
+      suppressedReason = 'no_person';
+    } else if (poseFrame.joints && typeof poseFrame.joints === 'object') {
+      for (const [name, pt] of Object.entries(poseFrame.joints)) {
+        if (
+          pt &&
+          finite(pt.x) && finite(pt.y) && finite(pt.confidence) &&
+          pt.confidence >= minConfidence &&
+          pt.x >= 0.02 && pt.x <= 0.98 &&
+          pt.y >= 0.02 && pt.y <= 0.98
+        ) {
+          const projected = evidenceToClipPoint(pt.x, pt.y, crop);
+          if (projected) acceptedRaw[name] = {x: projected.x, y: projected.y, confidence: pt.confidence};
+        }
+      }
+    }
+
+    const areas = Array.isArray(suggestion?.body_areas)
+      ? suggestion.body_areas.filter(a => Object.prototype.hasOwnProperty.call(BODY_AREA_SEGMENTS, a))
+      : [];
+    const candidatePairs = areas.length
+      ? areas.flatMap(a => BODY_AREA_SEGMENTS[a])
+      : DEFAULT_BODY_SEGMENTS;
+    const seenPairs = new Set();
+    const segments = [];
+    const activeNames = new Set();
+    for (const [a, b] of candidatePairs) {
+      const key = a < b ? `${a}|${b}` : `${b}|${a}`;
+      if (seenPairs.has(key)) continue;
+      seenPairs.add(key);
+      if (acceptedRaw[a] && acceptedRaw[b]) {
+        segments.push([a, b]);
+        activeNames.add(a);
+        activeNames.add(b);
+      }
+    }
+    if (areas.includes('head_eyes') && acceptedRaw.nose) activeNames.add('nose');
+
+    const joints = {};
+    for (const name of activeNames) {
+      if (acceptedRaw[name]) joints[name] = acceptedRaw[name];
+    }
+    if (!suppressedReason && !Object.keys(joints).length) suppressedReason = 'low_confidence';
+    const visible = Boolean(focusBox || Object.keys(joints).length);
+    return {
+      visible,
+      reason: visible ? 'ok' : (suppressedReason || 'uncertain'),
+      suppressedReason: Object.keys(joints).length ? '' : suppressedReason,
+      ambiguityReason: typeof poseFrame?.ambiguity_reason === 'string' ? poseFrame.ambiguity_reason : '',
+      label: 'Approximate body guide',
+      focusBox,
+      joints,
+      segments,
+    };
+  }
+
+  function formatNowTry(suggestion = {}) {
+    const rawNow = typeof suggestion?.now_summary === 'string' ? suggestion.now_summary.trim() : '';
+    let nowText = rawNow;
+    if (!nowText && typeof suggestion?.observation === 'string') {
+      const obs = suggestion.observation.trim();
+      if (obs) {
+        const sentence = obs.split(/(?<=[.!?])\s+/)[0] || obs;
+        nowText = sentence.length > 160 ? sentence.slice(0, 157).trimEnd() + '…' : sentence;
+      }
+    }
+    const tryText = typeof suggestion?.cue === 'string' ? suggestion.cue.trim() : '';
+    const phaseLabel = STROKE_PHASE_LABELS[suggestion?.stroke_phase] || '';
+    const bodyAreaLabels = Array.isArray(suggestion?.body_areas)
+      ? suggestion.body_areas.map(k => BODY_AREA_LABELS[k]).filter(Boolean)
+      : [];
+    return {nowText, tryText, phaseLabel, bodyAreaLabels};
+  }
+
+  return {
+    finite, clamp, clock, sampleTimes, sourceTime, panBounds, clampInterval, clampToInterval,
+    resolveIntervalPlayback, coachingPrompt, copyText, crc32, zipFiles, normalizeSubjectHint,
+    coachingSubjectOptions, resolveCoachingSubject, describeCoachingSubject,
+    STROKE_PHASE_LABELS, BODY_AREA_LABELS, normalizeCrop, evidenceToClipPoint, evidenceToClipBox,
+    letterboxRect, projectPointToStage, projectBoxToStage, selectSuggestionRanges, pickSuggestionRangeIndex,
+    resolveSparseOverlay, formatNowTry,
+  };
 });

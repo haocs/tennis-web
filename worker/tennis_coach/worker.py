@@ -30,6 +30,7 @@ from .annotations import (
     learning_plan_schema,
     response_schema,
 )
+from .pose import extract_pose_for_frames, pose_available
 
 PROVIDER_ALIASES = {
     'codex': 'codex',
@@ -92,7 +93,7 @@ def configured_providers(config):
     return resolved
 
 
-WORKER_VERSION = '0.5.0'
+WORKER_VERSION = '0.6.0'
 
 
 class _HttpStatusError(ValueError):
@@ -396,8 +397,23 @@ def render(config,job,local):
             if not (local/name).is_file():raise ValueError('Frame extraction failed')
             frames.append(dict(file=name,excerpt_seconds=original/s['speed'],clip_seconds=s['start']+original,original_seconds=s['original_start']+original,sha256=digest(local/name)))
     info=dict(recipe=s,lease_token=job['token'],frames=frames,bytes=out.stat().st_size,output_seconds=seconds/s['speed'],sha256=digest(out),render_seconds=time.monotonic()-t,color_output=color_output,video_codec=video_codec,pix_fmt=pix_fmt_output,fps_output=out_fps)
+    pose_payload=None
     if is_share:
         info['audio_output']=audio_output
+    else:
+        pose_status='disabled'
+        if config.get('pose_extraction',True):
+            try:
+                pose_payload,pose_status=extract_pose_for_frames(local,frames,subject_hint=s.get('subject_hint',''))
+            except Exception:
+                pose_payload,pose_status=(None,'unavailable')
+        if pose_status=='ok' and pose_payload is not None:
+            atomic(local/'pose.json',pose_payload)
+        else:
+            pose_payload=None
+            if pose_status!='disabled':
+                pose_status='unavailable'
+        info['pose_status']=pose_status
     atomic(local/'recipe.json',info)
     if not is_share:
         prompt=(s.get('question') or 'Please coach this beginner tennis excerpt. Identify only observable details; give up to three practical cues and one drill. State uncertainty. Refer to original timestamps.')+'\n\n'+json.dumps({k:s[k] for k in ['original_start','original_end','speed','crop','audio','color']},indent=2)
@@ -408,7 +424,7 @@ def render(config,job,local):
     if config.get('readable_exports'):
         dest.parent.chmod(0o755);dest.chmod(0o755)
     # Publish the small completion manifest last, after all media are available.
-    published=['excerpt.mp4','recipe.json'] if is_share else (['excerpt.mp4','prompt.txt']+[f['file'] for f in frames]+['recipe.json'])
+    published=['excerpt.mp4','recipe.json'] if is_share else (['excerpt.mp4','prompt.txt']+[f['file'] for f in frames]+(['pose.json'] if pose_payload is not None else [])+['recipe.json'])
     for name in published:
         shutil.copy2(local/name,dest/name)
         if config.get('readable_exports'):(dest/name).chmod(0o644)
@@ -824,7 +840,7 @@ class Worker:
 
     def worker_meta(self,include_models=False):
         if self.role!='ai':
-            return {'worker_version':WORKER_VERSION}
+            return {'worker_version':WORKER_VERSION,'pose_available':pose_available()}
         with self._config_lock:
             remote=dict(self.remote_ai_config) if isinstance(self.remote_ai_config,dict) else None
         sel,label,providers=active_selection_summary(self.config,remote)

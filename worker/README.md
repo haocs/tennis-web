@@ -198,3 +198,16 @@ without restarting or storing provider credentials/paths on the NAS:
   `config.json` unchanged. When connected to an older server that returns `HTTP 404`
   on `/api/coaching/worker/config`, the worker degrades gracefully to local
   `config.json` without errors.
+
+## Optional render-worker pose enrichment (`0.6.0[pose]`)
+
+Render workers can optionally extract bounded CPU pose candidates for still coaching evidence frames:
+
+- Install with `pip install --upgrade "./worker[pose]"` (adds `mediapipe>=1.2.3,<2.0`) to enable `tennis_coach.pose` (`pose_available()`). Base installs without `[pose]` remain valid and report `pose_status="unavailable"` without failing exports.
+- The worker bundles `pose_landmarker_lite.task` (Apache-2.0 `LICENSE` and SHA-256 `MANIFEST.json`) and verifies model checksums via `load_verified_model()` before running inference.
+- Pose runs only on non-share coaching exports (`intent != "share"`), under a per-job wall budget (`budget_seconds=8.0`), writing `pose.json` alongside `frames` after candidate gating (`_analyze_pose_candidates()`, confidence + multi-player ambiguity checks). Any pose runtime failure is isolated so normal video/frame exports still complete.
+- Verify installation and pose readiness locally with:
+
+```sh
+tennis-coach-worker --status --config "/path/to/config.json" --role render
+```

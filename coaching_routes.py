@@ -9,7 +9,7 @@ from coaching import Coaching, QueueConflict, recipe, redact_diagnostic
 from portal_mirror import notify_portal_mirror
 from storage import inside
 from players import coaching_player, resolve_coaching_subject
-from worker.tennis_coach.annotations import CAPABILITY, PROMPT_VERSION, expected_frames, evidence_manifest, coaching_prompt, response_schema
+from worker.tennis_coach.annotations import CAPABILITY, MAX_POSE_BYTES, PROMPT_VERSION, coaching_prompt, evidence_manifest, expected_frames, map_pose_to_evidence, response_schema, validate_pose_artifact
 
 
 def register_coaching(app,library,session):
@@ -145,16 +145,25 @@ def register_coaching(app,library,session):
                     raise ValueError('Selected player or profile changed. Start a new review for this excerpt.' if 'selected_player' in (parent_eff_mode, curr_eff_mode) else 'Main player or profile changed. Start a new review for this excerpt.')
                 answer=parent['result']['answer']
                 body.update(follow_up_of=parent_id,previous_question=parent['body']['prompt'],previous_answer=answer[:12000],previous_answer_truncated=len(answer)>12000)
-            body.update(evidence_frames=expected_frames(render),required_capability=CAPABILITY,prompt_version=PROMPT_VERSION,source_sha256=data.get('source',{}).get('sha256',data['id']),processing=data.get('processing'))
+            evidence_frames=expected_frames(render)
+            pose_art=(render.get('result') or {}).get('pose_artifact')
+            mapped_pose=map_pose_to_evidence(pose_art,evidence_frames,subject_hint=subject_hint or '') if isinstance(pose_art,dict) else None
+            body.update(evidence_frames=evidence_frames,required_capability=CAPABILITY,prompt_version=PROMPT_VERSION,source_sha256=data.get('source',{}).get('sha256',data['id']),processing=data.get('processing'),has_pose_enrichment=bool(mapped_pose))
             body.update(submitted_prompt=coaching_prompt(body,{'frames':body['evidence_frames']}),response_contract=response_schema())
             created=queue.create('ai',body,b.get('request_id'))
+            if mapped_pose is not None:
+                queue.save_evidence_enrichment(created['id'],mapped_pose)
             notify_portal_mirror(app)
             return jsonify(created),201
         except QueueConflict:raise
         except ValueError as e:abort(400,str(e))
 
     @routes.get('/api/coaching/jobs/<identity>')
-    def get_job(identity):return jsonify(get(identity))
+    def get_job(identity):
+        job=get(identity)
+        if isinstance(job.get('result'),dict) and 'pose_artifact' in job['result']:
+            job=dict(job,result={k:v for k,v in job['result'].items() if k!='pose_artifact'})
+        return jsonify(job)
 
     @routes.put('/api/coaching/jobs/<identity>')
     def edit_job(identity):
@@ -262,12 +271,22 @@ def register_coaching(app,library,session):
                     for name in names:
                         if name!='excerpt.mp4' and not re.fullmatch('frame-[0-9]{3}.jpg',name):raise ValueError('Invalid artifact')
                         if not inside(root,identity+'/'+fence+'/'+name).is_file():raise ValueError('Missing artifact')
-                    if is_share and (inside(root,identity+'/'+fence+'/prompt.txt').exists() or any(inside(root,identity+'/'+fence).glob('frame-*.jpg'))):
+                    if is_share and (inside(root,identity+'/'+fence+'/prompt.txt').exists() or inside(root,identity+'/'+fence+'/pose.json').exists() or any(inside(root,identity+'/'+fence).glob('frame-*.jpg'))):
                         raise ValueError('Unexpected coaching artifacts in share export')
                     result={k:saved[k] for k in ('frames','bytes','output_seconds','sha256','render_seconds')}
                     for optional in ('audio_output','color_output','video_codec','pix_fmt','fps_output'):
                         if optional in saved:
                             result[optional]=saved[optional]
+                    if not is_share:
+                        pose_file=inside(root,identity+'/'+fence+'/pose.json')
+                        if pose_file.is_file():
+                            if pose_file.stat().st_size>MAX_POSE_BYTES:
+                                raise ValueError('Pose artifact exceeds size limit')
+                            validated_pose=validate_pose_artifact(json.loads(pose_file.read_text()),saved['frames'])
+                            result['pose_status']='ok'
+                            result['pose_artifact']=validated_pose
+                        elif saved.get('pose_status') in ('unavailable','disabled'):
+                            result['pose_status']=saved['pose_status']
                     result['artifact_directory']=fence
                 except (ValueError,OSError,KeyError,TypeError) as e:abort(400,str(e))
             elif (
@@ -302,6 +321,11 @@ def register_coaching(app,library,session):
     def evidence(identity):
         try:return jsonify(queue.evidence(identity))
         except KeyError:abort(404,'No retained evidence for this response')
+
+    @routes.get('/api/coaching/evidence/<identity>/pose')
+    def evidence_pose(identity):
+        try:return jsonify(queue.evidence_pose(identity))
+        except KeyError:abort(404,'No pose enrichment for this response')
 
     @routes.get('/api/coaching/evidence/<identity>/<frame_id>.jpg')
     def evidence_frame(identity,frame_id):

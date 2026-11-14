@@ -1123,3 +1123,304 @@ def test_request_local_coaching_subject_validation_privacy_followup_and_auto_quo
         )
         assert capped.status_code == 409
         assert '2 reviews per clip' in capped.json['error']
+
+
+def _fake_landmarks(x0, y0, x1, y1, conf=0.9):
+    lm = [dict(x=0.5, y=0.5, visibility=0.0, presence=0.0) for _ in range(29)]
+    coords = {
+        0: ((x0 + x1) / 2, y0),
+        11: (x0, y0 + 0.15 * (y1 - y0)),
+        12: (x1, y0 + 0.15 * (y1 - y0)),
+        15: (x0, y0 + 0.45 * (y1 - y0)),
+        16: (x1, y0 + 0.45 * (y1 - y0)),
+        23: (x0, y0 + 0.6 * (y1 - y0)),
+        24: (x1, y0 + 0.6 * (y1 - y0)),
+        27: (x0, y1),
+        28: (x1, y1),
+    }
+    for idx, (x, y) in coords.items():
+        lm[idx] = dict(x=x, y=y, visibility=conf, presence=conf)
+    return lm
+
+
+def test_pose_model_verification_ambiguity_and_budget(tmp_path, monkeypatch):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'worker'))
+    from tennis_coach import pose as pose_mod
+
+    meta = pose_mod.load_verified_model()
+    assert meta is not None
+    assert meta['path'].is_file()
+    assert meta['license'] == 'Apache-2.0'
+    assert len(meta['sha256']) == 64
+
+    bad_manifest = tmp_path / 'MANIFEST.json'
+    bad_manifest.write_text(json.dumps({'files': [{'path': 'pose_landmarker_lite.task', 'sha256': '0' * 64}]}))
+    monkeypatch.setattr(pose_mod, 'MANIFEST_PATH', bad_manifest)
+    assert pose_mod.load_verified_model() is None
+
+    traversal_manifest = tmp_path / 'MANIFEST_trav.json'
+    traversal_manifest.write_text(json.dumps({'files': [{'path': '../worker.py', 'sha256': 'a' * 64}]}))
+    monkeypatch.setattr(pose_mod, 'MANIFEST_PATH', traversal_manifest)
+    assert pose_mod.load_verified_model() is None
+
+    monkeypatch.undo()
+    empty = pose_mod._analyze_pose_candidates([])
+    assert empty == dict(person_count=0, subject_ambiguous=False, ambiguity_reason='', joints={})
+
+    near = _fake_landmarks(0.3, 0.25, 0.55, 0.85, conf=0.92)
+    single = pose_mod._analyze_pose_candidates([near])
+    assert single['person_count'] == 1
+    assert single['subject_ambiguous'] is False
+    assert 0.0 <= single['joints']['right_shoulder']['x'] <= 1.0
+    assert single['joints']['right_shoulder']['confidence'] == pytest.approx(0.92)
+
+    far_small = _fake_landmarks(0.45, 0.1, 0.50, 0.18, conf=0.6)
+    with_hint = pose_mod._analyze_pose_candidates([near, far_small], subject_hint='near-court server')
+    assert with_hint['person_count'] == 2
+    assert with_hint['subject_ambiguous'] is True
+    assert with_hint['joints'] == {}
+
+    without_hint_dominant = pose_mod._analyze_pose_candidates([near, far_small], subject_hint='')
+    assert without_hint_dominant['person_count'] == 2
+    assert without_hint_dominant['subject_ambiguous'] is False
+    assert 'right_shoulder' in without_hint_dominant['joints']
+
+    comparable = _fake_landmarks(0.6, 0.25, 0.84, 0.82, conf=0.91)
+    two_peers = pose_mod._analyze_pose_candidates([near, comparable], subject_hint='')
+    assert two_peers['person_count'] == 2
+    assert two_peers['subject_ambiguous'] is True
+    assert two_peers['joints'] == {}
+
+    monkeypatch.setattr(pose_mod, 'load_verified_model', lambda: None)
+    assert pose_mod.extract_pose_for_frames(tmp_path, []) == (None, 'unavailable')
+
+    monkeypatch.undo()
+    ticks = iter([100.0, 102.0, 104.0])
+    monkeypatch.setattr(pose_mod.time, 'monotonic', lambda: next(ticks))
+    assert pose_mod.extract_pose_for_frames(tmp_path, [{'file': 'frame-000.jpg', 'sha256': 'a' * 64}], budget_seconds=0.5) == (None, 'unavailable')
+
+
+def test_render_complete_pose_validation(setup):
+    import hashlib
+    from worker.tennis_coach.annotations import RENDER_SHARE_CAPABILITY
+
+    app, _root, data = enabled(setup)
+    c = app.test_client()
+    token = 'test-worker-secret'
+
+    coach_req = post(c, 'exports', dict(selection(data), request_id='pose-val-coach-1'))
+    assert coach_req.status_code == 201
+    rjob = post(c, 'worker/render/claim', {'worker_id': 'r-val'}, token).json['job']
+    fence = hashlib.sha256(rjob['token'].encode()).hexdigest()[:24]
+    folder = Path(app.config['COACH_MEDIA_ROOT']) / rjob['id'] / fence
+    folder.mkdir(parents=True, exist_ok=True)
+    f0 = b'frame0'
+    f0_sha = hashlib.sha256(f0).hexdigest()
+    (folder / 'excerpt.mp4').write_bytes(b'v')
+    (folder / 'frame-000.jpg').write_bytes(f0)
+    (folder / 'prompt.txt').write_text('check')
+    ev = Path(app.config['COACH_MEDIA_ROOT']) / 'evidence/frames'
+    ev.mkdir(parents=True, exist_ok=True)
+    (ev / f'{f0_sha}.jpg').write_bytes(f0)
+    (folder / 'recipe.json').write_text(
+        json.dumps(
+            dict(
+                recipe=rjob['body'],
+                lease_token=rjob['token'],
+                frames=[dict(file='frame-000.jpg', sha256=f0_sha, original_seconds=6.5, clip_seconds=1.5, excerpt_seconds=1.0)],
+                bytes=1,
+                output_seconds=2.0,
+                sha256='f' * 64,
+                render_seconds=0.2,
+            )
+        )
+    )
+    base_pose = {
+        'schema_version': 1,
+        'coordinate_space': 'display_oriented_evidence_normalized',
+        'model': {'name': 'mediapipe_pose_landmarker_lite', 'version': '0.1', 'sha256': 'a' * 64, 'license': 'Apache-2.0'},
+        'limitations': 'Approx 2D pose.',
+        'frames': [
+            {
+                'file': 'frame-000.jpg',
+                'sha256': f0_sha,
+                'width': 320,
+                'height': 240,
+                'person_count': 1,
+                'subject_ambiguous': False,
+                'ambiguity_reason': '',
+                'joints': {'nose': {'x': 0.5, 'y': 0.3, 'confidence': 0.9}},
+            }
+        ],
+    }
+
+    bad_variants = [
+        dict(base_pose, coordinate_space='raw_rotated_sensor'),
+        dict(base_pose, frames=[dict(base_pose['frames'][0], file='frame-999.jpg')]),
+        dict(base_pose, frames=[dict(base_pose['frames'][0], sha256='0' * 64)]),
+        dict(base_pose, frames=[dict(base_pose['frames'][0], joints={'bad_joint': {'x': 0.5, 'y': 0.5, 'confidence': 0.9}})]),
+        dict(base_pose, padding='x' * 70000),
+    ]
+    for bad in bad_variants:
+        (folder / 'pose.json').write_text(json.dumps(bad))
+        assert post(c, f"worker/jobs/{rjob['id']}/complete", {'token': rjob['token']}, token).status_code == 400
+    (folder / 'pose.json').write_text('{"schema_version":1,"frames":[{"joints":{"nose":{"x":NaN}}}]}')
+    assert post(c, f"worker/jobs/{rjob['id']}/complete", {'token': rjob['token']}, token).status_code == 400
+    (folder / 'pose.json').unlink()
+    assert post(c, f"worker/jobs/{rjob['id']}/complete", {'token': rjob['token']}, token).status_code == 200
+
+    # Share export rejects unexpected pose.json.
+    share_req = post(c, 'exports', dict(selection(data), intent='share', quality='high', request_id='pose-val-share-1'))
+    assert share_req.status_code == 201
+    sjob = post(c, 'worker/render/claim', {'worker_id': 'r-val', 'capabilities': [RENDER_SHARE_CAPABILITY]}, token).json['job']
+    sfence = hashlib.sha256(sjob['token'].encode()).hexdigest()[:24]
+    sfolder = Path(app.config['COACH_MEDIA_ROOT']) / sjob['id'] / sfence
+    sfolder.mkdir(parents=True, exist_ok=True)
+    (sfolder / 'excerpt.mp4').write_bytes(b'share-v')
+    (sfolder / 'recipe.json').write_text(
+        json.dumps(
+            dict(
+                recipe=sjob['body'],
+                lease_token=sjob['token'],
+                frames=[],
+                bytes=7,
+                output_seconds=4.0,
+                sha256='d' * 64,
+                render_seconds=0.3,
+                audio_output='retimed',
+                color_output='sdr-bt709',
+                video_codec='h264',
+                pix_fmt='yuv420p',
+                fps_output=60,
+            )
+        )
+    )
+    (sfolder / 'pose.json').write_text(json.dumps(dict(base_pose, frames=[])))
+    assert post(c, f"worker/jobs/{sjob['id']}/complete", {'token': sjob['token']}, token).status_code == 400
+    (sfolder / 'pose.json').unlink()
+    assert post(c, f"worker/jobs/{sjob['id']}/complete", {'token': sjob['token']}, token).status_code == 200
+
+
+def test_worker_render_pose_fault_isolation_unit(setup, tmp_path, monkeypatch):
+    import hashlib
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'worker'))
+    from tennis_coach import worker as worker_mod
+
+    app, _root, data = enabled(setup)
+    c = app.test_client()
+    token = 'test-worker-secret'
+    clip_rel = data.get('media_directory', data['id']) + '/' + data['clips'][0]['file']
+    src_path = Path(app.config['LIBRARY_ROOT']) / 'media' / clip_rel
+    src_path.write_bytes(b'synthetic-clip')
+    data['video']['hdr'] = False
+    data.setdefault('media_checksums', {})[data['clips'][0]['file']] = hashlib.sha256(src_path.read_bytes()).hexdigest()
+    (Path(app.config['LIBRARY_ROOT']) / 'metadata/sessions' / f'{ID}.json').write_text(json.dumps(data))
+
+    monkeypatch.setattr(
+        worker_mod,
+        'probe_media',
+        lambda _ff, _path: dict(
+            codec='h264',
+            pix_fmt='yuv420p',
+            colorspace='bt709',
+            primaries='bt709',
+            transfer='bt709',
+            fps=30.0,
+            has_audio=False,
+            is_10bit=False,
+            verified_sdr=True,
+            verified_hdr=False,
+            has_hdr_signal=False,
+            video_line='Video: h264',
+        ),
+    )
+
+    def fake_run(cmd, **_kwargs):
+        Path(cmd[-1]).write_bytes(b'fake-media')
+        return type('R', (), {'returncode': 0, 'stderr': ''})()
+
+    monkeypatch.setattr(worker_mod.subprocess, 'run', fake_run)
+
+    # Disabled config skips pose extraction and emits pose_status='disabled'.
+    r_dis = post(c, 'exports', dict(selection(data), start=0.2, end=0.7, request_id='unit-pose-dis')).json
+    j_dis = post(c, 'worker/render/claim', {'worker_id': 'u-r'}, token).json['job']
+    cfg = dict(
+        library_media_root=str(Path(app.config['LIBRARY_ROOT']) / 'media'),
+        artifact_root=str(app.config['COACH_MEDIA_ROOT']),
+        ffmpeg='/usr/bin/true',
+        pose_extraction=False,
+    )
+    local_dis = tmp_path / 'u-dis'
+    local_dis.mkdir()
+    info_dis = worker_mod.render(cfg, j_dis, local_dis)
+    assert info_dis['pose_status'] == 'disabled'
+    fence_dis = hashlib.sha256(j_dis['token'].encode()).hexdigest()[:24]
+    assert not (Path(app.config['COACH_MEDIA_ROOT']) / j_dis['id'] / fence_dis / 'pose.json').exists()
+    assert post(c, f"worker/jobs/{j_dis['id']}/complete", {'token': j_dis['token']}, token).status_code == 200
+
+    # Pose extraction raising inside worker.render never fails render completion.
+    r_err = post(c, 'exports', dict(selection(data), start=0.8, end=1.3, request_id='unit-pose-err')).json
+    j_err = post(c, 'worker/render/claim', {'worker_id': 'u-r'}, token).json['job']
+    monkeypatch.setattr(worker_mod, 'extract_pose_for_frames', lambda *a, **kw: (_ for _ in ()).throw(RuntimeError('pose boom')))
+    local_err = tmp_path / 'u-err'
+    local_err.mkdir()
+    info_err = worker_mod.render(dict(cfg, pose_extraction=True), j_err, local_err)
+    assert info_err['pose_status'] == 'unavailable'
+    assert post(c, f"worker/jobs/{j_err['id']}/complete", {'token': j_err['token']}, token).status_code == 200
+    assert r_dis['id'] != r_err['id']
+
+
+def test_render_pose_fault_isolation_ffmpeg(setup, tmp_path, monkeypatch):
+    import hashlib
+    import os
+    import shutil
+    import subprocess
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'worker'))
+    from tennis_coach import worker as worker_mod
+
+    app, _root, data = enabled(setup)
+    c = app.test_client()
+    token = 'test-worker-secret'
+
+    ff = os.environ.get('TENNIS_FFMPEG') or shutil.which('ffmpeg')
+    if not ff:
+        pytest.skip('FFmpeg required for render() fault-isolation check')
+    clip_rel = data.get('media_directory', data['id']) + '/' + data['clips'][0]['file']
+    src_path = Path(app.config['LIBRARY_ROOT']) / 'media' / clip_rel
+    subprocess.run(
+        [ff, '-hide_banner', '-loglevel', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc2=size=320x240:rate=30:duration=2',
+         '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-color_primaries', 'bt709', '-color_trc', 'bt709', '-colorspace', 'bt709', str(src_path)],
+        check=True,
+        capture_output=True,
+        timeout=20,
+    )
+    data['video']['hdr'] = False
+    data.setdefault('media_checksums', {})[data['clips'][0]['file']] = hashlib.sha256(src_path.read_bytes()).hexdigest()
+    (Path(app.config['LIBRARY_ROOT']) / 'metadata/sessions' / f'{ID}.json').write_text(json.dumps(data))
+
+    r_dis = post(c, 'exports', dict(selection(data), start=0.2, end=0.7, request_id='pose-render-disabled')).json
+    j_dis = post(c, 'worker/render/claim', {'worker_id': 'r-dis'}, token).json['job']
+    cfg_dis = dict(
+        library_media_root=str(Path(app.config['LIBRARY_ROOT']) / 'media'),
+        artifact_root=str(app.config['COACH_MEDIA_ROOT']),
+        ffmpeg=ff,
+        pose_extraction=False,
+    )
+    local_dis = tmp_path / 'local-dis'
+    local_dis.mkdir()
+    info_dis = worker_mod.render(cfg_dis, j_dis, local_dis)
+    assert info_dis['pose_status'] == 'disabled'
+    fence_dis = hashlib.sha256(j_dis['token'].encode()).hexdigest()[:24]
+    assert not (Path(app.config['COACH_MEDIA_ROOT']) / j_dis['id'] / fence_dis / 'pose.json').exists()
+    assert post(c, f"worker/jobs/{j_dis['id']}/complete", {'token': j_dis['token']}, token).status_code == 200
+
+    r_err = post(c, 'exports', dict(selection(data), start=0.8, end=1.3, request_id='pose-render-err')).json
+    j_err = post(c, 'worker/render/claim', {'worker_id': 'r-err'}, token).json['job']
+    monkeypatch.setattr(worker_mod, 'extract_pose_for_frames', lambda *a, **kw: (_ for _ in ()).throw(RuntimeError('pose boom')))
+    cfg_err = dict(cfg_dis, pose_extraction=True)
+    local_err = tmp_path / 'local-err'
+    local_err.mkdir()
+    info_err = worker_mod.render(cfg_err, j_err, local_err)
+    assert info_err['pose_status'] == 'unavailable'
+    assert post(c, f"worker/jobs/{j_err['id']}/complete", {'token': j_err['token']}, token).status_code == 200
+    assert r_dis['id'] != r_err['id']

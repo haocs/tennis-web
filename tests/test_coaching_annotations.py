@@ -287,3 +287,288 @@ def test_delete_coaching_review_removes_job_annotations_evidence_and_orphaned_ar
     assert c.get(f"/api/coaching/jobs/{job['id']}").status_code == 404
     assert c.get(f"/api/coaching/sessions/{ID}").json['jobs'] == []
     assert c.get(f"/api/coaching/sessions/{ID}").json['annotations'] == []
+
+
+def test_schema_v3_and_v2_compatibility_and_gemini_schema(setup):
+    from worker.tennis_coach.annotations import (
+        BODY_AREAS,
+        SCHEMA_VERSION,
+        STROKE_PHASES,
+        gemini_compatible_schema,
+        response_schema,
+    )
+
+    assert SCHEMA_VERSION == 3
+    schema = response_schema()
+    compat = gemini_compatible_schema(schema)
+
+    def walk(node):
+        if isinstance(node, dict):
+            assert 'additionalProperties' not in node
+            assert 'anyOf' not in node
+            assert node.get('type') != 'null'
+            for v in node.values():
+                walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                walk(v)
+
+    walk(compat)
+    sug_props = compat['properties']['suggestions']['items']['properties']
+    for key in ('now_summary', 'primary_frame_id', 'stroke_phase', 'body_areas', 'focus_region'):
+        assert key in sug_props
+
+    _app, _c, _data, ai, _folder = prepared(setup)
+    manifest = dict(
+        frames=ai['body']['evidence_frames'],
+        original_start=ai['body']['original_start'],
+        original_end=ai['body']['original_end'],
+    )
+    f0 = manifest['frames'][0]
+
+    # Backward compatibility: schema_version 2 without v3 fields parses cleanly.
+    v2_raw = json.dumps(dict(schema_version=2, summary='Legacy v2 review.', suggestions=[suggestion(manifest)]))
+    v2 = parse_response(v2_raw, manifest)
+    assert v2['parse_status'] == 'valid'
+    assert v2['validation_warnings'] == []
+    s2 = v2['suggestions'][0]
+    assert s2['now_summary'] == ''
+    assert s2['primary_frame_id'] == ''
+    assert s2['stroke_phase'] == ''
+    assert s2['body_areas'] == []
+    assert s2['focus_region'] is None
+
+    # Schema v3 with all inspection fields parses and preserves normalized geometry.
+    v3_item = dict(
+        suggestion(manifest),
+        now_summary='Right elbow stays close to your ribs before contact.',
+        primary_frame_id=f0['frame_id'],
+        stroke_phase='contact_window',
+        body_areas=['hitting_arm', 'hips_trunk', 'hitting_arm'],
+        focus_region=dict(x=0.25, y=0.2, width=0.35, height=0.4),
+    )
+    assert 'contact_window' in STROKE_PHASES and 'hitting_arm' in BODY_AREAS
+    v3 = parse_response(json.dumps(dict(schema_version=3, summary='v3 review.', suggestions=[v3_item])), manifest)
+    assert v3['parse_status'] == 'valid'
+    assert v3['validation_warnings'] == []
+    s3 = v3['suggestions'][0]
+    assert s3['primary_frame_id'] == f0['frame_id']
+    assert s3['stroke_phase'] == 'contact_window'
+    assert s3['body_areas'] == ['hitting_arm', 'hips_trunk']
+    assert s3['focus_region'] == {'x': 0.25, 'y': 0.2, 'width': 0.35, 'height': 0.4}
+
+
+def test_v3_invalid_metadata_stripping_strict_rejection_and_immutable_history(setup):
+    app, c, data, ai, folder = prepared(setup)
+    job = claimed(c)
+    manifest = pin(app, c, job, folder)
+    f0, f1 = manifest['frames'][0], manifest['frames'][1]
+
+    # Invalid references / enums / out-of-bounds focus_region yield partial warnings and stripped fields.
+    bad_v3_item = dict(
+        suggestion(manifest),
+        evidence_frame_ids=[f0['frame_id']],
+        primary_frame_id=f1['frame_id'],  # Not inside cited evidence_frame_ids!
+        stroke_phase='nonexistent_phase',
+        body_areas=['shoulders_chest', 'unknown_limb'],
+        focus_region=dict(x=0.95, y=0.9, width=0.2, height=0.2),  # Extends beyond 1.0!
+    )
+    done = complete(c, job, json.dumps(dict(schema_version=3, summary='Partial v3.', suggestions=[bad_v3_item])))
+    assert done['result']['structured']['parse_status'] == 'partial'
+    a = annotations(c)[0]
+    assert a['current']['primary_frame_id'] == ''
+    assert a['current']['stroke_phase'] == ''
+    assert a['current']['body_areas'] == ['shoulders_chest']
+    assert a['current']['focus_region'] is None
+    assert a['current']['validation_warnings']
+
+    # Strict validation rejects uncleaned v3 warnings with 400.
+    assert review(c, a, data['published_at']).status_code == 400
+    assert (
+        review(
+            c,
+            a,
+            data['published_at'],
+            content=dict(a['current'], stroke_phase='bad_phase'),
+        ).status_code
+        == 400
+    )
+
+    # Human edits & accepts valid v3 fields; evidence manifest remains immutable and training status unreleased.
+    cleaned = copy.deepcopy(a['current'])
+    cleaned.update(
+        now_summary='Left shoulder stays closed slightly longer into contact.',
+        primary_frame_id=f0['frame_id'],
+        stroke_phase='forward_swing',
+        body_areas=['shoulders_chest', 'hips_trunk'],
+        focus_region=dict(x=0.2, y=0.2, width=0.3, height=0.3),
+    )
+    accepted = review(c, a, data['published_at'], status='accepted', content=cleaned)
+    assert accepted.status_code == 200
+    assert accepted.json['playback_eligible']
+    assert accepted.json['training_label_status'] == 'not_released'
+    assert accepted.json['current']['primary_frame_id'] == f0['frame_id']
+    assert accepted.json['current']['stroke_phase'] == 'forward_swing'
+    assert accepted.json['current']['body_areas'] == ['shoulders_chest', 'hips_trunk']
+    assert accepted.json['current']['focus_region'] == {'x': 0.2, 'y': 0.2, 'width': 0.3, 'height': 0.3}
+
+    # Pinning a mutated manifest against the same job fails; stored manifest stays unchanged.
+    mutated = copy.deepcopy(manifest)
+    mutated['frames'][0]['sha256'] = '0' * 64
+    assert post(c, f"worker/jobs/{job['id']}/evidence", {'token': job['token'], 'result': mutated}, TOKEN).status_code == 400
+    assert c.get(f"/api/coaching/evidence/{job['id']}").json['frames'][0]['sha256'] == f0['sha256']
+
+    # Reprocessing the session marks accepted v3 annotation historical & ineligible for automatic playback, while keeping immutable proposal intact.
+    reprocessed = copy.deepcopy(data)
+    reprocessed['published_at'] += 1
+    reprocessed['clips'][0]['id'] = 'd' * 24
+    (Path(app.config['LIBRARY_ROOT']) / 'metadata/sessions' / f'{ID}.json').write_text(json.dumps(reprocessed))
+    after_reprocess = annotations(c)[0]
+    assert after_reprocess['historical'] and not after_reprocess['playback_eligible']
+    assert after_reprocess['proposal']['primary_frame_id'] == ''
+    assert after_reprocess['training_label_status'] == 'not_released'
+
+    export_payload = c.get(f'/api/coaching/annotations/export/{ID}').json
+    assert export_payload['annotations'][0]['training_label_status'] == 'not_released'
+
+
+def test_lazy_pose_enrichment_export_strip_and_delete_cascade(setup):
+    app, _root, data = enabled(setup)
+    c = app.test_client()
+    render_req = post(
+        c,
+        'exports',
+        dict(
+            selection(data),
+            start=0.5,
+            end=2.5,
+            question='Check trophy pose',
+            consent=True,
+            subject_hint='near-court server',
+            request_id='pose-render-req-1',
+        ),
+    )
+    assert render_req.status_code == 201
+    rjob = post(c, 'worker/render/claim', {'worker_id': 'r1'}, TOKEN).json['job']
+    assert rjob['id'] == render_req.json['id']
+    fence = hashlib.sha256(rjob['token'].encode()).hexdigest()[:24]
+    folder = Path(app.config['COACH_MEDIA_ROOT']) / rjob['id'] / fence
+    folder.mkdir(parents=True, exist_ok=True)
+    spec = rjob['body']
+    f0_bytes = b'pose-frame-0'
+    f1_bytes = b'pose-frame-1'
+    f0_sha = hashlib.sha256(f0_bytes).hexdigest()
+    f1_sha = hashlib.sha256(f1_bytes).hexdigest()
+    (folder / 'excerpt.mp4').write_bytes(b'video-bytes')
+    (folder / 'frame-000.jpg').write_bytes(f0_bytes)
+    (folder / 'frame-001.jpg').write_bytes(f1_bytes)
+    (folder / 'prompt.txt').write_text('Check trophy pose')
+    ev_dir = Path(app.config['COACH_MEDIA_ROOT']) / 'evidence/frames'
+    ev_dir.mkdir(parents=True, exist_ok=True)
+    (ev_dir / f'{f0_sha}.jpg').write_bytes(f0_bytes)
+    (ev_dir / f'{f1_sha}.jpg').write_bytes(f1_bytes)
+    render_frames = [
+        {
+            'file': 'frame-000.jpg',
+            'sha256': f0_sha,
+            'original_seconds': spec['original_start'] + 0.5,
+            'clip_seconds': spec['start'] + 0.5,
+            'excerpt_seconds': 0.5 / spec['speed'],
+        },
+        {
+            'file': 'frame-001.jpg',
+            'sha256': f1_sha,
+            'original_seconds': spec['original_start'] + 1.5,
+            'clip_seconds': spec['start'] + 1.5,
+            'excerpt_seconds': 1.5 / spec['speed'],
+        },
+    ]
+    (folder / 'recipe.json').write_text(
+        json.dumps(
+            dict(
+                recipe=spec,
+                lease_token=rjob['token'],
+                frames=render_frames,
+                bytes=11,
+                output_seconds=2.0,
+                sha256='e' * 64,
+                render_seconds=0.3,
+            )
+        )
+    )
+    pose_doc = {
+        'schema_version': 1,
+        'coordinate_space': 'display_oriented_evidence_normalized',
+        'model': {'name': 'mediapipe_pose_landmarker_lite', 'version': '0.1', 'sha256': 'a' * 64, 'license': 'Apache-2.0'},
+        'limitations': 'Approximate 2D monocular still-frame pose estimates.',
+        'frames': [
+            {
+                'file': 'frame-000.jpg',
+                'sha256': f0_sha,
+                'width': 640,
+                'height': 360,
+                'person_count': 1,
+                'subject_ambiguous': False,
+                'ambiguity_reason': '',
+                'joints': {'right_shoulder': {'x': 0.42, 'y': 0.31, 'confidence': 0.92}},
+            },
+            {
+                'file': 'frame-001.jpg',
+                'sha256': f1_sha,
+                'width': 640,
+                'height': 360,
+                'person_count': 2,
+                'subject_ambiguous': False,
+                'ambiguity_reason': '',
+                'joints': {'right_shoulder': {'x': 0.5, 'y': 0.4, 'confidence': 0.85}},
+            },
+        ],
+    }
+    (folder / 'pose.json').write_text(json.dumps(pose_doc))
+    done_render = post(c, f"worker/jobs/{rjob['id']}/complete", {'token': rjob['token']}, TOKEN)
+    assert done_render.status_code == 200
+    assert done_render.json['result']['pose_status'] == 'ok'
+
+    # Listing and job fetch never leak pose_artifact while keeping pose_status.
+    assert 'pose_artifact' not in c.get(f"/api/coaching/jobs/{rjob['id']}").json['result']
+    listed = {j['id']: j for j in c.get(f'/api/coaching/sessions/{ID}').json['jobs']}
+    assert listed[rjob['id']]['result']['pose_status'] == 'ok'
+    assert 'pose_artifact' not in listed[rjob['id']]['result']
+
+    # Creating AI request with subject_hint maps pose onto evidence_frames & suppresses ambiguous frame-001.
+    ai_req = post(
+        c,
+        'requests',
+        dict(
+            export_id=rjob['id'],
+            prompt='Check trophy pose',
+            consent=True,
+            subject_hint='near-court server',
+            request_id='pose-ai-req-1',
+        ),
+    )
+    assert ai_req.status_code == 201
+    assert ai_req.json['body']['has_pose_enrichment'] is True
+    ai_job = claimed(c)
+    assert ai_job['id'] == ai_req.json['id']
+    manifest = pin(app, c, ai_job, folder)
+    complete(c, ai_job, json.dumps(dict(schema_version=2, summary='Pose test.', suggestions=[suggestion(manifest)])))
+
+    ann = [a for a in annotations(c) if a['job_id'] == ai_job['id']][0]
+    assert ann['provenance']['has_pose_enrichment'] is True
+
+    # Lazy /pose endpoint returns mapped enrichment with frame-000 intact and multi-person frame-001 suppressed.
+    pose_resp = c.get(f"/api/coaching/evidence/{ai_job['id']}/pose")
+    assert pose_resp.status_code == 200
+    f0_id, f1_id = manifest['frames'][0]['frame_id'], manifest['frames'][1]['frame_id']
+    assert pose_resp.json['frames'][f0_id]['joints']['right_shoulder']['x'] == 0.42
+    assert pose_resp.json['frames'][f1_id]['subject_ambiguous'] is True
+    assert pose_resp.json['frames'][f1_id]['joints'] == {}
+
+    exported = c.get(f'/api/coaching/annotations/export/{ID}').json
+    pose_ai_exports = [r for r in exported['responses'] if r['request']['id'] == ai_job['id']]
+    assert pose_ai_exports and pose_ai_exports[0]['pose_enrichment']['frames'][f0_id]['joints']
+
+    # Deleting the AI job deletes evidence_enrichment as well.
+    assert c.delete(f"/api/coaching/jobs/{ai_job['id']}", headers={'X-Tennis-Request': '1'}, json={}).status_code == 200
+    assert c.get(f"/api/coaching/evidence/{ai_job['id']}/pose").status_code == 404

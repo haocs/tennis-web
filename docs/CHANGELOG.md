@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.25.0 — 2026-11-14
+
+- Clip Study AI coach review & movement inspection (`COACHING-INSPECTION-DESIGN.md`):
+  - Versioned coaching evidence contract (`schema_version: 3`, prompt `tennis-coach-evidence-v3`, backward-compatible with `schema_version: 2` and older workers) adding optional `now_summary`, `primary_frame_id`, `stroke_phase` (`STROKE_PHASES`), `body_areas` (`BODY_AREAS`), and `focus_region` cues alongside `evidence_frame_ids` and `applies_to`.
+  - Optional render-worker pose enrichment (`pose.json`, `POSE_ENRICHMENT_SCHEMA_VERSION = 1`) via `tennis-coach-worker` `0.6.0` optional `[pose]` extra (`mediapipe>=1.2.3,<2.0`, bundled Apache-2.0 `pose_landmarker_lite.task`), bounded CPU budget (`budget_seconds=8.0`), confidence/player-ambiguity gating, and strict fault isolation (`pose.json` forbidden on `intent='share'`).
+  - Immutable historical evidence & lazy pose API (`GET /api/coaching/evidence/<identity>/pose`) backed by SQLite `evidence_enrichment`, stripped from queue/job polling payloads, and deleted cleanly via `DELETE /api/coaching/jobs/<id>`.
+  - Responsive desktop/mobile Clip Study coach inspection: primary-frame and still-matched gated SVG overlay (hidden when uncertain or playing), suggestion navigation and timeline markers, independent disjoint range playback loops, explicit opt-in roll-freeze-roll walkthrough (cancelling immediately on manual play/seek/scrub/suggestion change), reduced-motion and accessible touch controls, and exact preservation of pre-inspection crop, excerpt selection, speed, and status layout on exit.
+
 ## v0.15.0 — 2026-11-05
 
 - #64: Match playback speed control size to fullscreen, use a transparent

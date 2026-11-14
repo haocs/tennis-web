@@ -15,6 +15,7 @@ from test_coaching_annotations import prepared, claimed, suggestion
 from worker.tennis_coach.annotations import (
     CAPABILITY,
     LEARNING_PLAN_CAPABILITY,
+    SCHEMA_VERSION,
     evidence_manifest,
     gemini_compatible_schema,
     learning_plan_schema,
@@ -30,8 +31,8 @@ def test_gemini_compatible_schema_strips_additional_properties_and_converts_nume
     assert 'additionalProperties' not in json.dumps(coach)
     sv = coach['properties']['schema_version']
     assert 'enum' not in sv
-    assert sv['type'] == 'integer' and sv['minimum'] == 2 and sv['maximum'] == 2
-    assert 'Must equal 2' in sv['description']
+    assert sv['type'] == 'integer' and sv['minimum'] == SCHEMA_VERSION and sv['maximum'] == SCHEMA_VERSION
+    assert f'Must equal {SCHEMA_VERSION}' in sv['description']
 
     plan = gemini_compatible_schema(learning_plan_schema())
     assert 'additionalProperties' not in json.dumps(plan)
@@ -83,7 +84,7 @@ def test_antigravity_clip_coaching_pins_evidence_and_uses_compatible_schema(setu
         schema_file = Path(args[args.index('--json-schema') + 1])
         saved_schema = json.loads(schema_file.read_text())
         assert 'additionalProperties' not in json.dumps(saved_schema)
-        assert saved_schema['properties']['schema_version']['minimum'] == 2
+        assert saved_schema['properties']['schema_version']['minimum'] == SCHEMA_VERSION
         prompt_arg = args[args.index('-p') + 1]
         assert '@frame-000.jpg @frame-001.jpg' in prompt_arg
         assert job['body']['submitted_prompt'] in prompt_arg

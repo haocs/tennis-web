@@ -137,3 +137,12 @@ Close the parent and subtasks after integration and deployed verification; local
 completion alone must not be represented as a deployed feature.
 
 See [Local validation results](CLIP-STUDY-VALIDATION.md) for executed checks and device limits.
+
+## Coach suggestion inspection (v0.25.0)
+
+See [COACHING-INSPECTION-DESIGN.md](COACHING-INSPECTION-DESIGN.md) for the full design and acceptance checklist. Key behavioral guarantees:
+
+- **Evidence-backed overlay & fallback**: Overlays display on matching paused/still evidence frames (`#study-coach-overlay`) only when pose data passes per-joint confidence and player-identity gates. Ambiguous multi-player frames, offscreen/occluded joints, or missing pose fall back cleanly to the plain evidence frame and text without fabricated skeletons or target postures.
+- **Disjoint intervals & opt-in walkthrough**: Multiple disjoint `applies_to` ranges loop independently rather than spanning their union. The roll-freeze-roll walkthrough is explicitly opt-in, supports reduced motion, and cancels all scheduled timers immediately on manual play, pause, seek, scrub, suggestion change, or exit.
+- **Non-mutating exit**: Entering coach inspection snapshots pre-inspection crop, excerpt selection, playback speed, and status state and restores them on exit so inspecting a suggestion never silently alters the next coaching or share export.
+- **Device scope**: Verified with Node frontend logic tests, backend pytest suites, and Chromium + WebKit Playwright desktop & `390x844` mobile emulation; physical iPhone/Safari/HEVC-HDR playback remains a device verification item.

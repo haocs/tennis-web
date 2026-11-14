@@ -11,6 +11,7 @@ from worker.tennis_coach.annotations import (
     LEARNING_PLAN_CAPABILITY,
     LEARNING_PLAN_PROMPT_VERSION,
     LEARNING_PLAN_SCHEMA_VERSION,
+    POSE_ENRICHMENT_SCHEMA_VERSION,
     learning_plan_schema,
     learning_plan_prompt,
     parse_learning_plan,
@@ -30,6 +31,7 @@ MAX_PLAN_PRACTICE_BYTES = 16000
 class Annotations:
     def init_annotations(self, db):
         db.execute('CREATE TABLE IF NOT EXISTS evidence(job_id TEXT PRIMARY KEY, manifest TEXT NOT NULL)')
+        db.execute('CREATE TABLE IF NOT EXISTS evidence_enrichment(job_id TEXT PRIMARY KEY, schema_version INTEGER NOT NULL, enrichment_json TEXT NOT NULL, created REAL NOT NULL)')
         db.execute('CREATE TABLE IF NOT EXISTS annotations(id TEXT PRIMARY KEY, job_id TEXT NOT NULL, source_id TEXT NOT NULL, proposal TEXT NOT NULL, current TEXT NOT NULL, status TEXT NOT NULL, reviewed_publication REAL, version INTEGER NOT NULL, updated REAL NOT NULL)')
         db.execute('CREATE INDEX IF NOT EXISTS annotations_source ON annotations(source_id)')
         db.execute('CREATE TABLE IF NOT EXISTS annotation_revisions(annotation_id TEXT, version INTEGER, value TEXT NOT NULL, created REAL NOT NULL, PRIMARY KEY(annotation_id, version))')
@@ -70,6 +72,25 @@ class Annotations:
         if not row: raise KeyError(job_id)
         return json.loads(row['manifest'])
 
+    def save_evidence_enrichment(self, job_id, enrichment):
+        if not isinstance(enrichment, dict):
+            return
+        encoded = canonical(enrichment)
+        with self.db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            db.execute(
+                'INSERT OR IGNORE INTO evidence_enrichment VALUES(?,?,?,?)',
+                (job_id, POSE_ENRICHMENT_SCHEMA_VERSION, encoded, self.clock()),
+            )
+            db.commit()
+
+    def evidence_pose(self, job_id):
+        with self.db() as db:
+            row = db.execute('SELECT enrichment_json FROM evidence_enrichment WHERE job_id=?', (job_id,)).fetchone()
+        if not row:
+            raise KeyError(job_id)
+        return json.loads(row['enrichment_json'])
+
     def pin_evidence(self, db, job, manifest):
         if manifest != evidence_manifest(job): raise ValueError('Evidence does not match the requested frame sequence')
         encoded = canonical(manifest)
@@ -109,6 +130,7 @@ class Annotations:
             a['proposal'] = json.loads(a['proposal']); a['current'] = json.loads(a['current'])
             a['provenance'] = {k: body.get(k) for k in ('source_id','source_sha256','clip_id','publication','export_id','prompt_version','processing','player_context','subject_mode','subject_hint','original_start','original_end')}
             a['provenance']['asked_at'] = asked_at
+            a['provenance']['has_pose_enrichment'] = bool(body.get('has_pose_enrichment'))
             # Even an untimed proposal retains its historical selection without inventing precise cue timing.
             intervals = a['current']['applies_to'] or [dict(start_seconds=body['original_start'], end_seconds=body['original_end'])]
             a['related_clip_ids'] = [c['id'] for c in clips if any(i['start_seconds'] <= c['original_end_seconds'] and i['end_seconds'] >= c['original_start_seconds'] for i in intervals)]
@@ -178,7 +200,12 @@ class Annotations:
                 job=self.decode(row)
                 saved=db.execute('SELECT manifest FROM evidence WHERE job_id=?',(row['id'],)).fetchone()
                 manifest=json.loads(saved['manifest']) if saved else None
-                responses.append(dict(request=job,evidence=manifest))
+                enr=db.execute('SELECT enrichment_json FROM evidence_enrichment WHERE job_id=?',(row['id'],)).fetchone()
+                pose_enrichment=json.loads(enr['enrichment_json']) if enr else None
+                resp_entry=dict(request=job,evidence=manifest)
+                if pose_enrichment is not None:
+                    resp_entry['pose_enrichment']=pose_enrichment
+                responses.append(resp_entry)
                 for a in db.execute('SELECT * FROM annotations WHERE job_id=? ORDER BY id',(row['id'],)):
                     value=dict(a)
                     for key in ('proposal','current'):value[key]=json.loads(value[key])

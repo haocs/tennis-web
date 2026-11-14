@@ -115,3 +115,135 @@ test('resolveCoachingSubject, normalizeSubjectHint, and describeCoachingSubject 
 
   assert.throws(()=>C.resolveCoachingSubject({selectedPlayerId:'f'.repeat(32),clip:assignedClip,players}),/Choose a saved player/);
 });
+
+test('evidence crop to clip and stage letterbox/zoom/pan projections are exact across aspect ratios', () => {
+  const ptUncropped = C.evidenceToClipPoint(0.5, 0.25, [0, 0, 1, 1]);
+  assert.deepEqual(ptUncropped, {x: 0.5, y: 0.25});
+
+  const crop = [0.25, 0.2, 0.5, 0.5];
+  const ptCropped = C.evidenceToClipPoint(0.5, 0.4, crop);
+  assert.ok(Math.abs(ptCropped.x - 0.5) < 1e-9);
+  assert.ok(Math.abs(ptCropped.y - 0.4) < 1e-9);
+
+  const boxCropped = C.evidenceToClipBox([0.1, 0.2, 0.4, 0.5], crop);
+  assert.ok(Math.abs(boxCropped.x - 0.3) < 1e-9);
+  assert.ok(Math.abs(boxCropped.y - 0.3) < 1e-9);
+  assert.ok(Math.abs(boxCropped.width - 0.2) < 1e-9);
+  assert.ok(Math.abs(boxCropped.height - 0.25) < 1e-9);
+
+  // Landscape 16:9 inside 800x500 stage -> fits width 800, height 450, centered vertically (top 25).
+  const lbLandscape = C.letterboxRect(800, 500, 1920, 1080);
+  assert.equal(lbLandscape.left, 0);
+  assert.equal(lbLandscape.top, 25);
+  assert.equal(lbLandscape.width, 800);
+  assert.equal(lbLandscape.height, 450);
+
+  // Portrait 9:16 inside 800x500 stage -> fits height 500, width 281.25, pillarboxed horizontally.
+  const lbPortrait = C.letterboxRect(800, 500, 1080, 1920);
+  assert.ok(Math.abs(lbPortrait.top) < 1e-9);
+  assert.ok(Math.abs(lbPortrait.height - 500) < 1e-9);
+  assert.ok(Math.abs(lbPortrait.width - 281.25) < 1e-9);
+  assert.ok(Math.abs(lbPortrait.left - (800 - 281.25) / 2) < 1e-9);
+
+  // Stage projection under zoom = 2, panX = 30, panY = -20.
+  const pStage = C.projectPointToStage(0.75, 0.5, 800, 500, 1920, 1080, 2, 30, -20);
+  assert.ok(Math.abs(pStage.x - (400 + 0.25 * 800 * 2 + 30)) < 1e-9);
+  assert.ok(Math.abs(pStage.y - (250 + 0 - 20)) < 1e-9);
+
+  const sBox = C.projectBoxToStage({x: 0.25, y: 0.25, width: 0.5, height: 0.5}, 800, 500, 1920, 1080, 1, 0, 0);
+  assert.ok(Math.abs(sBox.left - 200) < 1e-9);
+  assert.ok(Math.abs(sBox.top - 137.5) < 1e-9);
+  assert.ok(Math.abs(sBox.width - 400) < 1e-9);
+  assert.ok(Math.abs(sBox.height - 225) < 1e-9);
+});
+
+test('disjoint applies_to ranges remain independent and pick the nearest matching range', () => {
+  const ranges = C.selectSuggestionRanges(
+    [
+      {start_seconds: 10.2, end_seconds: 10.7},
+      {start_seconds: 13.4, end_seconds: 13.9},
+      {start_seconds: 20.0, end_seconds: 21.0}, // outside clip [10, 15]
+    ],
+    10.0,
+    15.0,
+    5.0
+  );
+  assert.equal(ranges.length, 2);
+  assert.deepEqual({start: ranges[0].start, end: ranges[0].end}, {start: 0.2, end: 0.7});
+  assert.deepEqual({start: ranges[1].start, end: ranges[1].end}, {start: 3.4, end: 3.9});
+  assert.equal(C.pickSuggestionRangeIndex(ranges, 13.6), 1);
+  assert.equal(C.pickSuggestionRangeIndex(ranges, 10.1), 0);
+});
+
+test('resolveSparseOverlay enforces paused-frame, confidence, edge, and identity gates', () => {
+  const frame = {frame_id: 'f_1', order: 1, original_seconds: 11.0, clip_seconds: 1.0};
+  const suggestion = {
+    body_areas: ['hitting_arm', 'head_eyes'],
+    focus_region: {x: 0.2, y: 0.2, width: 0.3, height: 0.3},
+  };
+  const poseFrame = {
+    person_count: 1,
+    subject_ambiguous: false,
+    joints: {
+      nose: {x: 0.4, y: 0.25, confidence: 0.9},
+      left_shoulder: {x: 0.35, y: 0.35, confidence: 0.85},
+      left_elbow: {x: 0.28, y: 0.45, confidence: 0.82},
+      left_wrist: {x: 0.25, y: 0.52, confidence: 0.4}, // below 0.65 threshold
+      right_shoulder: {x: 0.48, y: 0.35, confidence: 0.88},
+      right_elbow: {x: 0.56, y: 0.42, confidence: 0.88},
+      right_wrist: {x: 0.99, y: 0.45, confidence: 0.95}, // edge-clipped > 0.98
+      left_ankle: {x: 0.42, y: 0.85, confidence: 0.92}, // omitted because body_areas excludes legs
+    },
+  };
+
+  // Hidden during playback or off-frame or historical or disabled toggle.
+  assert.equal(C.resolveSparseOverlay({suggestion, frame, poseFrame, paused: false, currentTime: 1.0, overlayEnabled: true}).visible, false);
+  assert.equal(C.resolveSparseOverlay({suggestion, frame, poseFrame, paused: true, currentTime: 1.3, overlayEnabled: true}).visible, false);
+  assert.equal(C.resolveSparseOverlay({suggestion, frame, poseFrame, paused: true, currentTime: 1.0, historical: true, overlayEnabled: true}).visible, false);
+  assert.equal(C.resolveSparseOverlay({suggestion, frame, poseFrame, paused: true, currentTime: 1.0, overlayEnabled: false}).visible, false);
+
+  // Paused on matching frame passes symmetric arm segments, filters low-conf & edge joints, avoids handedness guesses.
+  const ok = C.resolveSparseOverlay({suggestion, frame, poseFrame, paused: true, currentTime: 1.0, overlayEnabled: true});
+  assert.equal(ok.visible, true);
+  assert.equal(ok.label, 'Approximate body guide');
+  assert.ok(ok.focusBox);
+  assert.ok(ok.joints.nose && ok.joints.left_shoulder && ok.joints.left_elbow && ok.joints.right_shoulder && ok.joints.right_elbow);
+  assert.equal(ok.joints.left_wrist, undefined);
+  assert.equal(ok.joints.right_wrist, undefined);
+  assert.equal(ok.joints.left_ankle, undefined);
+
+  // Ambiguous multi-person suppresses joints while preserving non-fabricated focus box fallback only when provided.
+  const ambig = C.resolveSparseOverlay({
+    suggestion: {...suggestion, focus_region: null},
+    frame,
+    poseFrame: {...poseFrame, person_count: 2, subject_ambiguous: true, ambiguity_reason: 'Multiple players visible'},
+    paused: true,
+    currentTime: 1.0,
+    overlayEnabled: true,
+  });
+  assert.equal(ambig.visible, false);
+  assert.equal(ambig.reason, 'subject_ambiguous');
+  assert.deepEqual(ambig.joints, {});
+});
+
+test('formatNowTry formats v3 summary cleanly and falls back gracefully on v2 observations', () => {
+  const v3 = C.formatNowTry({
+    now_summary: 'Racket drops late behind the body.',
+    cue: 'Prepare earlier as the ball bounces.',
+    stroke_phase: 'unit_turn',
+    body_areas: ['hitting_arm', 'shoulders_chest'],
+  });
+  assert.equal(v3.nowText, 'Racket drops late behind the body.');
+  assert.equal(v3.tryText, 'Prepare earlier as the ball bounces.');
+  assert.equal(v3.phaseLabel, 'Unit turn');
+  assert.deepEqual(v3.bodyAreaLabels, ['Hitting arm', 'Shoulders / chest']);
+
+  const v2 = C.formatNowTry({
+    observation: 'Backswing stays compact before contact. Recovery takes two extra steps.',
+    cue: 'Turn shoulders earlier.',
+  });
+  assert.equal(v2.nowText, 'Backswing stays compact before contact.');
+  assert.equal(v2.tryText, 'Turn shoulders earlier.');
+  assert.equal(v2.phaseLabel, '');
+  assert.deepEqual(v2.bodyAreaLabels, []);
+});
