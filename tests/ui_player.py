@@ -2184,17 +2184,26 @@ def test_home_redesign_views_counts_deduplication_and_status_dot(browser, ui_ser
     expect(dot).to_have_attribute('data-status', 'green')
     page.goto(ui_server + '/')
 
-    # 2. Summary row items, counts, and entity dialogs (no "Saved players" wording on home button).
+    # 2. Summary row items, counts, compact entity cards, and entity dialogs (no "Saved players" wording on home button).
     expect(page.locator('#stat-sessions')).to_have_text('1')
     expect(page.locator('#stat-clips')).to_have_text('3')
-    expect(page.locator('#stat-minutes')).to_have_text('0m')
-    expect(page.locator('#stat-videos')).to_have_text('1 video')
+    expect(page.locator('#summary-practice')).to_have_count(0)
+    expect(page.locator('#stat-minutes')).to_have_count(0)
+    expect(page.locator('#stat-videos')).to_have_count(0)
+    assert page.locator('.intro-stats .summary-item').evaluate_all("els => els.map(e => e.id)") == ['summary-sessions', 'summary-clips', 'summary-likes']
     expect(page.locator('#stat-likes')).to_have_text('2')
     expect(page.locator('#stat-players')).to_have_text(str(len(players)))
     expect(page.locator('#manage-players .player-avatar-stack .player-avatar').first).to_be_visible()
     assert 'saved players' not in page.locator('#manage-players').inner_text().lower()
     expect(page.locator('#stat-courts')).to_have_text('1')
     expect(page.locator('#label-courts')).to_have_text('Court')
+    page.set_viewport_size({'width': 1280, 'height': 844})
+    sessions_box = page.locator('#summary-sessions').bounding_box()
+    players_box = page.locator('#manage-players').bounding_box()
+    courts_box = page.locator('#manage-courts').bounding_box()
+    assert players_box and courts_box and sessions_box
+    assert players_box['height'] < sessions_box['height'] and players_box['width'] < sessions_box['width']
+    assert courts_box['height'] < sessions_box['height'] and courts_box['width'] < sessions_box['width']
 
     page.locator('#manage-players').click()
     expect(page.locator('#players-dialog')).to_be_visible()
@@ -2206,7 +2215,7 @@ def test_home_redesign_views_counts_deduplication_and_status_dot(browser, ui_ser
     page.get_by_role('button', name='Close saved courts', exact=True).click()
     expect(page.locator('#courts-dialog')).not_to_be_visible()
 
-    # 3. Default Sessions view, then in-place switching to Clips, Practice, and Likes & highlights + URL/history.
+    # 3. Default Sessions view, then in-place switching to Clips and Likes & highlights + URL/history.
     expect(page.locator('#summary-sessions')).to_have_attribute('aria-current', 'page')
     expect(page.locator('#home-section-title')).to_have_text('Sessions')
     expect(page.locator('#result-count')).to_have_text('1 session')
@@ -2226,14 +2235,6 @@ def test_home_redesign_views_counts_deduplication_and_status_dot(browser, ui_ser
     expect(page.locator('#session-grid .empty h3')).to_have_text('No matches')
     page.locator('#search').fill('')
     expect(page.locator('#result-count')).to_have_text('3 clips')
-
-    page.locator('#summary-practice').click()
-    expect(page).to_have_url(ui_server + '/#practice')
-    expect(page.locator('#summary-practice')).to_have_attribute('aria-current', 'page')
-    expect(page.locator('#home-section-title')).to_have_text('Practice')
-    expect(page.locator('#result-count')).to_have_text('1 video')
-    expect(page.locator('#session-grid .session-card[data-card-kind="video"]')).to_have_count(1)
-    expect(page.locator('#session-grid .session-card .card-visual img').first).to_have_attribute('src', re.compile(f'/api/sessions/{ID}/poster'))
 
     # 4. Likes & highlights view: deduplication of liked+highlighted clip, multiple highlights, clip vs video likes, and exclusion of archived/out-of-range highlights.
     page.locator('#summary-likes').click()
@@ -2300,21 +2301,26 @@ def test_home_redesign_views_counts_deduplication_and_status_dot(browser, ui_ser
 
     # Browser back/forward navigates cleanly between views.
     page.go_back()
-    expect(page).to_have_url(ui_server + '/#practice')
-    expect(page.locator('#summary-practice')).to_have_attribute('aria-current', 'page')
-    page.go_back()
     expect(page).to_have_url(ui_server + '/#clips')
     expect(page.locator('#summary-clips')).to_have_attribute('aria-current', 'page')
     page.go_back()
     expect(page).to_have_url(ui_server + '/')
     expect(page.locator('#summary-sessions')).to_have_attribute('aria-current', 'page')
 
-    # Verify responsive layout at 1280px, 390px, and 320px across views with zero horizontal overflow.
-    for view_btn in ('#summary-sessions', '#summary-clips', '#summary-practice', '#summary-likes'):
+    # Verify responsive layout at 1280px, 390px, and 320px across views with zero horizontal overflow,
+    # and compact entity cards at 1280px and 390px.
+    for view_btn in ('#summary-sessions', '#summary-clips', '#summary-likes'):
         page.locator(view_btn).click()
         for width in (1280, 390, 320):
             page.set_viewport_size({'width': width, 'height': 844})
             assert not page.evaluate('document.documentElement.scrollWidth > innerWidth'), f'Overflow at {width}px on {view_btn}'
+            if width in (1280, 390):
+                s_box = page.locator('#summary-sessions').bounding_box()
+                p_box = page.locator('#manage-players').bounding_box()
+                c_box = page.locator('#manage-courts').bounding_box()
+                assert s_box and p_box and c_box
+                assert p_box['height'] < s_box['height'] and p_box['width'] < s_box['width']
+                assert c_box['height'] < s_box['height'] and c_box['width'] < s_box['width']
 
     assert not errors
     page.close()
