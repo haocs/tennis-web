@@ -102,7 +102,56 @@ def create_app(config=None):
         if expected != data.get('published_at'):
             abort(409, 'This recording was reprocessed. Refresh the review to load its new context.')
 
-    def decorate(data, shared=None, highlights=None):
+    def staged_versions_map(sessions_list=None):
+        by_source = {}
+        pclient = app.extensions.get('processing_client')
+        if pclient and getattr(pclient, 'url', None):
+            try:
+                remote = pclient.call('/videos/staged-summary', method='GET')
+                if isinstance(remote, dict) and isinstance(remote.get('by_source'), dict):
+                    return remote['by_source']
+            except Exception:
+                pass
+        cand_root = library.metadata / 'candidates'
+        if not cand_root.is_dir():
+            return by_source
+        for s in (sessions_list or []):
+            sid = s.get('id')
+            if not isinstance(sid, str) or not sid:
+                continue
+            s_dir = cand_root / sid
+            if not s_dir.is_dir():
+                continue
+            active_att = (s.get('processing') or {}).get('attempt_id')
+            active_pub = s.get('published_at')
+            count = 0
+            latest_at = 0.0
+            latest_att = None
+            for cand_path in s_dir.glob('*.json'):
+                try:
+                    cand = json.loads(cand_path.read_text())
+                except (OSError, ValueError):
+                    continue
+                if not isinstance(cand, dict):
+                    continue
+                proc = cand.get('processing') if isinstance(cand.get('processing'), dict) else {}
+                att = proc.get('attempt_id') or cand.get('attempt_id') or cand_path.stem
+                if active_att and att == active_att:
+                    continue
+                cand_pub = cand.get('published_at')
+                staged_at = proc.get('staged_at')
+                if isinstance(active_pub, (int, float)) and isinstance(cand_pub, (int, float)) and staged_at is None and cand_pub < active_pub:
+                    continue
+                ts = float(staged_at if isinstance(staged_at, (int, float)) else (cand_pub if isinstance(cand_pub, (int, float)) else 0.0))
+                count += 1
+                if ts >= latest_at:
+                    latest_at = ts
+                    latest_att = att
+            if count:
+                by_source[sid] = {'count': count, 'latest_attempt_id': latest_att, 'latest_staged_at': latest_at}
+        return by_source
+
+    def decorate(data, shared=None, highlights=None, staged_summary=None):
         data = copy.deepcopy(data)
         shared = {**(shared if shared is not None else state.all()), **app.extensions['annotations'].like_states(data['id'],data['published_at'])}
         clip_hl = app.extensions['annotations'].clip_highlights(data, highlights)
@@ -110,6 +159,10 @@ def create_app(config=None):
         data['recorded_at_iso'], data['recorded_at_epoch'] = recording_time(data['source'].get('recorded_at'))
         directory = data.get('media_directory', identity)
         data['video']['nas_url'] = nas_media_address(media_smb, directory, data['video']['file'])
+        staged_info = (staged_summary or {}).get(identity) or {}
+        staged_count = int(staged_info.get('count') or 0)
+        data['staged_version_count'] = staged_count
+        data['has_staged_version'] = staged_count > 0
         data["like"] = shared.get(f"like:{identity}", {"value": False, "version": 0})
         data["overrides"] = shared.get(f"meta:{identity}", {"value": {}, "version": 0})
         edits = data["overrides"]["value"] or {}
@@ -156,6 +209,7 @@ def create_app(config=None):
         return jsonify(status='ok')
 
     @app.get('/')
+    @app.get('/review')
     @app.get('/processing')
     @app.get('/learning')
     @app.get('/review/<identity>')
@@ -175,7 +229,8 @@ def create_app(config=None):
             return jsonify(sessions=[], practice_groups=[], invalid_sessions=0, library_available=False, shared_preferences=True)
         shared = state.all()
         hl_map = app.extensions['annotations'].active_highlights_by_source([s['id'] for s in sessions])
-        decorated = [decorate(s, shared, hl_map.get(s['id'], [])) for s in sessions]
+        staged_map = staged_versions_map(sessions)
+        decorated = [decorate(s, shared, hl_map.get(s['id'], []), staged_summary=staged_map) for s in sessions]
         groups = decorate_groups(enrich_groups(serving_groups(decorated), decorated, shared), decorated)
         for group in groups:
             group['title'] = group['metadata'].get('title') or group['title']
@@ -326,8 +381,9 @@ def create_app(config=None):
             abort(503, 'The recording library is unavailable')
         # Resolve the entire practice, including assignments/GPS on its siblings.
         hl_map = app.extensions['annotations'].active_highlights_by_source([s['id'] for s in recordings] + [identity])
-        recordings = [decorate(s, shared, hl_map.get(s['id'], [])) for s in recordings if s['id'] != identity]
-        result = decorate(data, shared, hl_map.get(data['id'], []))
+        staged_map = staged_versions_map([data])
+        recordings = [decorate(s, shared, hl_map.get(s['id'], []), staged_summary=staged_map) for s in recordings if s['id'] != identity]
+        result = decorate(data, shared, hl_map.get(data['id'], []), staged_summary=staged_map)
         recordings.append(result)
         enrich_groups(serving_groups(recordings), recordings, shared)
         return jsonify(result)
@@ -531,21 +587,65 @@ def create_app(config=None):
         response.headers['Content-Security-Policy'] = "default-src 'none'; style-src 'unsafe-inline'; media-src 'self'; img-src 'self'; frame-ancestors 'self'; base-uri 'none'; form-action 'none'"
         return response
 
+    def compute_worker_health(status_result):
+        pclient = app.extensions.get('processing_client')
+        video_slots = None
+        if pclient and getattr(pclient, 'url', None):
+            try:
+                wresp = pclient.call('/workers', method='GET')
+                if isinstance(wresp, dict) and isinstance(wresp.get('items'), list):
+                    items = wresp['items']
+                    video_slots = [bool(w.get('online')) and not bool(w.get('paused')) for w in items] if items else [False]
+            except Exception:
+                video_slots = None
+        if video_slots is None:
+            files_list = status_result.get('files') or []
+            file_bad = any(f.get('error') or f.get('status') in ('needs_attention', 'retry') for f in files_list)
+            video_ok = (
+                bool(status_result.get('available'))
+                and not bool(status_result.get('stale'))
+                and (status_result.get('service') not in ('Stopped', 'Error', 'Failed'))
+                and not bool(status_result.get('has_error'))
+                and not file_bad
+            )
+            video_slots = [video_ok]
+        coach_slots = []
+        if bool(app.config.get('COACH_WORKER_TOKEN')) and app.extensions.get('coaching'):
+            try:
+                ov = app.extensions['coaching'].worker_overview(enabled=True)
+                cw = ov.get('workers') or []
+                coach_slots = [bool(w.get('online')) and w.get('status') != 'failed' for w in cw] if cw else [False]
+            except Exception:
+                coach_slots = [False]
+        slots = video_slots + coach_slots
+        total_count = len(slots)
+        online_count = sum(1 for ok in slots if ok)
+        if online_count == 0:
+            return {'color': 'red', 'label': 'No workers running', 'online_count': 0, 'total_count': total_count}
+        if online_count == total_count:
+            return {'color': 'green', 'label': 'All workers online', 'online_count': online_count, 'total_count': total_count}
+        return {'color': 'yellow', 'label': 'Some workers offline', 'online_count': online_count, 'total_count': total_count}
+
     @app.get('/api/status')
     def status():
+        mirror = app.extensions.get('portal_mirror')
+        if mirror:
+            mirror.notify_if_stale()
         path = Path(app.config['STATUS_FILE']) if app.config['STATUS_FILE'] else library.metadata / 'Processing-status.json'
         try:
             raw = json.loads(path.read_text())
         except (OSError, ValueError):
-            return jsonify(available=False, stale=True, stage='Status unavailable', files=[])
-        files = []
-        for item in raw.get('files', []):
-            files.append({'name': Path(item['path']).name, 'status': item['status'], 'error': bool(item.get('error'))})
-        # Deliberately exclude private source/output paths, PID, and raw errors.
-        result = {key: raw.get(key) for key in ['heartbeat', 'progress_at', 'stage', 'service', 'progress', 'storage', 'timezone']}
-        result.update(available=True, stale=time.time() - raw.get('heartbeat', 0) > 120,
-                      current_video=Path(raw['current_video']).name if raw.get('current_video') else None,
-                      files=files, has_error=bool(raw.get('scan_error') or raw.get('mirror_error')))
+            result = dict(available=False, stale=True, stage='Status unavailable', files=[])
+        else:
+            files = []
+            for item in raw.get('files', []):
+                files.append({'name': Path(item['path']).name, 'status': item['status'], 'error': bool(item.get('error'))})
+            # Deliberately exclude private source/output paths, PID, and raw errors.
+            result = {key: raw.get(key) for key in ['heartbeat', 'progress_at', 'stage', 'service', 'progress', 'storage', 'timezone']}
+            result.update(available=True, stale=time.time() - raw.get('heartbeat', 0) > 120,
+                          current_video=Path(raw['current_video']).name if raw.get('current_video') else None,
+                          files=files, has_error=bool(raw.get('scan_error') or raw.get('mirror_error')))
+        result['worker_health'] = compute_worker_health(result)
         return jsonify(result)
 
     return app

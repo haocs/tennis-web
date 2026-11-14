@@ -64,6 +64,14 @@ class PortalMirror:
                         self._deleted.update(deleted)
             self.app.logger.warning('Worker Portal mirror sync skipped: %s', exc)
             return None
+        if isinstance(res, dict) and isinstance(res.get('desired_ai_config'), dict):
+            try:
+                applied = queue.apply_portal_ai_config(res['desired_ai_config'])
+                if applied is not None:
+                    follow_payload = queue.portal_snapshot(session_lookup=self._session_lookup(), deleted=[])
+                    res = client.call('/external-sync', follow_payload, method='POST')
+            except (ProcessingUnavailable, ProcessingRejected, Exception) as exc:
+                self.app.logger.warning('Worker Portal desired AI config follow-up failed: %s', exc)
         self.last_sync_at = time.monotonic()
         return res
 

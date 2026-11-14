@@ -95,7 +95,7 @@ const CutReprocess=(()=>{
   host.innerHTML='<h3>Confirm reprocess rules</h3>'+rowsHtml+advisoryHtml+
    '<div class="cut-rerun-add-row"><label>Add rule from review<select id="cut-command-evidence">'+owner.preview.evidence.map((e,i)=>`<option value="${i}">${esc(e.body.text?.slice(0,60)||((e.body.reasons||[]).join(', ')||(e.body.verdict||'Review').replaceAll('_',' ')))} · ${time(e.target.start_seconds)}–${time(e.target.end_seconds)}</option>`).join('')+'</select></label><button type="button" class="button small" id="cut-command-add">Add interval</button></div>'+
    '<div class="cut-rerun-actions"><button type="button" class="button primary" id="cut-rerun-submit">Create candidate task</button></div>'+
-   `<div id="cut-rerun-next" class="cut-rerun-next" hidden><a class="button small" href="/processing">Open Processing Room</a><a class="button small" href="${compareHref}">Compare versions</a><button type="button" class="button small" id="cut-rerun-reset">Prepare another task</button></div>`;
+   `<div id="cut-rerun-next" class="cut-rerun-next" hidden><a class="button small" href="/review">Open Review</a><a class="button small" href="${compareHref}">Compare versions</a><button type="button" class="button small" id="cut-rerun-reset">Prepare another task</button></div>`;
   host.querySelector('#cut-rerun-submit').disabled=!owner.preview.server_configured||owner.busy||owner.submitted;
   host.querySelector('#cut-command-add').onclick=()=>{
    if(owner.busy||owner.submitted)return;

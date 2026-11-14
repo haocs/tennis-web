@@ -385,12 +385,18 @@ def test_invalid_court_address_is_rejected(setup,address):
 def test_processing_room_route_and_configured_portal_link(setup):
     app,root,_=setup
     client=app.test_client()
+    assert client.get('/review').status_code==200
     assert client.get('/processing').status_code==200
-    assert b'data-processing-url="/processing"' in client.get('/').data
+    default_html=client.get('/').data
+    assert b'href="/review" id="nav-processing"' in default_html
+    assert b'id="nav-processing-dot"' not in default_html
+    assert b'id="nas-dialog"' not in default_html
+    assert b'data-processing-url="/processing"' in default_html
     configured=create_app({'LIBRARY_ROOT':str(root),'DATA_ROOT':app.config['DATA_ROOT'],
                            'PROCESSING_ROOM_URL':'http://processor.example:8089/'})
     home_html=configured.test_client().get('/').data
-    assert b'href="/processing" id="nav-processing"' in home_html
+    assert b'href="/review" id="nav-processing"' in home_html
+    assert b'id="nav-processing-dot"' not in home_html
     assert b'data-processing-url="http://processor.example:8089/"' in home_html
 
 
@@ -590,3 +596,106 @@ def test_session_api_projects_active_in_scope_clip_highlights_without_archived_o
         assert [h['text'] for h in c1['highlights']] == ['Forehand winner', 'Net finish']
         assert c2['id'] == second_clip and c2['highlighted'] is False and c2['highlight_count'] == 0
         assert c2['highlights'] == []
+
+
+def _start_stub_processing_server(state):
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    import threading
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == '/api/v1/videos/staged-summary':
+                body = json.dumps(state.get('staged_summary', {'by_source': {}})).encode()
+            elif self.path == '/api/v1/workers':
+                body = json.dumps(state.get('workers', {'items': []})).encode()
+            else:
+                self.send_response(404)
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            return
+
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, thread, f'http://127.0.0.1:{server.server_port}'
+
+
+def test_sessions_report_staged_version_counts_from_candidates_and_processing_api(setup):
+    app, root, data = setup
+    c = app.test_client()
+    assert c.get('/api/sessions').json['sessions'][0]['staged_version_count'] == 0
+    assert c.get('/api/sessions').json['sessions'][0]['has_staged_version'] is False
+    assert c.get(f'/api/sessions/{ID}').json['staged_version_count'] == 0
+
+    data['processing'] = {'attempt_id': 'att-active'}
+    (root / 'metadata/sessions' / f'{ID}.json').write_text(json.dumps(data))
+    cand_dir = root / 'metadata/candidates' / ID
+    cand_dir.mkdir(parents=True)
+    (cand_dir / 'att-active.json').write_text(json.dumps({'attempt_id': 'att-active', 'published_at': data['published_at']}))
+    (cand_dir / 'att-new-1.json').write_text(json.dumps({'attempt_id': 'att-new-1', 'published_at': data['published_at'] + 5, 'processing': {'attempt_id': 'att-new-1', 'staged_at': 2000.0}}))
+    (cand_dir / 'att-new-2.json').write_text(json.dumps({'attempt_id': 'att-new-2', 'published_at': data['published_at'] + 6, 'processing': {'attempt_id': 'att-new-2', 'staged_at': 2100.0}}))
+
+    s_list = c.get('/api/sessions').json['sessions'][0]
+    s_one = c.get(f'/api/sessions/{ID}').json
+    assert s_list['staged_version_count'] == 2 and s_list['has_staged_version'] is True
+    assert s_one['staged_version_count'] == 2 and s_one['has_staged_version'] is True
+
+    state = {'staged_summary': {'by_source': {ID: {'count': 3, 'latest_attempt_id': 'att-remote', 'latest_staged_at': 3000.0}}}}
+    server, thread, url = _start_stub_processing_server(state)
+    try:
+        remote_app = create_app({'TESTING': True, 'LIBRARY_ROOT': str(root), 'DATA_ROOT': app.config['DATA_ROOT'], 'PROCESSING_API_URL': url})
+        rc = remote_app.test_client()
+        assert rc.get('/api/sessions').json['sessions'][0]['staged_version_count'] == 3
+        assert rc.get(f'/api/sessions/{ID}').json['has_staged_version'] is True
+    finally:
+        server.shutdown()
+        thread.join(timeout=2)
+
+
+def test_status_worker_health_reports_green_yellow_and_red(setup):
+    app, root, _ = setup
+    c = app.test_client()
+    assert c.get('/api/status').json['worker_health']['color'] == 'red'
+    (root / 'metadata/Processing-status.json').write_text(json.dumps({'heartbeat': time.time(), 'stage': 'Idle', 'service': 'Running', 'files': []}))
+    assert c.get('/api/status').json['worker_health']['color'] == 'green'
+
+    state = {'workers': {'items': [{'worker_id': 'w1', 'online': True, 'paused': False}]}}
+    server, thread, url = _start_stub_processing_server(state)
+    try:
+        configured = create_app({
+            'TESTING': True,
+            'LIBRARY_ROOT': str(root),
+            'DATA_ROOT': app.config['DATA_ROOT'],
+            'PROCESSING_API_URL': url,
+            'COACH_WORKER_TOKEN': 'worker-secret',
+        })
+        cc = configured.test_client()
+        # Video worker online, no AI coach worker registered yet -> yellow
+        assert cc.get('/api/status').json['worker_health']['color'] == 'yellow'
+
+        # Register online coach worker -> green
+        assert cc.post('/api/coaching/worker/ai/claim', json={'worker_id': 'ai-1', 'capabilities': []}, headers={'X-Tennis-Request': '1', 'Authorization': 'Bearer worker-secret'}).status_code == 200
+        assert cc.get('/api/status').json['worker_health']['color'] == 'green'
+
+        # One video worker offline -> yellow
+        state['workers'] = {'items': [
+            {'worker_id': 'w1', 'online': True, 'paused': False},
+            {'worker_id': 'w2', 'online': False, 'paused': False},
+        ]}
+        assert cc.get('/api/status').json['worker_health']['color'] == 'yellow'
+
+        # No workers online -> red
+        state['workers'] = {'items': [{'worker_id': 'w1', 'online': False, 'paused': False}]}
+        with configured.extensions['coaching'].db() as db:
+            db.execute("UPDATE workers SET updated = 0 WHERE id = 'ai-1'")
+        assert cc.get('/api/status').json['worker_health']['color'] == 'red'
+    finally:
+        server.shutdown()
+        thread.join(timeout=2)

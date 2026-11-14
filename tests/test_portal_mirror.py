@@ -219,3 +219,75 @@ def test_portal_mirror_ignores_unreachable_processing_server(setup):
         headers=_h(),
     )
     assert r.status_code == 201
+
+
+def test_portal_mirror_syncs_available_models_and_applies_desired_ai_config(setup):
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    import threading
+
+    app, root, data = setup
+    received = []
+    respond_desired = {'active': True}
+
+    class SyncHandler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get('Content-Length') or '0')
+            payload = json.loads(self.rfile.read(length).decode() or '{}')
+            received.append(payload)
+            if self.path != '/api/v1/external-sync':
+                self.send_response(404)
+                self.end_headers()
+                return
+            reply = {'ok': True}
+            if respond_desired['active'] and len(received) == 1:
+                reply['desired_ai_config'] = {'selection': 'gemini:gemini-2.5-pro', 'version': 4}
+            raw = json.dumps(reply).encode()
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def log_message(self, *args):
+            return
+
+    server = ThreadingHTTPServer(('127.0.0.1', 0), SyncHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        synced = create_app({
+            'TESTING': True,
+            'PORTAL_SYNC_INLINE': True,
+            'LIBRARY_ROOT': str(root),
+            'DATA_ROOT': app.config['DATA_ROOT'],
+            'COACH_WORKER_TOKEN': 'worker-secret',
+            'PROCESSING_API_URL': f'http://127.0.0.1:{server.server_port}',
+        })
+        c = synced.test_client()
+        hb = c.post(
+            '/api/coaching/worker/ai/claim',
+            json={
+                'worker_id': 'ai-models-1',
+                'capabilities': [],
+                'meta': {
+                    'config_version': 2,
+                    'active_selection': 'worker_default',
+                    'available_models': [
+                        {'selection': 'gemini:gemini-2.5-pro', 'provider': 'gemini', 'model': 'gemini-2.5-pro', 'label': 'Gemini 2.5 Pro'}
+                    ],
+                },
+            },
+            headers=_h('worker-secret'),
+        )
+        assert hb.status_code == 200
+        # Trigger inline mirror sync via /api/coaching/exports or sync_now directly
+        synced.extensions['portal_mirror'].sync_now()
+        assert len(received) >= 2
+        first_ai_worker = next(w for w in received[0]['workers'] if w['id'] == 'ai-models-1')
+        assert first_ai_worker['available_models'][0]['selection'] == 'gemini:gemini-2.5-pro'
+        assert received[0]['settings']['ai_config']['selection'] == 'worker_default'
+        assert received[-1]['settings']['ai_config']['selection'] == 'gemini:gemini-2.5-pro'
+        assert c.get('/api/coaching/config').json['selection'] == 'gemini:gemini-2.5-pro'
+    finally:
+        server.shutdown()
+        thread.join(timeout=2)

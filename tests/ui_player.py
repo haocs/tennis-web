@@ -141,14 +141,17 @@ def test_review_rows_actions_and_courts(browser, ui_server, tmp_path):
     expect(rows.nth(1)).to_have_attribute('aria-current','true')
     page.locator('#player').evaluate('(v)=>v.pause()')
     expect(page.locator('#player-like').get_by_role('button',name='Like clip 2',exact=True)).to_be_visible()
-    expect(page.locator('#player-nas')).not_to_be_visible()
+    expect(page.locator('#player-nas')).to_have_count(0)
+    expect(page.locator('#nas-dialog')).to_have_count(0)
+    expect(page.locator('.note-cut-link')).to_have_count(0)
+    expect(page.locator('.timeline-cut-link')).to_have_count(0)
     if folder := os.environ.get('TENNIS_UI_SCREENSHOT_DIR'):
         Path(folder).mkdir(parents=True, exist_ok=True)
         page.screenshot(path=str(Path(folder)/f'desktop-{browser.browser_type.name}.png'),full_page=True)
     page.get_by_label('More video actions',exact=True).click()
-    page.get_by_role('button',name='NAS file address',exact=True).click()
-    expect(page.locator('#nas-address')).to_have_value(re.compile('clip-002.mp4$'))
-    page.get_by_role('button',name='Close NAS address',exact=True).click()
+    expect(page.get_by_role('button',name='NAS file address',exact=True)).to_have_count(0)
+    expect(page.locator('.note-more-menu').get_by_role('link',name='Review cut',exact=True)).to_have_count(0)
+    page.get_by_label('More video actions',exact=True).click()
     with page.expect_download() as event:
         page.get_by_role('link',name='Download clip 02',exact=True).click()
     download = event.value
@@ -882,9 +885,10 @@ def test_watch_metadata_and_cut_reports(browser,ui_server,width):
     expect(row).not_to_have_class(re.compile('archived'))
     expect(first_clip.locator('.note-moment')).to_have_text('⚡')
     assert not page.evaluate('document.documentElement.scrollWidth>innerWidth')
-    # Processing feedback stays on its own page, with explicit original bounds.
-    page.get_by_label('More video actions',exact=True).click()
-    page.get_by_role('link',name='Review cut',exact=True).click()
+    # Processing feedback lives in Review rather than the Watch page More menu.
+    expect(page.locator('.note-cut-link')).to_have_count(0)
+    page.locator('#nav-processing').click()
+    page.locator('#processing-cut-reviews').get_by_role('link',name='Review cut',exact=True).click()
     page.get_by_role('checkbox',name='Too much downtime',exact=True).check()
     page.locator('#cut-comment').fill('Waiting before the shot '+text)
     page.locator('#cut-save').click()
@@ -2114,13 +2118,19 @@ def test_home_redesign_views_counts_deduplication_and_status_dot(browser, ui_ser
     _archive_test_metadata(page, ui_server)
     headers = {'X-Tennis-Request': '1'}
 
-    # Mock /api/status dynamically to verify green, yellow, and red dot states on top Processing nav.
+    # Mock /api/status dynamically to verify green, yellow, and red worker health dot states on /review.
     status_state = {'mode': 'green'}
     def handle_status(route):
         mode = status_state['mode']
         if mode == 'http_error':
             route.fulfill(status=500, json={'error': 'Status backend error'})
             return
+        if mode == 'green':
+            wh = {'color': 'green', 'label': 'All workers online', 'online_count': 2, 'total_count': 2}
+        elif mode == 'yellow':
+            wh = {'color': 'yellow', 'label': 'Some workers offline', 'online_count': 1, 'total_count': 2}
+        else:
+            wh = {'color': 'red', 'label': 'No workers running', 'online_count': 0, 'total_count': 2}
         payload = {
             'available': mode != 'unavailable',
             'stale': mode == 'stale',
@@ -2131,6 +2141,7 @@ def test_home_redesign_views_counts_deduplication_and_status_dot(browser, ui_ser
             'current_video': None,
             'progress': None,
             'files': [{'name': 'test.mov', 'status': 'needs_attention', 'error': 'failed'}] if mode == 'file_error' else [],
+            'worker_health': wh,
         }
         route.fulfill(json=payload)
 
@@ -2144,24 +2155,25 @@ def test_home_redesign_views_counts_deduplication_and_status_dot(browser, ui_ser
         players = page.request.get(ui_server + '/api/players').json()['players']
 
     page.goto(ui_server + '/')
-    # 1. Top nav order and Processing status dot states (green / yellow / red), no worker status card in home overview.
+    # 1. Top nav order (no header dot), no worker status card in home overview, and green/yellow/red dot on /review.
     assert page.locator('.site-header nav a').evaluate_all("els => els.map(e => e.id)") == ['nav-library', 'nav-learning', 'nav-processing']
-    assert [t.strip() for t in page.locator('.site-header nav a').all_inner_texts()] == ['Library', 'Learning', 'Processing']
-    expect(page.locator('#nav-processing')).to_have_attribute('href', '/processing')
+    assert [t.strip() for t in page.locator('.site-header nav a').all_inner_texts()] == ['Library', 'Learning', 'Review']
+    expect(page.locator('#nav-processing')).to_have_attribute('href', '/review')
+    expect(page.locator('#nav-processing-dot')).to_have_count(0)
     expect(page.locator('.library-overview #processing-status')).to_have_count(0)
     expect(page.locator('.library-overview .worker-status')).to_have_count(0)
 
-    dot = page.locator('#nav-processing-dot')
+    page.locator('#nav-processing').click()
+    dot = page.locator('#worker-portal-dot')
     expect(dot).to_have_attribute('data-status', 'green')
     expect(dot).to_have_class(re.compile(r'\bstatus-green\b'))
 
-    for mode in ('paused', 'stale', 'unavailable'):
-        status_state['mode'] = mode
-        page.evaluate('() => refreshStatus()')
-        expect(dot).to_have_attribute('data-status', 'yellow')
-        expect(dot).to_have_class(re.compile(r'\bstatus-yellow\b'))
+    status_state['mode'] = 'yellow'
+    page.evaluate('() => refreshStatus()')
+    expect(dot).to_have_attribute('data-status', 'yellow')
+    expect(dot).to_have_class(re.compile(r'\bstatus-yellow\b'))
 
-    for mode in ('red_error', 'file_error', 'http_error'):
+    for mode in ('red_error', 'file_error', 'http_error', 'unavailable'):
         status_state['mode'] = mode
         page.evaluate('() => refreshStatus()')
         expect(dot).to_have_attribute('data-status', 'red')
@@ -2170,6 +2182,7 @@ def test_home_redesign_views_counts_deduplication_and_status_dot(browser, ui_ser
     status_state['mode'] = 'green'
     page.evaluate('() => refreshStatus()')
     expect(dot).to_have_attribute('data-status', 'green')
+    page.goto(ui_server + '/')
 
     # 2. Summary row items, counts, and entity dialogs (no "Saved players" wording on home button).
     expect(page.locator('#stat-sessions')).to_have_text('1')
@@ -2466,13 +2479,14 @@ def test_cut_review_timeline_versions_gaps_and_portal_handoff(browser, tmp_path)
         errors = []
         page.on('pageerror', lambda err: errors.append(str(err)))
 
-        # 1. Top nav Processing opens local /processing, shows Worker Portal handoff, and launches Review cut
+        # 1. Top nav Review opens /review, shows Worker portal link + indicator, and launches Review cut
         page.goto(base_url + '/')
-        expect(page.locator('#nav-processing')).to_have_attribute('href', '/processing')
+        expect(page.locator('#nav-processing')).to_have_attribute('href', '/review')
         page.locator('#nav-processing').click()
-        expect(page.get_by_role('heading', name='Processing Room', exact=True)).to_be_visible()
+        expect(page.get_by_role('heading', name='Review', exact=True)).to_be_visible()
         expect(page.locator('#processing-portal-link')).to_have_attribute('href', 'http://processor.example:8089/')
-        expect(page.locator('#processing-portal-link')).to_have_text('Open Worker Portal ↗')
+        expect(page.locator('#processing-portal-link')).to_contain_text('Worker portal ↗')
+        expect(page.locator('#worker-portal-dot')).to_be_visible()
         expect(page.locator('#processing-cut-reviews')).to_be_visible()
         page.locator('#processing-cut-reviews').get_by_role('link', name='Review cut', exact=True).click()
 
@@ -2714,7 +2728,7 @@ def test_cut_rerun_requires_selected_revision_and_confirmed_command(browser,tmp_
         snapshot=server_api.calls[1][1];assert snapshot['confirmed_commands']['override_clip_bounds_ms'][0]['original_end_ms']==16000
         assert server_api.calls[-1][1]['publication_policy']=='never'
         expect(page.locator('#cut-rerun-next')).to_be_visible()
-        expect(page.locator('#cut-rerun-next a[href="/processing"]')).to_have_text('Open Processing Room')
+        expect(page.locator('#cut-rerun-next a[href="/review"]')).to_have_text('Open Review')
         expect(page.locator('#cut-rerun-next a[href*="/compare?"]')).to_have_text('Compare versions')
         page.get_by_role('button',name='Prepare another task',exact=True).click()
         expect(page.locator('#cut-rerun-submit')).to_be_enabled()
@@ -3733,11 +3747,41 @@ def test_coaching_subject_selector_auto_coach_reopen_followup_and_learning(brows
         thread.join()
 
 
-def test_processing_room_worker_shelves_and_default_ai_model(browser, tmp_path):
+def test_review_page_sorted_with_staged_badge_and_worker_health_indicator(browser, tmp_path):
     from app import create_app
-    from worker.tennis_coach.annotations import CAPABILITY, LEARNING_PLAN_CAPABILITY, RENDER_SHARE_CAPABILITY, RENDER_SHARE_V1_CAPABILITY
+    from worker.tennis_coach.annotations import CAPABILITY, LEARNING_PLAN_CAPABILITY
 
-    app, root, data = setup.__wrapped__(tmp_path / 'proc-shelves-ui')
+    app, root, data = setup.__wrapped__(tmp_path / 'review-ui')
+    # Session 1: newer recorded_at, OLDER processed/published_at
+    data['title'] = 'Older processed'
+    data['published_at'] = 1000.0
+    data['source']['recorded_at'] = '2026-10-25T10:00:00-0700'
+    (root / 'metadata/sessions' / f'{ID}.json').write_text(json.dumps(data))
+
+    # Session 2: older recorded_at, NEWER processed/published_at + staged candidate in stage
+    id2 = 'c' * 64
+    clip2 = 'd' * 24
+    data2 = copy.deepcopy(data)
+    data2['id'] = id2
+    data2['title'] = 'Newer processed'
+    data2['published_at'] = 5000.0
+    data2['media_directory'] = id2
+    data2['source']['sha256'] = id2
+    data2['source']['recorded_at'] = '2026-10-20T10:00:00-0700'
+    data2['clips'][0]['id'] = clip2
+    (root / 'media' / id2 / 'Clips').mkdir(parents=True)
+    (root / 'media' / id2 / 'Practice.mp4').write_bytes(b'0123456789')
+    (root / 'media' / id2 / 'Clips/clip-001.mp4').write_bytes(b'clip2')
+    (root / 'metadata/sessions' / id2).mkdir(parents=True)
+    (root / 'metadata/sessions' / f'{id2}.json').write_text(json.dumps(data2))
+    cand_dir = root / 'metadata/candidates' / id2
+    cand_dir.mkdir(parents=True)
+    (cand_dir / 'att-staged.json').write_text(json.dumps({
+        'attempt_id': 'att-staged',
+        'published_at': 6000.0,
+        'processing': {'attempt_id': 'att-staged', 'staged_at': 6000.0},
+    }))
+
     status_file = tmp_path / 'Processing-status.json'
     status_file.write_text(json.dumps({
         'service': 'Running',
@@ -3752,29 +3796,13 @@ def test_processing_room_worker_shelves_and_default_ai_model(browser, tmp_path):
         'DATA_ROOT': app.config['DATA_ROOT'],
         'STATUS_FILE': str(status_file),
         'COACH_WORKER_TOKEN': worker_secret,
+        'PROCESSING_ROOM_URL': 'http://processor.example:8089/',
     })
     c = app.test_client()
     wh = {'X-Tennis-Request': '1', 'Authorization': f'Bearer {worker_secret}'}
     assert c.post('/api/coaching/worker/ai/claim', json={
         'worker_id': 'mac-ai-1',
         'capabilities': [CAPABILITY, LEARNING_PLAN_CAPABILITY],
-        'meta': {
-            'worker_version': '0.5.0',
-            'providers': ['antigravity', 'codex', 'gemini'],
-            'active_selection': 'worker_default',
-            'active_model_label': 'Worker default (Antigravity)',
-            'config_version': 0,
-            'available_models': [{
-                'selection': 'antigravity:gemini-4-hydrogen-high',
-                'provider': 'antigravity',
-                'model': 'gemini-4-hydrogen-high',
-                'label': 'Antigravity · Gemini 4 Hydrogen (High)',
-            }],
-        },
-    }, headers=wh).status_code == 200
-    assert c.post('/api/coaching/worker/render/claim', json={
-        'worker_id': 'mac-render-1',
-        'capabilities': [RENDER_SHARE_CAPABILITY, RENDER_SHARE_V1_CAPABILITY],
         'meta': {'worker_version': '0.5.0'},
     }, headers=wh).status_code == 200
 
@@ -3788,73 +3816,58 @@ def test_processing_room_worker_shelves_and_default_ai_model(browser, tmp_path):
         errors = []
         page.on('pageerror', lambda err: errors.append(str(err)))
 
-        page.goto(base_url + '/processing')
-        expect(page.get_by_role('heading', name='Processing Room', exact=True)).to_be_visible()
+        for route in ('/review', '/processing'):
+            page.goto(base_url + route)
+            expect(page.get_by_role('heading', name='Review', exact=True)).to_be_visible()
 
-        # 1. Verify two worker shelves plus Review cut section in order.
-        shelves = page.locator('#processing-status .worker-shelf')
-        expect(shelves).to_have_count(2)
-        expect(shelves.nth(0).locator('h2')).to_have_text('Video processing')
-        expect(shelves.nth(1).locator('h2')).to_have_text('Coaching & media export')
-        expect(page.locator('#worker-card-ai')).to_contain_text('AI coach · Ready')
-        expect(page.locator('#worker-card-ai')).to_contain_text('Antigravity → ChatGPT → Gemini')
-        expect(page.locator('#worker-card-render')).to_contain_text('Media export · Ready')
-        expect(page.locator('#worker-card-render')).to_contain_text('HDR interval download')
-        expect(page.locator('#processing-cut-reviews')).to_be_visible()
+        # 1. Worker shelves and coaching dropdown are absent; compact indicator pill links to Worker Portal.
+        expect(page.locator('#processing-status')).to_have_count(0)
+        expect(page.locator('.worker-shelf')).to_have_count(0)
+        expect(page.locator('#coaching-default-model')).to_have_count(0)
+        expect(page.locator('#processing-portal-link')).to_have_attribute('href', 'http://processor.example:8089/')
+        expect(page.locator('#processing-portal-link')).to_contain_text('Worker portal ↗')
+        expect(page.locator('#worker-portal-dot')).to_have_attribute('data-status', 'green')
 
-        box_s1 = shelves.nth(0).bounding_box()
-        box_s2 = shelves.nth(1).bounding_box()
-        box_cuts = page.locator('#processing-cut-reviews').bounding_box()
-        assert box_s1['y'] < box_s2['y'] < box_cuts['y']
+        # 2. Processed videos sort by published_at descending and show staged badge on id2 only.
+        items = page.locator('#processing-cut-reviews .processing-cut-item')
+        expect(items).to_have_count(2)
+        assert items.evaluate_all("els => els.map(el => el.dataset.sessionId)") == [id2, ID]
+        expect(items.nth(0)).to_contain_text('Newer processed')
+        expect(items.nth(0)).to_contain_text('Processed ')
+        badge = items.nth(0).locator('.staged-version-badge')
+        expect(badge).to_be_visible()
+        expect(badge).to_have_text('New version in stage')
+        expect(badge).to_have_attribute('href', f'/review/{id2}/compare')
+        expect(items.nth(1).locator('.staged-version-badge')).to_have_count(0)
 
-        # 2. Change default AI model via dropdown -> persists, shows syncing state, survives reload.
-        model_select = page.locator('#coaching-default-model')
-        expect(model_select).to_have_value('worker_default')
-        model_select.select_option('antigravity:gemini-4-hydrogen-high')
-        expect(page.locator('#toast')).to_have_text('Default AI model updated.')
-        expect(page.locator('#worker-card-ai')).to_contain_text('Syncing on next heartbeat…')
-
-        page.reload()
-        expect(page.locator('#coaching-default-model')).to_have_value('antigravity:gemini-4-hydrogen-high')
-        expect(page.locator('#worker-card-ai')).to_contain_text('Syncing on next heartbeat…')
-
-        # 3. Worker fetches updated config and acknowledges version 1 -> status updates to Synced.
-        cfg_resp = c.get('/api/coaching/worker/config', headers={'Authorization': f'Bearer {worker_secret}'})
-        assert cfg_resp.status_code == 200 and cfg_resp.json['ai_config']['version'] == 1
-        assert c.post('/api/coaching/worker/config', json={
-            'worker_id': 'mac-ai-1',
-            'role': 'ai',
-            'meta': {
-                'worker_version': '0.5.0',
-                'providers': ['antigravity', 'codex', 'gemini'],
-                'active_selection': 'antigravity:gemini-4-hydrogen-high',
-                'config_version': 1,
-            },
-        }, headers=wh).status_code == 200
+        # 3. Worker health transitions green -> yellow -> red when workers go offline.
+        with app.extensions['coaching'].db() as db:
+            db.execute("UPDATE workers SET updated = 0 WHERE id = 'mac-ai-1'")
         page.evaluate('() => refreshStatus()')
-        expect(page.locator('#worker-card-ai')).to_contain_text('Synced')
-        expect(page.locator('#worker-card-ai')).not_to_contain_text('Syncing on next heartbeat…')
+        expect(page.locator('#worker-portal-dot')).to_have_attribute('data-status', 'yellow')
 
-        # 4. Focused #coaching-default-model is not clobbered by background refreshStatus().
-        page.locator('#coaching-default-model').focus()
-        page.evaluate('() => { window.__keptSelect = document.querySelector("#coaching-default-model"); }')
+        status_file.write_text(json.dumps({
+            'service': 'Running',
+            'stage': 'Idle',
+            'heartbeat': 0,
+            'files': [],
+        }))
         page.evaluate('() => refreshStatus()')
-        assert page.evaluate('() => document.querySelector("#coaching-default-model") === window.__keptSelect')
+        expect(page.locator('#worker-portal-dot')).to_have_attribute('data-status', 'red')
 
-        # 5. Concurrent server edit causes HTTP 409 and adopts current state cleanly.
-        assert c.put(
-            '/api/coaching/config',
-            json={'selection': 'gemini:gemini-2.5-pro', 'version': 1},
-            headers={'X-Tennis-Request': '1'},
-        ).status_code == 200
-        page.locator('#coaching-default-model').select_option('codex')
-        expect(page.locator('#toast')).to_contain_text('changed')
-        expect(page.locator('#coaching-default-model')).to_have_value('gemini:gemini-2.5-pro')
+        # 4. Watch page omits Review cut links and NAS file address button/dialog.
+        page.goto(base_url + f'/review/{ID}')
+        expect(page.locator('#player-nas')).to_have_count(0)
+        expect(page.locator('#nas-dialog')).to_have_count(0)
+        expect(page.locator('.note-cut-link')).to_have_count(0)
+        expect(page.locator('.timeline-cut-link')).to_have_count(0)
 
-        # 6. Zero horizontal overflow across desktop and mobile viewports.
+        # 5. Zero horizontal overflow on /review across desktop and mobile viewports.
+        page.goto(base_url + '/review')
+        expect(page.get_by_role('heading', name='Review', exact=True)).to_be_visible()
         for w in (1280, 390, 320):
             page.set_viewport_size({'width': w, 'height': 844})
-            assert not page.evaluate('document.documentElement.scrollWidth > innerWidth'), f'Processing overflow at {w}px'
+            assert not page.evaluate('document.documentElement.scrollWidth > innerWidth'), f'Review overflow at {w}px'
 
         assert not errors
         page.close()

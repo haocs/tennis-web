@@ -779,7 +779,7 @@ class Coaching(Annotations):
 
         workers = []
         for r in worker_rows:
-            w = self._decode_worker(r, now, include_available_models=False)
+            w = self._decode_worker(r, now, include_available_models=True)
             meta = w.get('meta') or {}
             role = w['role']
             item = {
@@ -795,6 +795,12 @@ class Coaching(Annotations):
             if role == 'ai':
                 item['provider'] = meta.get('active_selection') or ai_cfg.get('selection')
                 item['default_model'] = ai_cfg.get('selection')
+                if isinstance(meta.get('config_version'), int) and not isinstance(meta.get('config_version'), bool):
+                    item['config_version'] = meta['config_version']
+                if isinstance(meta.get('active_selection'), str):
+                    item['active_selection'] = meta['active_selection']
+                if isinstance(meta.get('available_models'), list):
+                    item['available_models'] = meta['available_models'][:32]
                 if isinstance(meta.get('providers'), list) and all(isinstance(p, str) for p in meta['providers']):
                     item['providers'] = meta['providers'][:20]
             if isinstance(w.get('capabilities'), list) and all(isinstance(c, str) for c in w['capabilities']):
@@ -917,4 +923,36 @@ class Coaching(Annotations):
             'workers': workers,
             'tasks': tasks,
             'deleted': list(deleted or []),
+            'settings': {
+                'ai_config': ai_cfg,
+            },
         }
+
+    def apply_portal_ai_config(self, desired):
+        """Apply a desired default AI model pushed back by Worker Portal external-sync."""
+        if not isinstance(desired, dict) or not isinstance(desired.get('selection'), str):
+            return None
+        try:
+            norm_selection, provider, model = parse_ai_selection(desired['selection'])
+        except ValueError:
+            return None
+        with self.db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            current = self.worker_ai_config(db)
+            if current['selection'] == norm_selection:
+                return current
+            new_version = current['version'] + 1
+            now = self.clock()
+            encoded = json.dumps({'selection': norm_selection, 'provider': provider, 'model': model})
+            db.execute(
+                """
+                INSERT INTO settings(key, value, version, updated) VALUES('ai_config', ?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                  value = excluded.value,
+                  version = excluded.version,
+                  updated = excluded.updated
+                """,
+                (encoded, new_version, now),
+            )
+            db.commit()
+            return self.worker_ai_config(db)

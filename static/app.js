@@ -2,7 +2,7 @@
 const $ = (q, root=document) => root.querySelector(q);
 const $$ = (q, root=document) => [...root.querySelectorAll(q)];
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const model = {sessions:[], practiceGroups:[], courts:[], players:[], homePlayer:'', clipPlayer:'', selectingClips:false, selectedClips:new Set(), session:null, status:null, coachingWorkers:null, savingAiConfig:false, sort:'original', likedOnly:false, mode:'full', current:null, autoplay:false, query:'', homeSort:'latest', homeView:'sessions', busy:new Set()};
+const model = {sessions:[], practiceGroups:[], courts:[], players:[], homePlayer:'', clipPlayer:'', selectingClips:false, selectedClips:new Set(), session:null, status:null, sort:'original', likedOnly:false, mode:'full', current:null, autoplay:false, query:'', homeSort:'latest', homeView:'sessions', busy:new Set()};
 let toastTimer;
 function toast(message){ $('#toast').textContent=message; $('#toast').classList.add('visible'); clearTimeout(toastTimer); toastTimer=setTimeout(()=>$('#toast').classList.remove('visible'),6000); }
 function time(seconds, precise=false){ const n=Math.max(0, Number(seconds)||0); const ms=Math.round(n*1000); const whole=precise?Math.floor(ms/1000):Math.round(n); const h=Math.floor(whole/3600), m=Math.floor(whole%3600/60),s=whole%60; return (h?h+':'+String(m).padStart(2,'0'):String(m))+':'+String(s).padStart(2,'0')+(precise?'.'+String(ms%1000).padStart(3,'0'):''); }
@@ -14,125 +14,43 @@ const clipPosterURL=(s,c)=>`/api/sessions/${s.id}/clips/${c.id}/poster?v=${encod
 const posterURL=s=>`/api/sessions/${s.id}/poster?v=${encodeURIComponent(s.published_at)}`;
 function likeButton(s,clip=null,extra=''){ const like=clip?clip.like:s.like; return `<button class="like-button ${extra}" data-like-session="${s.id}" data-like-item="${clip?clip.id:'video'}" aria-pressed="${!!like.value}" aria-label="${like.value?'Unlike':'Like'} ${clip?'clip '+clip.index:'video'}" title="${like.value?'Unlike':'Like'}">${ReviewPlayer.icon('thumbup')}</button>`; }
 async function api(path, options={}){ const response=await fetch(path,{...options,headers:{'Content-Type':'application/json','X-Tennis-Request':'1',...options.headers}});const data=await response.json(); if(!response.ok){ const error=new Error(data.error||`Request failed (${response.status})`);error.status=response.status;error.current=data.current;throw error;}return data; }
-function processingStatusInfo(s=model.status){
+const isReviewListPath=path=>path==='/review'||path==='/processing';
+function workerHealthInfo(s=model.status){
+ if(s?.worker_health&&['green','yellow','red'].includes(s.worker_health.color))return s.worker_health;
  const files=(s&&Array.isArray(s.files))?s.files:[];
- const fileError=files.some(r=>r&&(r.error||r.status==='needs_attention'));
- const hasRetry=files.some(r=>r&&r.status==='retry');
- if(s&&(s.has_error||s.error||fileError||s.service==='Error'||s.service==='Failed'))return {color:'red',label:'Processing attention needed'};
- if(!s||!s.available||s.stale||s.service==='Stopped'||hasRetry)return {color:'yellow',label:!s?'Checking processing status':!s.available?'Processing status unavailable':s.stale?'Processing status is stale':s.service==='Stopped'?'Processing is paused':'Processing waiting to retry'};
- return {color:'green',label:s.stage&&s.stage!=='Idle'?`Processing: ${s.stage}`:'Processing ready'};
+ const fileError=files.some(r=>r&&(r.error||r.status==='needs_attention'||r.status==='retry'));
+ if(!s)return {color:'yellow',label:'Checking worker status',online_count:0,total_count:1};
+ if(!s.available||s.stale||s.has_error||s.error||fileError||s.service==='Stopped'||s.service==='Error'||s.service==='Failed')return {color:'red',label:'No workers running',online_count:0,total_count:1};
+ return {color:'green',label:'All workers online',online_count:1,total_count:1};
 }
-function updateProcessingDot(){
- const dot=$('#nav-processing-dot'),link=$('#nav-processing'),info=processingStatusInfo();
- if(dot){dot.className=`status-dot status-${info.color}`;dot.dataset.status=info.color;dot.setAttribute('aria-label',info.label);dot.title=info.label;}
- if(link)link.title=info.label;
+function workerPortalLinkHTML(){
+ const portalUrl=$('#main')?.dataset.processingUrl||'/processing';
+ const wh=workerHealthInfo();
+ return `<a class="worker-portal-pill" id="processing-portal-link" href="${esc(portalUrl)}" title="${esc(wh.label)}" aria-label="${esc(wh.label)} — Open Worker portal"><span id="worker-portal-dot" class="status-dot status-${esc(wh.color)}" data-status="${esc(wh.color)}" role="img" aria-label="${esc(wh.label)}"></span><span>Worker portal ↗</span></a>`;
 }
 function nav(){
- const isProc=location.pathname==='/processing'||location.pathname.startsWith('/processing/cuts/')||/^\/review\/[a-f0-9]{64}\/(cuts|compare)$/.test(location.pathname);
+ const isProc=isReviewListPath(location.pathname)||location.pathname.startsWith('/processing/cuts/')||/^\/review\/[a-f0-9]{64}\/(cuts|compare)$/.test(location.pathname);
  $('#nav-library')?.classList.toggle('active',!model.session&&location.pathname==='/');
  $('#nav-learning')?.classList.toggle('active',location.pathname==='/learning');
  $('#nav-processing')?.classList.toggle('active',isProc);
- updateProcessingDot();
 }
-function queueLabel(row){return ({done:'Finished',waiting:'Waiting for upload to settle',processing:'Processing',retry:'Waiting to retry',needs_attention:'Needs attention'})[row.status]||row.status;}
-function statusHTML(){const s=model.status;if(!s)return '<div class="status-panel"><div class="status-copy">Checking processing status…</div></div>'; const info=processingStatusInfo(s);const warning=info.color!=='green';const running=info.color==='green'&&s.service==='Running';let title=info.color==='red'?'Processing attention needed':warning?(s.stale&&s.available?'Processing status is stale':!s.available?'Processing status unavailable':s.service==='Stopped'?'Processing is paused':'Processing waiting to retry'):(s.stage==='Idle'?'Ready':s.stage||'Processing');let detail=s.current_video?`${esc(s.current_video)} · `:'';if(s.progress&&s.progress.total){detail+=`${esc(s.progress.current)} / ${esc(s.progress.total)} ${esc(s.progress.unit)}`;}else detail+=warning?'Check the processing service.':'';const heartbeat=s.heartbeat?new Date(s.heartbeat*1000).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}):'Unavailable';const pending=(s.files||[]).filter(r=>r.status!=='done');const errors=pending.filter(r=>r.error);const percent=s.progress?.total?Math.min(100,100*s.progress.current/s.progress.total):0;return `<div class="status-panel"><div class="status-orb status-${info.color}${warning?' warning':''}${info.color==='red'?' danger':''}"><span class="dot"></span></div><div class="status-copy"><div class="status-title">${esc(title)}</div><div class="status-subtitle">${detail}</div>${pending.length?`<details class="queue"><summary>${pending.length} video${pending.length===1?'':'s'} in the queue${errors.length?' · attention needed':''}</summary><ul>${pending.map(r=>`<li>${esc(r.name)} — ${esc(queueLabel(r))}${r.error?' · see processing log for details':''}</li>`).join('')}</ul></details>`:''}</div><div class="status-aside">${running?'PROCESSOR ONLINE':warning?'CHECK PROCESSOR':'PROCESSOR PAUSED'}<br>Heartbeat ${esc(heartbeat)}${percent?`<div class="progress-rail"><div class="progress-fill" data-progress="${percent}"></div></div>`:''}</div></div>`;}
-function workerStatusHTML(){
- const s=model.status, info=processingStatusInfo(s), warning=info.color!=='green';
- const title=!s?'Checking worker status…':info.color==='red'?'Worker attention needed':warning?(s.stale&&s.available?'Worker status is stale':'Worker status unavailable'):s.service==='Stopped'?'Worker paused':s.stage==='Idle'?'Worker ready':s.stage||'Worker online';
- const detail=s?.current_video||(!warning&&s?.progress?.total?`${s.progress.current} / ${s.progress.total} ${s.progress.unit||''}`:'');
- return `<a class="worker-status${warning?' warning':''}" href="/processing" aria-label="${esc(title)} — Open Processing Room"><span class="status-orb status-${info.color}${warning?' warning':''}${info.color==='red'?' danger':''}" aria-hidden="true"><span class="dot"></span></span><span class="worker-status-copy"><strong>${esc(title)}</strong>${detail?`<span>${esc(detail)}</span>`:''}</span><span class="worker-status-link">Processing Room ↗</span></a>`;
+function processedDateText(s){
+ const n=Number(s?.published_at);
+ if(!Number.isFinite(n)||n<=0)return 'Processed date unavailable';
+ const d=new Date(n*1000);
+ if(Number.isNaN(d.valueOf()))return 'Processed date unavailable';
+ return 'Processed '+d.toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'})+' · '+d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
 }
-function providerDisplayName(p){ return ({antigravity:'Antigravity',codex:'ChatGPT',gemini:'Gemini'})[p]||p; }
-function workerClock(epoch){ return epoch?new Date(epoch*1000).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}):'Unavailable'; }
-function aiModelOptionsHTML(cfg){
- if(!cfg||!Array.isArray(cfg.options)||!cfg.options.length)return '';
- const groups=new Map();
- for(const opt of cfg.options){
-  const g=opt.group||'Default';
-  if(!groups.has(g))groups.set(g,[]);
-  groups.get(g).push(opt);
- }
- let html='';
- for(const [group,items] of groups.entries()){
-  const optsHTML=items.map(opt=>`<option value="${esc(opt.selection)}"${opt.selection===cfg.selection?' selected':''}>${esc(opt.label)}</option>`).join('');
-  html+=group==='Default'?optsHTML:`<optgroup label="${esc(group)}">${optsHTML}</optgroup>`;
- }
- return html;
+function reviewOverview(){
+ model.session=null;nav();document.title='Review — Courtside';
+ const sorted=[...model.sessions].sort((a,b)=>(Number(b.published_at)||0)-(Number(a.published_at)||0)||(b.recorded_at_epoch||0)-(a.recorded_at_epoch||0));
+ const recordingsHTML=sorted.length?`<div class="processing-cut-list">${sorted.map(s=>{
+  const badge=s.has_staged_version?`<a class="staged-version-badge" href="/review/${s.id}/compare">${s.staged_version_count>1?`${s.staged_version_count} new versions in stage`:'New version in stage'}</a>`:'';
+  return `<article class="processing-cut-item" data-session-id="${esc(s.id)}"><div><div class="processing-cut-heading"><strong><a href="/review/${s.id}">${esc(s.title)}</a></strong>${badge}</div><span class="processing-cut-meta">${esc(processedDateText(s))} · Recorded ${esc(dateText(s))} · ${s.clips.length} ${s.clips.length===1?'clip':'clips'} · ${time(s.video.duration_seconds)} kept · ${time(s.removed_seconds)} removed</span></div><a class="button small" href="/review/${s.id}/cuts">Review cut</a></article>`;
+ }).join('')}</div>`:'<p class="note-empty">No processed videos yet.</p>';
+ $('#main').innerHTML=`<div class="review-breadcrumb"><a href="/">Library</a><span>/</span>Review</div><div class="processing-room-header"><h1>Review</h1><div id="review-worker-status">${workerPortalLinkHTML()}</div></div><section id="processing-cut-reviews" class="notes-panel" aria-label="Processed videos"><h2>Processed videos</h2>${recordingsHTML}</section>`;
 }
-function roleWorkerState(role){
- const cw=model.coachingWorkers;
- const workers=(cw?.workers||[]).filter(w=>w.role===role);
- const online=workers.filter(w=>w.online);
- const latest=[...workers].sort((a,b)=>(b.updated||0)-(a.updated||0))[0]||null;
- return {cw,workers,online,latest};
-}
-function aiWorkerCardHTML(){
- const {cw,workers,online,latest}=roleWorkerState('ai');
- const q=cw?.queue?.ai||{queued:0,active:0,needs_review:0};
- const cfg=cw?.ai_config;
- const color=q.needs_review>0||(online.length&&online.every(w=>w.status==='failed'))?'red':online.length?'green':'yellow';
- const warning=color!=='green';
- const working=online.some(w=>w.status==='leased'||w.status==='calling')||q.active>0;
- const badge=!cw?'CHECKING':cw.error?'STATUS UNAVAILABLE':!cw.enabled?'NOT ENABLED':working?'WORKING':online.length?'ONLINE':latest?'OFFLINE':'STANDING BY';
- const title=q.needs_review>0?'Needs review':working?'Working':online.length?'Ready':!cw?'Checking…':cw.error?'Unavailable':!cw.enabled?'Not enabled':latest?'Offline':'Standing by';
- const subParts=[];
- if(workers.length>1)subParts.push(`${online.length}/${workers.length} online`);
- if(q.needs_review>0)subParts.push(`${q.needs_review} request${q.needs_review===1?'':'s'} need review`);
- else if(q.active||q.queued){
-  const bits=[];
-  if(q.active)bits.push(`${q.active} active`);
-  if(q.queued)bits.push(`${q.queued} queued`);
-  subParts.push(bits.join(' · '));
- }else if(!cw?.enabled&&cw&&!cw.error)subParts.push('Coaching service is not enabled on this server.');
- else if(!online.length&&latest)subParts.push('Check your coaching assistant connection.');
- else if(!online.length&&cw&&!cw.error)subParts.push('Waiting for the coaching assistant to connect.');
- const primary=online[0]||latest;
- const providers=Array.isArray(primary?.meta?.providers)?primary.meta.providers:[];
- if(providers.length)subParts.push(providers.map(providerDisplayName).join(' → '));
- if(cfg&&online.length&&!cw?.error){
-  const allSynced=online.every(w=>w.meta?.config_version===cfg.version);
-  if(allSynced&&cfg.version>0)subParts.push('Synced');
-  else if(!allSynced&&(cfg.version>0||online.some(w=>typeof w.meta?.config_version==='number')))subParts.push('Syncing on next heartbeat…');
- }
- const heartbeat=latest?.updated?`Heartbeat ${esc(workerClock(latest.updated))}`:'No heartbeat';
- const selectHTML=cfg?.options?.length?`<div class="worker-control-row"><label for="coaching-default-model">Default model</label><select id="coaching-default-model" aria-label="Default model" ${model.savingAiConfig?'disabled':''}>${aiModelOptionsHTML(cfg)}</select></div>`:'';
- return `<article class="status-panel worker-card" id="worker-card-ai" data-worker-role="ai"><div class="worker-card-main"><div class="status-orb status-${color}${warning?' warning':''}${color==='red'?' danger':''}"><span class="dot"></span></div><div class="status-copy"><div class="status-title">AI coach · ${esc(title)}</div><div class="status-subtitle">${esc(subParts.join(' · '))}</div></div><div class="status-aside">${esc(badge)}<br>${heartbeat}</div></div>${selectHTML}</article>`;
-}
-function renderWorkerCardHTML(){
- const {cw,workers,online,latest}=roleWorkerState('render');
- const q=cw?.queue?.render||{queued:0,active:0};
- const color=online.length&&online.every(w=>w.status==='failed')?'red':online.length?'green':'yellow';
- const warning=color!=='green';
- const working=online.some(w=>w.status==='leased')||q.active>0;
- const badge=!cw?'CHECKING':cw.error?'STATUS UNAVAILABLE':!cw.enabled?'NOT ENABLED':working?'WORKING':online.length?'ONLINE':latest?'OFFLINE':'STANDING BY';
- const title=working?'Working':online.length?'Ready':!cw?'Checking…':cw.error?'Unavailable':!cw.enabled?'Not enabled':latest?'Offline':'Standing by';
- const subParts=[];
- if(workers.length>1)subParts.push(`${online.length}/${workers.length} online`);
- if(q.active||q.queued){
-  const bits=[];
-  if(q.active)bits.push(`${q.active} active`);
-  if(q.queued)bits.push(`${q.queued} queued`);
-  subParts.push(bits.join(' · '));
- }else if(!cw?.enabled&&cw&&!cw.error)subParts.push('Media export service is not enabled on this server.');
- else if(!online.length&&latest)subParts.push('Check your media exporter connection.');
- else if(!online.length&&cw&&!cw.error)subParts.push('Waiting for the media exporter to connect.');
- const hasShareV2=workers.some(w=>Array.isArray(w.capabilities)&&w.capabilities.includes('share-export-v2'));
- if(workers.length)subParts.push(hasShareV2?'Coaching frames · HDR interval download':'Clip study exports · coaching frames');
- const heartbeat=latest?.updated?`Heartbeat ${esc(workerClock(latest.updated))}`:'No heartbeat';
- return `<article class="status-panel worker-card" id="worker-card-render" data-worker-role="render"><div class="worker-card-main"><div class="status-orb status-${color}${warning?' warning':''}${color==='red'?' danger':''}"><span class="dot"></span></div><div class="status-copy"><div class="status-title">Media export · ${esc(title)}</div><div class="status-subtitle">${esc(subParts.join(' · '))}</div></div><div class="status-aside">${esc(badge)}<br>${heartbeat}</div></div></article>`;
-}
-function processingShelvesHTML(){
- return `<div class="worker-shelf" data-shelf="video-processing"><h2>Video processing</h2><div class="worker-shelf-grid worker-shelf-single">${statusHTML()}</div></div><div class="worker-shelf" data-shelf="coaching"><h2>Coaching &amp; media export</h2><div class="worker-shelf-grid worker-shelf-two">${aiWorkerCardHTML()}${renderWorkerCardHTML()}</div></div>`;
-}
-function processingRoom(){
- model.session=null;nav();document.title='Processing Room — Courtside';
- const portalUrl=$('#main')?.dataset.processingUrl||'/processing';
- const externalHandoff=portalUrl!=='/processing'?`<div class="processing-portal-handoff"><a class="button small" id="processing-portal-link" href="${esc(portalUrl)}">Open Worker Portal ↗</a></div>`:'';
- const recordingsHTML=model.sessions.length?`<div class="processing-cut-list">${model.sessions.map(s=>`<article class="processing-cut-item" data-session-id="${esc(s.id)}"><div><strong><a href="/review/${s.id}">${esc(s.title)}</a></strong><span class="processing-cut-meta">${esc(dateText(s))} · ${s.clips.length} ${s.clips.length===1?'clip':'clips'} · ${time(s.video.duration_seconds)} kept · ${time(s.removed_seconds)} removed</span></div><a class="button small" href="/review/${s.id}/cuts">Review cut</a></article>`).join('')}</div>`:'<p class="note-empty">No processed recordings yet.</p>';
- $('#main').innerHTML=`<div class="review-breadcrumb"><a href="/">Library</a><span>/</span>Processing Room</div><div class="processing-room-header"><h1>Processing Room</h1>${externalHandoff}</div><section id="processing-status" aria-label="Worker status">${processingShelvesHTML()}</section><section id="processing-cut-reviews" class="notes-panel" aria-label="Review cut"><h2>Review cut</h2>${recordingsHTML}</section>`;applyBars();
-}
-
-function applyBars(){ $$('.progress-fill').forEach(el=>el.style.width=`${el.dataset.progress}%`); }
+const processingRoom=reviewOverview;
 function isClipHighlighted(c){return Boolean(c&&(c.highlighted||Number(c.highlight_count)>0||(Array.isArray(c.highlights)&&c.highlights.length>0)));}
 function allLikesAndHighlights(sessions=model.sessions,playerFilter=''){
  const seen=new Set(),out=[];
@@ -199,7 +117,7 @@ function home(){
  $('#home-player-filter').onchange=e=>{model.homePlayer=e.target.value;homeResults();};
  $('#manage-players').onclick=()=>PlayerUI.openSaved();
  $('#manage-courts').addEventListener('click',()=>CourtUI.openSaved());
- homeResults();applyBars();
+ homeResults();
 }
 function homeResults(){
  const view=homeViewFromLocation();model.homeView=view;
@@ -266,7 +184,7 @@ async function changeLike(button){const s=model.session?.id===button.dataset.lik
 function bindLikes(root=document){$$('[data-like-item]',root).forEach(b=>b.addEventListener('click',()=>changeLike(b)));}
 function refreshLikeButtons(){ $$('[data-like-item]').forEach(b=>{const s=model.session?.id===b.dataset.likeSession?model.session:model.sessions.find(s=>s.id===b.dataset.likeSession);const t=['session','video'].includes(b.dataset.likeItem)?s:s?.clips.find(c=>c.id===b.dataset.likeItem);if(t){b.disabled=model.busy.has(s.id+':'+b.dataset.likeItem);b.setAttribute('aria-pressed',String(!!t.like.value));b.innerHTML=ReviewPlayer.icon('thumbup');b.title=t.like.value?'Unlike':'Like';b.setAttribute('aria-label',`${t.like.value?'Unlike':'Like'} ${['session','video'].includes(b.dataset.likeItem)?'video':'clip '+t.index}`);}});}
 function filteredClips(){if(!model.session)return [];const list=model.session.clips.filter(c=>NoteUI.filterClip(c)&&PlayerUI.matches(c,model.clipPlayer));return list.sort((a,b)=>model.sort==='original'?a.index-b.index:model.sort==='smart'?(Number(!!b.like?.value)-Number(!!a.like?.value)||Number(!!NoteUI.hasMoments?.(b))-Number(!!NoteUI.hasMoments?.(a))||b.duration_seconds-a.duration_seconds||a.index-b.index):((model.sort==='shortest'?1:-1)*(a.duration_seconds-b.duration_seconds)||a.index-b.index));}
-function review(s){model.session=s;nav();const query=new URLSearchParams(location.search);model.likedOnly=query.get('liked')==='1';model.noteFilter=model.likedOnly?'liked':'all';$('#main').innerHTML=`<div class="review-breadcrumb"><a href="/">Library</a><span>/</span><span id="review-kind">Video review</span></div><section class="review-heading"><div><h1 id="review-title">${esc(s.title)}</h1><p id="review-video-context" hidden></p><div class="review-meta"><span>${esc(dateText(s))}</span><span id="review-location">⌾ ${esc(locationText(s))}</span><span id="recording-player-badges" class="player-chips"></span><span>${s.clips.length} clips · ${time(s.video.duration_seconds)} of practice${s.video.hdr?' · HDR':''}</span></div></div><div class="review-actions"><button class="button" id="edit-session">Edit video</button><span id="review-like">${likeButton(s)}</span></div></section><section class="player-shell" aria-label="Practice video player"><div class="player-title"><div><p class="eyebrow" id="player-eyebrow">FULL PRACTICE</p><div id="player-name">${s.clips.length} clips</div></div><button class="button small hidden" id="full-practice">Full practice ↗</button></div>${ReviewPlayer.markup()}<div class="player-footer"><div class="player-navigation"><span class="player-position" id="player-position"></span><div id="clip-player-row" class="clip-player-row" hidden><button type="button" class="player-action" id="clip-main-player"></button><span id="clip-player-default" class="player-inherited"></span></div><div class="player-options"><div class="player-reactions" role="group" aria-label="Video feedback"><span id="player-like"></span><button type="button" class="like-button" id="note-demote" aria-label="Dislike video" aria-pressed="false" title="Dislike">${ReviewPlayer.icon('thumbdown')}</button></div><button type="button" class="player-action hidden" id="study-clip" aria-label="Study clip" title="Study clip">${ReviewPlayer.icon('study')}</button><a class="player-action" id="player-download" download aria-label="Download full practice" title="Download full practice">${ReviewPlayer.icon('download')}</a><details class="player-more"><summary class="player-action" aria-label="More video actions" title="More video actions">${ReviewPlayer.icon('more')}</summary><div class="player-more-list"><button type="button" id="player-dev-mode" aria-pressed="false">Dev mode</button><button type="button" class="${s.video.nas_url?'':'hidden'}" id="player-nas">NAS file address</button></div></details></div></div></div></section><section><div class="section-heading clip-toolbar"><h2>Clips</h2><span class="count" id="clip-count"></span><div class="toolbar">${PlayerUI.filter('clip-player-filter',model.clipPlayer,'Filter clips by player')}<select id="clip-sort" aria-label="Sort clips"><option value="original">Court order</option><option value="smart">Smart</option><option value="shortest">Shortest first</option><option value="longest">Longest first</option></select></div><details class="clip-actions-menu"><summary class="button" aria-label="Clip list actions" title="Clip list actions">⋯</summary><div><button type="button" id="select-clips" aria-label="Select clips" aria-pressed="false">Select clips</button></div></details></div><div id="clip-selection" class="clip-selection" role="group" aria-label="Selected clips" hidden><label class="clip-select-all"><input id="select-all-clips" type="checkbox" aria-label="Select all shown clips">All</label><span id="selected-clip-count" role="status" aria-live="polite"></span><button type="button" class="button small" id="assign-selected-player" disabled>Assign main player</button></div><div class="clip-list" id="clip-list"></div></section><details class="timeline-section"><summary>Timeline <span aria-hidden="true">+</span></summary><div class="table-scroll"><table class="timeline-table"><thead><tr><th>Decision</th><th>Original start</th><th>Original end</th><th>Duration</th><th>Clip</th><th>Cut</th></tr></thead><tbody id="timeline-body"></tbody></table></div><div class="artifact-links"><a href="/api/sessions/${s.id}/artifacts/edit-timeline.csv">Download timeline CSV</a><a href="/api/sessions/${s.id}/artifacts/edit-timeline.json">Timeline JSON</a><a href="/review/${s.id}/original">Original generated review ↗</a></div></details>`;
+function review(s){model.session=s;nav();const query=new URLSearchParams(location.search);model.likedOnly=query.get('liked')==='1';model.noteFilter=model.likedOnly?'liked':'all';$('#main').innerHTML=`<div class="review-breadcrumb"><a href="/">Library</a><span>/</span><span id="review-kind">Video review</span></div><section class="review-heading"><div><h1 id="review-title">${esc(s.title)}</h1><p id="review-video-context" hidden></p><div class="review-meta"><span>${esc(dateText(s))}</span><span id="review-location">⌾ ${esc(locationText(s))}</span><span id="recording-player-badges" class="player-chips"></span><span>${s.clips.length} clips · ${time(s.video.duration_seconds)} of practice${s.video.hdr?' · HDR':''}</span></div></div><div class="review-actions"><button class="button" id="edit-session">Edit video</button><span id="review-like">${likeButton(s)}</span></div></section><section class="player-shell" aria-label="Practice video player"><div class="player-title"><div><p class="eyebrow" id="player-eyebrow">FULL PRACTICE</p><div id="player-name">${s.clips.length} clips</div></div><button class="button small hidden" id="full-practice">Full practice ↗</button></div>${ReviewPlayer.markup()}<div class="player-footer"><div class="player-navigation"><span class="player-position" id="player-position"></span><div id="clip-player-row" class="clip-player-row" hidden><button type="button" class="player-action" id="clip-main-player"></button><span id="clip-player-default" class="player-inherited"></span></div><div class="player-options"><div class="player-reactions" role="group" aria-label="Video feedback"><span id="player-like"></span><button type="button" class="like-button" id="note-demote" aria-label="Dislike video" aria-pressed="false" title="Dislike">${ReviewPlayer.icon('thumbdown')}</button></div><button type="button" class="player-action hidden" id="study-clip" aria-label="Study clip" title="Study clip">${ReviewPlayer.icon('study')}</button><a class="player-action" id="player-download" download aria-label="Download full practice" title="Download full practice">${ReviewPlayer.icon('download')}</a><details class="player-more"><summary class="player-action" aria-label="More video actions" title="More video actions">${ReviewPlayer.icon('more')}</summary><div class="player-more-list"><button type="button" id="player-dev-mode" aria-pressed="false">Dev mode</button></div></details></div></div></div></section><section><div class="section-heading clip-toolbar"><h2>Clips</h2><span class="count" id="clip-count"></span><div class="toolbar">${PlayerUI.filter('clip-player-filter',model.clipPlayer,'Filter clips by player')}<select id="clip-sort" aria-label="Sort clips"><option value="original">Court order</option><option value="smart">Smart</option><option value="shortest">Shortest first</option><option value="longest">Longest first</option></select></div><details class="clip-actions-menu"><summary class="button" aria-label="Clip list actions" title="Clip list actions">⋯</summary><div><button type="button" id="select-clips" aria-label="Select clips" aria-pressed="false">Select clips</button></div></details></div><div id="clip-selection" class="clip-selection" role="group" aria-label="Selected clips" hidden><label class="clip-select-all"><input id="select-all-clips" type="checkbox" aria-label="Select all shown clips">All</label><span id="selected-clip-count" role="status" aria-live="polite"></span><button type="button" class="button small" id="assign-selected-player" disabled>Assign main player</button></div><div class="clip-list" id="clip-list"></div></section><details class="timeline-section"><summary>Timeline <span aria-hidden="true">+</span></summary><div class="table-scroll"><table class="timeline-table"><thead><tr><th>Decision</th><th>Original start</th><th>Original end</th><th>Duration</th><th>Clip</th></tr></thead><tbody id="timeline-body"></tbody></table></div><div class="artifact-links"><a href="/api/sessions/${s.id}/artifacts/edit-timeline.csv">Download timeline CSV</a><a href="/api/sessions/${s.id}/artifacts/edit-timeline.json">Timeline JSON</a><a href="/review/${s.id}/original">Original generated review ↗</a></div></details>`;
  $('#select-clips').onclick=()=>{$('.clip-actions-menu').open=false;model.selectingClips=!model.selectingClips;if(!model.selectingClips)model.selectedClips.clear();renderClipList();};
  $('#select-all-clips').onchange=e=>{for(const c of filteredClips()){if(e.target.checked)model.selectedClips.add(c.id);else model.selectedClips.delete(c.id);}renderClipList();};
  PlayerUI.bindReview();const player=$('#player');model.mode='full';model.current=s.clips[0]?.id;try{model.autoplay=localStorage.getItem('courtside.autoplay')==='true';}catch(error){model.autoplay=false;}$('#autoplay-next').checked=model.autoplay;player.poster=posterURL(s);player.src=mediaURL(s,s.video.file);model.playerControls=ReviewPlayer.mount({time,onError:toast});updatePlayerDownload();
@@ -276,7 +194,6 @@ function review(s){model.session=s;nav();const query=new URLSearchParams(locatio
  $('#full-practice').addEventListener('click',()=>{const c=s.clips.find(c=>c.id===model.current);playFull(c?c.playback_start_seconds:0,false);});
  $('#clip-sort').value=model.sort;$('#clip-sort').addEventListener('change',e=>{model.sort=e.target.value;renderClipList();});
  $('#player-dev-mode').addEventListener('click',()=>{const on=model.playerControls?.toggleDevMode();$('#player-dev-mode').setAttribute('aria-pressed',String(!!on));$('.player-more').open=false;});
- $('#player-nas').addEventListener('click',()=>{const clip=model.mode==='clip'?s.clips.find(c=>c.id===model.current):null;$('.player-more').open=false;showNasAddress(s,clip);});
  $('#edit-session').addEventListener('click',openEdit);bindLikes($('.review-heading'));renderClipList();renderTimeline();
  const coachTime=query.has('coach_time')?Number(query.get('coach_time')):NaN;
  const coachEnd=query.has('coach_end')?Number(query.get('coach_end')):NaN;
@@ -307,7 +224,6 @@ ClipStudy.updateEntry({button:$('#study-clip'),session:s,clip,player:$('#player'
  const link=$('#player-download');link.href=mediaURL(s,clip?clip.file:s.video.file)+'&download=1';
  const label=clip?'Download clip '+String(clip.index).padStart(2,'0'):'Download full practice';
  link.setAttribute('aria-label',label);link.title=label;
- $('#player-nas').classList.toggle('hidden',!(clip?clip.nas_url:s.video.nas_url));
 }
 function setSource(url, at=0, play=false){
  updatePlayerDownload();
@@ -342,10 +258,7 @@ function updateClipSelection(){
  const all=$('#select-all-clips');all.checked=!!visible.length&&count===visible.length;all.indeterminate=count>0&&count<visible.length;all.disabled=!visible.length;
 }
 
-function renderTimeline(){const s=model.session,rows=[];let cursor=0;function row(action,a,b,clip=null){const cutHref=clip?`/review/${s.id}/cuts?clip=${encodeURIComponent(clip.id)}`:`/review/${s.id}/cuts?gap=${encodeURIComponent(Math.round(a*1000)+'-'+Math.round(b*1000))}`;return `<tr><td><span class="decision ${action==='Preserved'?'kept':'cut'}">${action}</span></td><td>${preciseTime(a)}</td><td>${preciseTime(b)}</td><td>${preciseTime(b-a)}</td><td>${clip?String(clip.index).padStart(2,'0'):'—'}</td><td><a class="timeline-cut-link" href="${cutHref}">Review cut</a></td></tr>`;}for(const c of s.clips){if(c.original_start_seconds>cursor)rows.push(row('Cut',cursor,c.original_start_seconds));rows.push(row('Preserved',c.original_start_seconds,c.original_end_seconds,c));cursor=c.original_end_seconds;}if(cursor<s.source.duration_seconds)rows.push(row('Cut',cursor,s.source.duration_seconds));$('#timeline-body').innerHTML=rows.join('');}
-function showNasAddress(s,clip=null){const address=clip?clip.nas_url:s.video.nas_url;if(!address)return;$('#nas-file-name').textContent=`${s.title} · ${clip?'Clip '+String(clip.index).padStart(2,'0'):'Full practice'}`;$('#nas-address').value=address;$('#nas-copy-status').textContent='';$('#nas-dialog').showModal();}
-$('#close-nas').addEventListener('click',()=>$('#nas-dialog').close());
-$('#copy-nas').addEventListener('click',async()=>{const field=$('#nas-address');try{if(navigator.clipboard?.writeText){await navigator.clipboard.writeText(field.value);}else{field.focus();field.select();if(!document.execCommand('copy'))throw new Error('Manual copy needed');}$('#nas-copy-status').textContent='Address copied.';}catch(error){field.focus();field.select();$('#nas-copy-status').textContent='Select and copy the address above.';}});
+function renderTimeline(){const s=model.session,rows=[];let cursor=0;function row(action,a,b,clip=null){return `<tr><td><span class="decision ${action==='Preserved'?'kept':'cut'}">${action}</span></td><td>${preciseTime(a)}</td><td>${preciseTime(b)}</td><td>${preciseTime(b-a)}</td><td>${clip?String(clip.index).padStart(2,'0'):'—'}</td></tr>`;}for(const c of s.clips){if(c.original_start_seconds>cursor)rows.push(row('Cut',cursor,c.original_start_seconds));rows.push(row('Preserved',c.original_start_seconds,c.original_end_seconds,c));cursor=c.original_end_seconds;}if(cursor<s.source.duration_seconds)rows.push(row('Cut',cursor,s.source.duration_seconds));$('#timeline-body').innerHTML=rows.join('');}
 function updateReviewHeading(){
  const s=model.session;if(!s||!$('#review-title'))return;const clip=model.mode==='clip'?s.clips.find(c=>c.id===model.current):null;
  $('#review-title').textContent=clip?.title||s.title;$('#review-kind').textContent=clip?'Clip review':'Video review';
@@ -398,83 +311,21 @@ $('#edit-form').addEventListener('submit',async event=>{
  }catch(error){if(model.editGen===editGen)$('#edit-error').textContent=detailsSaved?`Details saved, but note could not be saved: ${error.message}`:error.message;/* Keep the captured entity and draft on conflict. */}
  finally{model.editSaving=false;button.disabled=false;$('#close-edit').disabled=false;}
 });
-async function refreshCoachingWorkers(){
- try{model.coachingWorkers=await api('/api/coaching/workers');}
- catch(error){model.coachingWorkers={enabled:false,error:true,workers:[],queue:{ai:{queued:0,active:0,needs_review:0},render:{queued:0,active:0}},ai_config:model.coachingWorkers?.ai_config||null};}
- return model.coachingWorkers;
-}
 function renderProcessingStatusPanel(){
- const panel=$('#processing-status');
- if(!panel)return;
- if(location.pathname==='/processing'){
-  if(model.savingAiConfig)return;
-  if(document.activeElement?.id==='coaching-default-model'){
-   const tmp=document.createElement('div');
-   tmp.innerHTML=processingShelvesHTML();
-   const nextVideo=tmp.querySelector('[data-shelf="video-processing"]'),curVideo=panel.querySelector('[data-shelf="video-processing"]');
-   if(nextVideo&&curVideo)curVideo.innerHTML=nextVideo.innerHTML;
-   const nextRender=tmp.querySelector('#worker-card-render'),curRender=panel.querySelector('#worker-card-render');
-   if(nextRender&&curRender)curRender.replaceWith(nextRender);
-   const nextMain=tmp.querySelector('#worker-card-ai .worker-card-main'),curMain=panel.querySelector('#worker-card-ai .worker-card-main');
-   if(nextMain&&curMain)curMain.replaceWith(nextMain);
-   applyBars();
-   return;
-  }
-  panel.innerHTML=processingShelvesHTML();
- }else{
-  panel.innerHTML=workerStatusHTML();
+ const statusHost=$('#review-worker-status');
+ if(statusHost&&isReviewListPath(location.pathname)){
+  statusHost.innerHTML=workerPortalLinkHTML();
  }
- applyBars();
 }
 async function refreshStatus(){
- const onProc=location.pathname==='/processing';
- const [status]=await Promise.all([
-  api('/api/status').catch(()=>({available:false,error:true})),
-  onProc?refreshCoachingWorkers():Promise.resolve(null),
- ]);
- model.status=status;
- updateProcessingDot();
+ model.status=await api('/api/status').catch(()=>({available:false,error:true,worker_health:{color:'red',label:'No workers running',online_count:0,total_count:1}}));
  renderProcessingStatusPanel();
 }
-document.addEventListener('change',async event=>{
- const select=event.target.closest?.('#coaching-default-model');
- if(!select||model.savingAiConfig)return;
- const cfg=model.coachingWorkers?.ai_config;
- if(!cfg)return;
- const selection=select.value;
- model.savingAiConfig=true;
- select.disabled=true;
- let refreshedAfterSave=false;
- try{
-  const updated=await api('/api/coaching/config',{method:'PUT',body:JSON.stringify({selection,version:cfg.version})});
-  if(!model.coachingWorkers)model.coachingWorkers={enabled:true,workers:[],queue:{ai:{queued:0,active:0,needs_review:0},render:{queued:0,active:0}}};
-  model.coachingWorkers.ai_config=updated;
-  await refreshCoachingWorkers();
-  if(!model.coachingWorkers.ai_config)model.coachingWorkers.ai_config=updated;
-  refreshedAfterSave=true;
-  toast('Default AI model updated.');
- }catch(error){
-  if(error.status===409&&error.current){
-   if(!model.coachingWorkers)model.coachingWorkers={enabled:true,workers:[],queue:{ai:{queued:0,active:0,needs_review:0},render:{queued:0,active:0}}};
-   model.coachingWorkers.ai_config=error.current;
-  }else if(!refreshedAfterSave){
-   await refreshCoachingWorkers();
-  }
-  toast(error.message);
- }finally{
-  model.savingAiConfig=false;
-  if(location.pathname==='/processing'&&$('#processing-status')){
-   $('#processing-status').innerHTML=processingShelvesHTML();
-   applyBars();
-   $('#coaching-default-model')?.focus();
-  }
- }
-});
-async function refreshShared(){if(location.pathname.endsWith('/compare'))return;if(document.hidden||['/processing','/learning'].includes(location.pathname)||location.pathname.startsWith('/processing/cuts/')||/^\/review\/[a-f0-9]{64}\/(cuts|compare)$/.test(location.pathname))return;try{if(model.session){const fresh=await api(`/api/sessions/${model.session.id}`);const playersChanged=JSON.stringify([fresh.players,fresh.player_assignment,fresh.clips.map(c=>[c.main_player,c.player_assignment])])!==JSON.stringify([model.session.players,model.session.player_assignment,model.session.clips.map(c=>[c.main_player,c.player_assignment])]);const changed=playersChanged||fresh.clips.some((c,i)=>c.like.version!==model.session.clips[i]?.like.version||c.details.version!==model.session.clips[i]?.details.version||c.highlighted!==model.session.clips[i]?.highlighted||c.highlight_count!==model.session.clips[i]?.highlight_count)||fresh.like.version!==model.session.like.version;model.session.players=fresh.players;model.session.recording_players=fresh.recording_players;model.session.player_assignment=fresh.player_assignment;model.session.like=fresh.like;model.session.overrides=fresh.overrides;model.session.title=fresh.title;model.session.location_label=fresh.location_label;model.session.court=fresh.court;model.session.court_status=fresh.court_status;model.session.court_name=fresh.court_name;fresh.clips.forEach(c=>{const current=model.session.clips.find(v=>v.id===c.id);if(current){current.like=c.like;current.highlighted=c.highlighted;current.highlight_count=c.highlight_count;current.highlights=c.highlights;current.title=c.title;current.details=c.details;current.main_player=c.main_player;current.players=c.players;current.player_assignment=c.player_assignment;}});updateReviewHeading();$('#review-location').textContent='⌾ '+locationText(fresh);if(changed){if(playersChanged){model.players=(await api('/api/players')).players;PlayerUI.syncReview();updatePlayerDownload();}refreshLikeButtons();renderClipList();}}else{const data=await api('/api/sessions');const fingerprint=JSON.stringify([data.players,data.courts,data.practice_groups,data.sessions.map(s=>[s.id,s.published_at,s.recorded_at_iso,s.like,s.overrides,s.players,s.player_assignment,s.clips.map(c=>[c.like,c.highlighted,c.highlight_count,c.main_player,c.player_assignment])])]);if(fingerprint!==model.fingerprint){model.fingerprint=fingerprint;model.sessions=data.sessions;model.practiceGroups=data.practice_groups||[];model.courts=data.courts||[];model.players=data.players||[];model.libraryAvailable=data.library_available;model.invalidSessions=data.invalid_sessions;PlayerUI.syncHome();homeResults();nav();CourtUI.renderSaved();}}}catch(error){/* Keep the current player and last loaded library during a transient outage. */}}
+async function refreshShared(){if(location.pathname.endsWith('/compare'))return;if(document.hidden||isReviewListPath(location.pathname)||location.pathname==='/learning'||location.pathname.startsWith('/processing/cuts/')||/^\/review\/[a-f0-9]{64}\/(cuts|compare)$/.test(location.pathname))return;try{if(model.session){const fresh=await api(`/api/sessions/${model.session.id}`);const playersChanged=JSON.stringify([fresh.players,fresh.player_assignment,fresh.clips.map(c=>[c.main_player,c.player_assignment])])!==JSON.stringify([model.session.players,model.session.player_assignment,model.session.clips.map(c=>[c.main_player,c.player_assignment])]);const changed=playersChanged||fresh.clips.some((c,i)=>c.like.version!==model.session.clips[i]?.like.version||c.details.version!==model.session.clips[i]?.details.version||c.highlighted!==model.session.clips[i]?.highlighted||c.highlight_count!==model.session.clips[i]?.highlight_count)||fresh.like.version!==model.session.like.version;model.session.players=fresh.players;model.session.recording_players=fresh.recording_players;model.session.player_assignment=fresh.player_assignment;model.session.like=fresh.like;model.session.overrides=fresh.overrides;model.session.title=fresh.title;model.session.location_label=fresh.location_label;model.session.court=fresh.court;model.session.court_status=fresh.court_status;model.session.court_name=fresh.court_name;fresh.clips.forEach(c=>{const current=model.session.clips.find(v=>v.id===c.id);if(current){current.like=c.like;current.highlighted=c.highlighted;current.highlight_count=c.highlight_count;current.highlights=c.highlights;current.title=c.title;current.details=c.details;current.main_player=c.main_player;current.players=c.players;current.player_assignment=c.player_assignment;}});updateReviewHeading();$('#review-location').textContent='⌾ '+locationText(fresh);if(changed){if(playersChanged){model.players=(await api('/api/players')).players;PlayerUI.syncReview();updatePlayerDownload();}refreshLikeButtons();renderClipList();}}else{const data=await api('/api/sessions');const fingerprint=JSON.stringify([data.players,data.courts,data.practice_groups,data.sessions.map(s=>[s.id,s.published_at,s.recorded_at_iso,s.has_staged_version,s.staged_version_count,s.like,s.overrides,s.players,s.player_assignment,s.clips.map(c=>[c.like,c.highlighted,c.highlight_count,c.main_player,c.player_assignment])])]);if(fingerprint!==model.fingerprint){model.fingerprint=fingerprint;model.sessions=data.sessions;model.practiceGroups=data.practice_groups||[];model.courts=data.courts||[];model.players=data.players||[];model.libraryAvailable=data.library_available;model.invalidSessions=data.invalid_sessions;PlayerUI.syncHome();homeResults();nav();CourtUI.renderSaved();}}}catch(error){/* Keep the current player and last loaded library during a transient outage. */}}
 window.addEventListener('hashchange',()=>{if(!model.session&&location.pathname==='/'){model.homeView=homeViewFromLocation();if($('#session-grid'))homeResults();else home();}});
 window.addEventListener('popstate',()=>{if(!model.session&&location.pathname==='/'){model.homeView=homeViewFromLocation();if($('#session-grid'))homeResults();else home();}});
 window.addEventListener('focus',()=>{refreshStatus();refreshShared();});
-async function boot(){try{const isProc=location.pathname==='/processing';const [data,status]=await Promise.all([api('/api/sessions'),api('/api/status').catch(()=>({available:false,error:true})),isProc?refreshCoachingWorkers():Promise.resolve(null)]);model.sessions=data.sessions;model.practiceGroups=data.practice_groups||[];model.courts=data.courts||[];model.players=data.players||[];model.libraryAvailable=data.library_available;model.invalidSessions=data.invalid_sessions;model.status=status;updateProcessingDot();const cutAlias=location.pathname.match(/^\/processing\/cuts\/([a-f0-9]{64})$/);const match=location.pathname.match(/^\/review\/([a-f0-9]{64})(\/(?:cuts|compare))?$/);if(cutAlias||match){const sid=cutAlias?cutAlias[1]:match[1];const isCompare=match?.[2]==='/compare';const isCuts=Boolean(cutAlias||match?.[2]==='/cuts');const s=await api(`/api/sessions/${sid}`);if(isCompare){await CutCompare.mount(s);document.title=`Compare versions · ${s.title} — Courtside`;}else if(isCuts){await NoteUI.cuts(s);document.title=`Review cut · ${s.title} — Courtside`;}else review(s);}else if(isProc)processingRoom();else if(location.pathname==='/learning')LearningUI.mount();else home();setInterval(refreshStatus,15000);setInterval(refreshShared,10000);}catch(error){$('#main').innerHTML=`<div class="empty"><p class="eyebrow">COURTSIDE</p><h1>We couldn’t open the library.</h1><p>${esc(error.message)}</p><a href="/" class="button primary">Try again</a></div>`;}}
+async function boot(){try{const isReviewList=isReviewListPath(location.pathname);const [data,status]=await Promise.all([api('/api/sessions'),api('/api/status').catch(()=>({available:false,error:true,worker_health:{color:'red',label:'No workers running',online_count:0,total_count:1}}))]);model.sessions=data.sessions;model.practiceGroups=data.practice_groups||[];model.courts=data.courts||[];model.players=data.players||[];model.libraryAvailable=data.library_available;model.invalidSessions=data.invalid_sessions;model.status=status;const cutAlias=location.pathname.match(/^\/processing\/cuts\/([a-f0-9]{64})$/);const match=location.pathname.match(/^\/review\/([a-f0-9]{64})(\/(?:cuts|compare))?$/);if(cutAlias||match){const sid=cutAlias?cutAlias[1]:match[1];const isCompare=match?.[2]==='/compare';const isCuts=Boolean(cutAlias||match?.[2]==='/cuts');const s=await api(`/api/sessions/${sid}`);if(isCompare){await CutCompare.mount(s);document.title=`Compare versions · ${s.title} — Courtside`;}else if(isCuts){await NoteUI.cuts(s);document.title=`Review cut · ${s.title} — Courtside`;}else review(s);}else if(isReviewList)reviewOverview();else if(location.pathname==='/learning')LearningUI.mount();else home();setInterval(refreshStatus,15000);setInterval(refreshShared,10000);}catch(error){$('#main').innerHTML=`<div class="empty"><p class="eyebrow">COURTSIDE</p><h1>We couldn’t open the library.</h1><p>${esc(error.message)}</p><a href="/" class="button primary">Try again</a></div>`;}}
 document.addEventListener('error',event=>{if(event.target.matches?.('img.clip-poster')){event.target.hidden=true;event.target.parentElement.classList.add('thumbnail-unavailable');}},true);
 CourtUI.init();
 PlayerUI.init();

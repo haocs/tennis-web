@@ -109,7 +109,6 @@ const NoteUI=(()=>{
  function current(){
   const b=$('#note-demote');if(!b||!source)return;const c=currentClip(),target=model.mode==='clip'?c:null,down=downvoted(target);b.disabled=model.busy.has(source.id+':'+(target?.id||'video'));b.setAttribute('aria-pressed',String(down));b.setAttribute('aria-label',(down?'Remove dislike from ':'Dislike ')+(target?'clip '+target.index:'video'));b.title=down?'Remove dislike':'Dislike';$('.player-reactions')?.setAttribute('aria-label',target?'Clip feedback':'Video feedback');
   const h=$('#note-highlight');if(h)h.disabled=!c;
-  const cutLink=$('.note-cut-link');if(cutLink&&source)cutLink.href=`/review/${source.id}/cuts${model.mode==='clip'&&model.current?'?clip='+encodeURIComponent(model.current):''}`;
   const scopeKey=model.mode+':'+model.current;if(lastCurrent!==scopeKey){lastCurrent=scopeKey;render();}markers();cueTick();
  }
  function jump(a,selectedFragment=null,preservePlayback=false){
@@ -535,7 +534,7 @@ const NoteUI=(()=>{
    if(e.target.closest('#moment-cues,.moment-cue')||$('#moment-toggle')?.getAttribute('aria-expanded')!=='true')setExpanded(true);
   });
   $('#moment-type').onchange=render;$('#notes-archived').onchange=render;
-  const more=$('.player-more');more.classList.remove('hidden');$('.player-more-list').insertAdjacentHTML('beforeend',`<a class="note-cut-link" href="/review/${s.id}/cuts">Review cut</a>`);
+  const more=$('.player-more');if(more)more.classList.remove('hidden');
   const toolbar=$('.clip-toolbar .toolbar');toolbar.insertAdjacentHTML('beforeend','<select id="note-clip-filter" aria-label="Clip focus"><option value="all">All clips</option><option value="recommended">Recommended</option><option value="liked">Liked only</option><option value="highlights">Highlights</option></select>');$('#note-clip-filter').value=model.noteFilter||'all';$('#note-clip-filter').onchange=e=>{model.noteFilter=e.target.value;renderClipList();};
   loadPromise=refresh(true);timer=setInterval(refresh,10000);
  }
@@ -886,7 +885,7 @@ const NoteUI=(()=>{
   const portalUrl=$('#main')?.dataset.processingUrl||'/processing';
   const portalLink=portalUrl!=='/processing'?`<span>·</span><a href="${esc(portalUrl)}" id="cut-portal-handoff">Worker Portal ↗</a>`:'';
   const recOptions=(model.sessions.length?model.sessions:[s]).map(r=>`<option value="${esc(r.id)}"${r.id===s.id?' selected':''}>${esc(r.title)}</option>`).join('');
-  $('#main').innerHTML=`<div class="review-breadcrumb"><a href="/review/${s.id}" id="cut-back-review">Back to review</a><span>/</span><a href="/processing">Processing Room</a>${portalLink}<span>/</span><span>Review cut</span><a class="button small" href="/review/${s.id}/compare">Compare versions</a></div>
+  $('#main').innerHTML=`<div class="review-breadcrumb"><a href="/review/${s.id}" id="cut-back-review">Back to review</a><span>/</span><a href="/review">Review</a>${portalLink}<span>/</span><span>Review cut</span><a class="button small" href="/review/${s.id}/compare">Compare versions</a></div>
   <header class="cut-header"><div><h1>Review cut</h1></div><div class="cut-context-selectors"><label>Recording<select id="cut-recording" aria-label="Recording">${recOptions}</select></label><label>Reviewed version<select id="cut-version" aria-label="Reviewed version"></select></label></div></header>
   <div id="cut-version-banner" class="cut-version-banner" role="status" hidden></div>
   <section class="cut-timeline-section" id="cut-timeline-section" aria-label="Original recording timeline"><div class="cut-timeline-header"><span id="cut-timeline-summary" class="cut-timeline-summary"></span><div class="cut-target-toolbar"><label>Clip<select id="cut-clip" aria-label="Review clip"></select></label><label>Removed gap<select id="cut-gap" aria-label="Removed gap"></select></label><div class="cut-gap-nav"><button type="button" class="button small" id="cut-prev-gap">Prev gap</button><button type="button" class="button small" id="cut-next-gap">Next gap</button></div></div></div><div id="cut-timeline-bar" class="cut-timeline-bar" role="group" aria-label="Original recording timeline"></div></section>
