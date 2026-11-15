@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.26.0 — 2026-11-15
+
+- Clip Study & AI Coach workflow UX redesign:
+  - Unified `Study & AI Coach` entry pill with live status badge (`Preparing…`, `Analyzing…`, `Needs attention`, `<N> tips`) and clear separation between instant local study controls (`Full clip`, `Reset framing`, `Auto-frame motion`) and async server jobs (`Ask AI Coach`, `Prepare video download`).
+  - Durable two-step coaching request card (`1. Prepare video frames` -> `2. AI Coach review`) with multi-session background polling recovery across modal close, `page.reload()`, and clip/recording switches; serialized submit/cancel state machine (`runOpSubmit`, `cancelInFlight`); idempotent `Retry` / `Dismiss` on pre-handoff/submit failures; and truthful cancellation (`409` non-cancellable protection once provider call enters `calling`).
+  - Suggestions-first response cards (`New tip` / `Saved to Moments`, primary `View key frame`, `Loop moment`, `Save to Moments`, `More actions`), secondary controls grouped under `Review details` with inline two-step `Cancel` / `Confirm delete`, and durable frozen-selection `Prepare video download` card (`Cancel download` / `Save video`).
+
 ## v0.25.0 — 2026-11-14
 
 - Clip Study AI coach review & movement inspection (`COACHING-INSPECTION-DESIGN.md`):
