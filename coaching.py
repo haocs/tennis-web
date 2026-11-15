@@ -568,7 +568,7 @@ class Coaching(Annotations):
                     role='ai'
                     OR (
                       role='render'
-                      AND json_extract(body,'$.auto_detect')=1
+                      AND COALESCE(json_extract(body,'$.intent'),'coaching')!='share'
                       AND state IN ('queued','leased','completed')
                       AND NOT EXISTS (
                         SELECT 1 FROM jobs AS a
@@ -673,7 +673,7 @@ class Coaching(Annotations):
                 elif (
                     row['role']=='render'
                     and state=='completed'
-                    and body.get('auto_detect')
+                    and body.get('intent')!='share'
                     and not db.execute("SELECT 1 FROM jobs WHERE role='ai' AND json_extract(body,'$.export_id')=?",(identity,)).fetchone()
                 ):
                     state='cancelled'

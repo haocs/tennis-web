@@ -37,24 +37,45 @@
           <div class="study-play-buttons"><button class="study-button study-icon-button" id="study-back" type="button" aria-label="Step back 0.1 seconds" title="Step back 0.1 seconds" disabled>&lt;</button><button class="study-button study-primary study-icon-button" id="study-play" type="button" aria-label="Play" title="Play" disabled><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M8 5v14l11-7z"/></svg></button><button class="study-button study-icon-button" id="study-forward" type="button" aria-label="Step forward 0.1 seconds" title="Step forward 0.1 seconds" disabled>&gt;</button></div>
           <label class="study-speed" for="study-speed"><span class="sr-only">Playback speed</span><select id="study-speed" class="player-speed-select study-speed-select" aria-label="Playback speed"><option value="0.1">0.1×</option><option value="0.25">0.25×</option><option value="0.35">0.35×</option><option value="0.5" selected>0.5×</option><option value="0.75">0.75×</option><option value="1">1×</option></select></label>
           <button class="study-button study-icon-button" id="study-loop" type="button" aria-pressed="false" aria-label="Loop clip" title="Loop selected interval"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z"/></svg></button>
+        </div>
+        <div class="study-framing-row">
           <div class="study-zoom-row"><label for="study-zoom">Zoom</label><input id="study-zoom" type="range" min="1" max="4" step="0.25" value="1" aria-label="Video zoom"><output id="study-zoom-value" for="study-zoom">1×</output></div>
-          <button class="study-button" id="study-auto-detect" type="button" disabled>Auto select &amp; zoom</button><button class="study-button" id="study-auto-cancel" type="button" hidden>Cancel scan</button>
-          <button class="study-button study-download-interval" id="study-download-interval" type="button" disabled>Download interval</button>
-          <a class="study-button" id="study-download-ready" download hidden>Save video</a>
+          <button class="study-button" id="study-full-clip" type="button" disabled>Full clip</button>
+          <button class="study-button" id="study-reset-framing" type="button" disabled>Reset framing</button>
+          <button class="study-button" id="study-auto-detect" type="button" disabled>Auto-frame motion</button>
+          <button class="study-button" id="study-auto-cancel" type="button" hidden>Cancel scan</button>
+          <div class="study-auto-stepper" id="study-auto-stepper" hidden><button class="study-button" id="study-auto-prev" type="button" aria-label="Previous detected moment">Prev</button><span class="study-auto-count" id="study-auto-count">1 of 1</span><button class="study-button" id="study-auto-next" type="button" aria-label="Next detected moment">Next</button></div>
+        </div>
+        <p class="study-hint study-scan-hint" id="study-scan-hint">Auto-frame scans this clip locally in your browser to suggest motion windows and zoom.</p>
+        <div class="study-download-bar">
+          <div class="study-download-action">
+            <button class="study-button study-download-interval" id="study-download-interval" type="button" disabled>Prepare video download</button>
+            <span class="study-hint study-inline-hint">Background worker · renders cropped or slowed MP4 with sound</span>
+          </div>
+          <div class="study-download-card" id="study-download-card" hidden>
+            <div class="study-download-card-copy">
+              <strong id="study-download-heading">Prepared video download</strong>
+              <p class="study-hint" id="study-download-summary"></p>
+            </div>
+            <div class="study-download-card-actions">
+              <button class="study-button" id="study-download-cancel" type="button" hidden>Cancel download</button>
+              <a class="study-button study-primary" id="study-download-ready" download hidden>Save video</a>
+            </div>
+          </div>
         </div>
         <details class="study-control-help"><summary>Shortcuts & gestures</summary><p class="study-hint">Drag interval boundaries to select an interval. Drag video to pan when zoomed; pinch to zoom. ← / → seek 0.1s; Shift seeks 1s.</p></details>
       </div>
     </section>
-    <aside class="study-sidebar" aria-label="Processor context and AI review preparation">
-      <section class="study-panel"><h3>Recording details</h3><dl class="study-facts" id="study-facts"></dl><div id="study-observations"><p class="study-muted">Loading published observations…</p></div></section>
-      <section class="study-panel"><h3>Frames</h3>
+    <aside class="study-sidebar" aria-label="AI Coach and clip tools">
+      <details class="study-panel study-extra-disclosure" id="study-manual-frames"><summary>Manual frame export</summary>
         <div class="study-export-choice"><a class="study-button" id="study-download" download>Download clip</a><button class="study-button" id="study-sample" type="button" disabled>Sample 6 moments</button><button class="study-button" id="study-capture" type="button" disabled>Add current frame</button></div>
         <p class="study-hint" id="study-frame-hint">Up to 6 frames · unzoomed JPEGs</p><div class="study-frames" id="study-frames" aria-label="Selected frames"></div>
         <button class="study-button" id="study-export" type="button" disabled>Download frame package</button><button class="study-button" id="study-cancel-capture" type="button" hidden>Cancel sampling</button>
         <label class="study-prompt-label" for="study-prompt">Review prompt</label><textarea id="study-prompt" rows="5" readonly spellcheck="false"></textarea>
         <div class="study-ai-actions"><button class="study-button study-primary" id="study-copy" type="button">Copy prompt</button></div>
         <p class="study-hint">Attach the downloaded clip or extracted JPEGs in any AI chat, then paste the prompt. Frames omit motion; HDR colors may vary.</p>
-      </section>
+      </details>
+      <details class="study-panel study-extra-disclosure" id="study-recording-details"><summary>Recording details</summary><dl class="study-facts" id="study-facts"></dl><div id="study-observations"><p class="study-muted">Loading published observations…</p></div></details>
     </aside>
   </div>
   <p id="study-status" class="study-status" role="status" aria-live="polite"></p>

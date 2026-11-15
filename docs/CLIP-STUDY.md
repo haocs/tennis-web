@@ -1,15 +1,14 @@
 # Clip study
 
 Local implementation of [issue 11](https://github.com/haocs/tennis-web/issues/11).
-Entry button: **Study clip**. Focused view: **Clip study**. Release and NAS deployment are separate operator-controlled steps.
+Entry button: **Study & AI Coach** (with live status badge). Focused view: **Clip study**. Release and NAS deployment are separate operator-controlled steps.
 
 ## Interaction design
 
-Select an individual clip, then use the **Study clip** magnifier beside Like. This
-action is hidden while the combined practice is loaded. The normal player keeps
-its lightweight overlays and compact action layout from PR 24. It opens a modal focused on that clip. Desktop uses a large
-video/control column and an independently scrolling context/AI column. Mobile stacks
-those sections with a sticky return header. Native dialog focus trapping and Escape
+Select an individual clip, then use the **Study & AI Coach** pill beside Like. This
+action is hidden while the combined practice is loaded and surfaces live coaching state (`Preparing…`, `Analyzing…`, `N tips`, or `Needs attention`). The normal player keeps
+its lightweight overlays and compact action layout from PR 24. Opening it launches a modal focused on that clip. Desktop uses a large
+video/control column and an independently scrolling AI Coach/tools column. Mobile separates **Watch & Frame** and **AI Coach** tabs with a sticky return header. Native dialog focus trapping and Escape
 are retained; returning restores the studied clip position, paused, and the parent's
 original playback speed. Study never auto-advances to a different clip.
 
@@ -26,21 +25,17 @@ stepping, seeking and looping are strictly bounded to the selected `[start, end]
 interval: playback pauses at the end boundary unless loop is enabled, in which case
 it wraps directly back to the start boundary.
 
-Compact transport controls provide `<` (0.1-second step back), a play/pause icon
-button, `>` (0.1-second step forward), a watch-style playback speed selector
-(`0.1×`–`1×`), a loop icon toggle (`aria-pressed`), a `1×`–`4×` zoom scrubber with
-bounded drag-to-pan and touch pinch, and a high-quality **Download interval**
-action. Mute and Reset view buttons are omitted to keep the transport bar compact.
-Arrow keys seek 0.1 seconds and Shift+arrow seeks one second within the selected
-interval, outside form controls. These are browser time seeks, not a guarantee of
-frame-exact decoding.
+Controls clearly separate local instant playback from framing and background jobs:
+- **Instant playback transport**: `<` (0.1-second step back), Play/Pause, `>` (0.1-second step forward), speed (`0.1×`–`1×`), and loop toggle (`aria-pressed`). Arrow keys seek 0.1 seconds and Shift+arrow seeks 1 second within the selected interval outside form controls (browser time seeks, not frame-exact decoding).
+- **Selection & local framing**: `1×`–`4×` zoom scrubber with bounded drag-to-pan and touch pinch, **Full clip** (resets interval bounds only while preserving zoom/pan and speed), **Reset framing** (resets zoom/pan only while preserving interval and speed), and **Auto-frame motion** (scans the clip locally in the browser and reveals a **Prev** / `1 of N` / **Next** stepper when motion windows are found).
+- **Background video download**: **Prepare video download** queues a high-quality cropped/slowed MP4 render (`intent: "share"`), shows a durable frozen-selection recovery bar with **Cancel download** while running and **Save video** once ready, and survives selection edits, modal close, and page reloads without losing progress or clobbering newer selections.
 
 ## Watch player integration
 
 The watch page retains its existing markup, player.js and watch styles. One
 `ClipStudy.updateEntry` call in the current-video update function supplies the
-button element, session, selected clip, player and versioned media URL. The watch
-page places the magnifier action beside Like; the study module shows it for clips,
+button element, session, selected clip, player and versioned media URL, while `Coach.watch`
+keeps the live status badge updated. The watch page places the **Study & AI Coach** pill beside Like; the study module shows it for clips,
 returns focus to it on close, and owns all modal behavior. This keeps
 layout work in the normal player independent of the study view.
 
@@ -80,12 +75,14 @@ change. This feature consumes the optional contract without changing that pipeli
 
 ## Coaching and sharing
 
-The primary **Ask coach** flow freezes the selected interval, crop, speed and
-question, prepares the excerpt, then requests a structured frame-sequence review.
-See [coaching and render-worker contracts](COACHING.md). Nothing calls AI merely
-because Study opens. **Download interval** creates a separate sharing artifact;
+The primary **Ask AI Coach** flow freezes the selected interval, crop, speed and
+question inside the collapsible composer, prepares the excerpt in the background,
+and automatically hands off to the AI review worker even if the dialog is closed,
+clips are switched, or the page is reloaded (with two-step progress, atomic
+cancellation, and idempotent retry for transient errors). See [coaching and render-worker contracts](COACHING.md). Nothing calls AI merely
+because Study opens. **Prepare video download** creates a separate sharing artifact;
 it neither starts AI nor becomes coaching evidence. Old responses cannot replace
-the result for a newer selection or reopened clip.
+the result for a newer selection or reopened clip. Secondary utilities (**Manual frame export** and **Recording details**) live in separate collapsed disclosures below the AI Coach panel.
 
 ## Optional manual frame preparation
 

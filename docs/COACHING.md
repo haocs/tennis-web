@@ -6,50 +6,42 @@ container. The original tennis-processing service and worker are untouched.
 
 ## User flow
 
-Open **Study clip**, adjust the **Interval start** and **Interval end** pins on the
-study progress bar (0.1–30 seconds for coaching), or click **Auto select & zoom**
-next to the zoom slider to locally select and zoom to up to 5 player-motion
-moments (`Next moment (k/N)`), adjust framing/pan if needed, and choose
-playback speed (`0.1×`–`1×`). Model-neutral UI copy refers to the **AI coach**
+Open **Study & AI Coach**, adjust the **Interval start** and **Interval end** pins on the
+study progress bar (0.1–30 seconds for coaching), or click **Auto-frame motion**
+next to the zoom slider to locally scan and suggest up to 5 player-motion
+windows (cycling locally via **Prev** / `1 of N` / **Next**), adjust framing/pan (or reset cleanly via **Full clip** / **Reset framing**), and choose
+playback speed (`0.1×`–`1×`). Model-neutral UI copy refers to **AI Coach**
 rather than naming a specific provider; actual provider/model routing is
 managed in `/processing`.
 
-In **Ask a coach**, confirm or change **Player to coach** (defaults to the clip's
-assigned main player without mutating clip or recording rosters; see
+In the **Ask a question** composer inside **AI Coach** (auto-collapsed once completed reviews exist), confirm or change **Player to coach** via **Change player** (auto-opened only when player review is needed or customized, without mutating clip or recording rosters; see
 [COACHING-SUBJECT.md](COACHING-SUBJECT.md)), optionally add a concise visible target
-cue, pick a preset question or type a custom question, and click **Ask coach**. The
+cue, pick a preset question (or open **Edit question** to type a custom question), and click **Ask AI Coach**. The
 browser captures an immutable snapshot of the selected player context, interval,
-normalized crop, playback speed and prompt:
+normalized crop, playback speed and prompt, and persists an application-level request coordinator (`sessionStorage`) so progress continues cleanly in the background across modal close, clip switches, and reloads:
 
-1. **Preparing your clip…** — queues a `render` job (`intent: "coaching"`) that
+1. **Preparing clip (`render`)** — queues a `render` job (`intent: "coaching"`) that
    renders the cropped, speed-adjusted SDR H.264 preview (`max_edge: 960`, muted)
    and extracts up to 32 chronological evidence frames.
-2. **Getting response…** — once the coaching excerpt completes, automatically
-   submits the `ai` request using the dedicated Mac/Windows AI worker
+2. **AI Coach review (`ai`)** — once the coaching excerpt completes, automatically
+   submits the `ai` request (even if Study was closed) using the dedicated Mac/Windows AI worker
    (`coaching-annotations-v1`) and its locally configured provider(s) (`antigravity`,
    `codex` / ChatGPT, and/or `gemini`, optionally steered by the Processing Room
-   **Default model** setting). This is **not native video analysis**; frame density is
-   bounded and can miss events between frames.
-3. **Review response** — displays the AI coach summary, structured suggestions, and
-   clickable original-recording evidence stills. New AI suggestions remain
-   `proposed` until explicitly accepted via **Use in playback** (or **Use for
-   current video** when a recording was reprocessed), edited and saved via **Save**
-   (with **Reset edits** to abandon unsaved form changes), or dismissed via the
-   top-right **×** discard button. Accepted coaching Moments display during their
-   playback-time interval (5-second playback-time span from start for point cues,
+   **Default model** setting). Completed reviews show a clear 2-step progress transition while running, and remain atomically cancellable until the worker enters `calling` (after which cancellation is disabled truthfully). Failed pre-handoff/submit requests support idempotent **Retry** with the same `request_id`. This is **not native video analysis**; frame density is bounded and can miss events between frames.
+3. **Review response** — puts suggestions and active progress first, showing the AI Coach summary, compact **New tip** / **Saved to Moments** cards, primary clickable key frame thumbnails (`View key frame`), **Loop moment**, **Save to Moments** (or **Use for current video** when a recording was reprocessed), and a **More actions** menu holding **Play walkthrough**, **Dismiss suggestion**, and **Edit suggestion or timing**. Secondary per-review tools (**Question asked**, **All submitted snapshots**, **Add your own suggestion**, **Original AI response**, and **Delete review**) are grouped inside **Review details**, and **Export coaching data (JSON)** exports full session annotations/revision history. Accepted coaching Moments display during their playback-time interval (5-second playback-time span from start for point cues,
    bounded by the clip) without wall-clock expiry timers, and clicking **Review**
    on a coaching Moment or Learning item deep-links directly into Clip study with
    the target interval and card highlighted. Coaching requests and cards record
    immutable `asked_at` timestamps so edits or status changes do not reorder
-   historical questions. Saved coaching reviews can also be deleted cleanly from
-   Clip Study (`Delete review`), Moments (`⋯` → `Delete review`), or the Learning
+   historical questions. Saved coaching reviews require an explicit inline confirmation (`Confirm delete` / `Cancel`) before deleting from
+   Clip Study (`Review details` → `Delete review`), Moments (`⋯` → `Delete review`), or the Learning
    room (`Delete review`).
 
 ### High-quality interval download (`intent: "share"`)
 
-Clicking **Download interval** in Clip study queues a separate render profile
+Clicking **Prepare video download** in Clip study queues a separate render profile
 (`intent: "share"`, `quality: "high"`, `required_capability: "share-export-v2"`,
-`renderer_version: 3`):
+`renderer_version: 3`), persisting a durable frozen-selection card (**Cancel download** while queued/working, **Save video** once ready) across selection edits, modal close, and reloads without overwriting newer selection exports:
 
 - Preserves the selected `[start, end]` interval, normalized zoom/pan crop, and
   playback speed at high spatial quality (`max_edge: 1920` without upscaling,

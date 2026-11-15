@@ -55,6 +55,42 @@
  #clip-study[data-mobile-mode=coach]{scroll-padding-top:var(--coach-anchor-height,340px);scroll-padding-bottom:56px}
  #clip-study[data-mobile-mode=coach][data-coach-inspecting=true]:not([data-player-collapsed=true]) .study-stage{height:min(26dvh,200px)}
  .coach-nav{scroll-margin-top:var(--coach-anchor-height,340px)}
- .coach-nav .study-button,.coach-inspect-bar .study-button,.coach-timing .study-button,.coach-range-chip{min-height:44px}
+ .coach-nav .study-button,.coach-inspect-bar .study-button,.coach-timing .study-button,.coach-range-chip,.coach-active-actions .study-button,.coach-delete-wrap .study-button,.coach-inline-link{min-height:44px}
  .coach-inspect-bar .coach-inspect-btn,.coach-nav .coach-nav-btn,.coach-overlay-btn,.coach-exit-btn{width:auto;flex:0 1 auto}
 }
+.coach-active-request{margin:10px 0 14px;padding:12px;border:1px solid #597254;border-radius:10px;background:#13261d}
+.coach-active-request[data-stage="failed"],.coach-active-request[data-stage="needs_attention"]{border-color:#9e5a47;background:#2b1a16}
+.coach-active-head{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:8px}
+.coach-active-head strong{font-size:13px;color:#edf5c9}
+.coach-active-pill{font-size:11px;font-weight:700;padding:2px 8px;border-radius:999px;background:#233b2e;color:#d9ed91}
+.coach-progress-steps{list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:6px}
+.coach-progress-step{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:7px 10px;border-radius:7px;background:#101e1a;border:1px solid #36483d;font-size:12px}
+.coach-progress-step[data-state="active"],.coach-progress-step[data-state="calling"]{border-color:#82a86b;color:#eef7cf}
+.coach-progress-step[data-state="done"]{border-color:#4d7a59;color:#bfe7c7}
+.coach-progress-step[data-state="failed"],.coach-progress-step[data-state="attention"]{border-color:#b2604b;color:#ffd2c2}
+.coach-step-state{font-size:11px;font-weight:600;color:#b9c8b1}
+.coach-active-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+.coach-composer{margin:10px 0 14px;border:1px solid #46594b;border-radius:10px;background:#15251e;padding:0 12px}
+.coach-composer>summary{list-style:none;font-size:14px;font-weight:650;color:#e7f3c6;min-height:42px;display:flex;align-items:center;justify-content:space-between;gap:8px}
+.coach-composer>summary::-webkit-details-marker{display:none}
+.coach-composer>summary::after{content:'▸';color:#b2c0b5;font-size:12px}
+.coach-composer[open]>summary::after{content:'▾'}
+.coach-composer-body{padding:4px 0 14px;border-top:1px solid #2b3d33}
+.coach-summary-row{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:8px 0}
+.coach-summary-row p,.coach-summary-row span{margin:0!important;flex:1;min-width:0}
+.coach-inline-link{min-height:32px;padding:4px 10px;font-size:11px;white-space:nowrap;flex-shrink:0}
+.coach-background-hint{margin-top:8px!important}
+.coach-tab-badge{display:inline-flex;align-items:center;margin-left:6px;padding:1px 6px;border-radius:999px;font-size:10px;font-weight:700;background:#263d30;color:#e4f2b8}
+.coach-tab-badge[data-stage="attention"]{background:#6b261d;color:#ffe2da}
+.coach-more-menu{position:relative;display:inline-block}
+.coach-more-menu>summary{list-style:none}
+.coach-more-menu>summary::-webkit-details-marker{display:none}
+.coach-more-body{margin-top:8px;padding:10px;border:1px solid #46594b;border-radius:8px;background:#101e1a;display:flex;flex-direction:column;gap:8px;width:100%;box-sizing:border-box}
+.coach-more-menu[open]{width:100%}
+.coach-review-details{margin-top:10px;border-top:1px solid #36483d;padding-top:6px}
+.coach-review-details>summary{font-size:12px;font-weight:600;color:#c9d8be}
+.coach-review-details-body{display:flex;flex-direction:column;gap:8px;padding-top:8px}
+.coach-delete-confirm{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:8px 10px;border:1px solid #9e5a47;border-radius:8px;background:#2b1a16;font-size:12px}
+.coach-delete-confirm span{color:#ffd8cb;font-weight:600}
+.coach-delete-confirm-btn{background:#9b3723!important;border-color:#c66953!important;color:#fff!important}
+.coach-single-timing{margin:4px 0 0!important}

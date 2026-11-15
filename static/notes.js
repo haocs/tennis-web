@@ -273,10 +273,31 @@ const NoteUI=(()=>{
     if(b.dataset.noteAction==='delete-coach'){
      const jobId=a.origin?.job_id||(a.id.startsWith('coach-response:')?a.id.slice(15):'');
      if(!jobId)throw new Error('Could not find coaching review to delete.');
-     await api('/api/coaching/jobs/'+encodeURIComponent(jobId),{method:'DELETE',body:JSON.stringify({})});
-     await refresh(true);
-     window.dispatchEvent(new Event('coach-notes-changed'));
-     toast('Coaching review deleted.');
+     let confirmBox=card.querySelector('.note-delete-confirm');
+     if(!confirmBox){
+      confirmBox=document.createElement('div');
+      confirmBox.className='note-delete-confirm';
+      confirmBox.dataset.confirmingDelete='true';
+      confirmBox.innerHTML='<span>Delete this review and its saved Moments?</span><button type="button" class="button small danger-button" data-note-confirm-delete>Confirm delete</button><button type="button" class="button small" data-note-cancel-delete>Cancel</button>';
+      card.append(confirmBox);
+      const confirmBtn=confirmBox.querySelector('[data-note-confirm-delete]');
+      const cancelBtn=confirmBox.querySelector('[data-note-cancel-delete]');
+      cancelBtn.onclick=()=>{confirmBox.remove();b.focus({preventScroll:true});};
+      confirmBtn.onclick=async()=>{
+       confirmBtn.disabled=cancelBtn.disabled=true;
+       try{
+        await api('/api/coaching/jobs/'+encodeURIComponent(jobId),{method:'DELETE',body:JSON.stringify({})});
+        await refresh(true);
+        window.dispatchEvent(new Event('coach-notes-changed'));
+        toast('Coaching review deleted.');
+       }catch(e){
+        toast(e.message);
+        confirmBtn.disabled=cancelBtn.disabled=false;
+        if(e.status===409)await refresh(true);
+       }
+      };
+     }
+     confirmBox.querySelector('[data-note-confirm-delete]')?.focus({preventScroll:true});
     }
    }catch(e){toast(e.message);if(e.status===409)await refresh(true);}finally{b.disabled=false;}
   });

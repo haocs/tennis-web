@@ -155,7 +155,7 @@
       return `For ${player.name} (clip main player) · height and level are included; name stays in this library.`;
     }
     if (player) {
-      return `For ${player.name} (this request only; clip player unchanged) · height and level included; name stays local. Auto select & zoom scans foreground motion, not player identity.`;
+      return `For ${player.name} (this request only; clip player unchanged) · height and level included; name stays local. Auto-frame motion scans foreground motion, not player identity.`;
     }
     if (defaultValue && byId[defaultValue]) {
       return `No player profile for this request (clip player stays ${byId[defaultValue].name}) · advice stays on this clip only.`;
@@ -431,12 +431,307 @@
     return {nowText, tryText, phaseLabel, bodyAreaLabels};
   }
 
+  function shortClock(seconds) {
+    const input = Number(seconds);
+    const ms = Math.round(Math.max(0, Number.isFinite(input) ? input : 0) * 1000);
+    const whole = Math.floor(ms / 1000);
+    const s = whole % 60;
+    const m = Math.floor(whole / 60) % 60;
+    const h = Math.floor(whole / 3600);
+    const base = (h ? h + ':' + String(m).padStart(2, '0') : String(m)) + ':' + String(s).padStart(2, '0');
+    const frac = ms % 1000;
+    return frac ? base + '.' + String(frac).padStart(3, '0').replace(/0+$/, '') : base;
+  }
+
+  function formatExcerptSummary(selection = {}, clipDuration = 0) {
+    const dur = finite(clipDuration) && clipDuration > 0 ? clipDuration : null;
+    const rawStart = finite(selection?.start) ? Math.max(0, selection.start) : 0;
+    const rawEnd = finite(selection?.end) ? Math.max(rawStart, selection.end) : (dur ?? rawStart);
+    const start = dur !== null ? clamp(rawStart, 0, dur) : rawStart;
+    const end = dur !== null ? clamp(rawEnd, start, dur) : rawEnd;
+    const speed = finite(selection?.speed) && selection.speed > 0 ? Number(selection.speed.toFixed(2)) : 0.5;
+    const zoom = finite(selection?.zoom) && selection.zoom >= 1 ? Number(selection.zoom.toFixed(2)) : 1;
+    const isFull = dur !== null && Math.abs(start) < 0.02 && Math.abs(end - dur) < 0.02;
+    const rangeLabel = isFull
+      ? `Full clip (${shortClock(start)}–${shortClock(end)})`
+      : `${shortClock(start)}–${shortClock(end)}`;
+    return `${rangeLabel} · ${speed}× · ${zoom}× zoom`;
+  }
+
+  function deriveActiveRequestState({pendingOp = null, renderJob = null, aiJob = null} = {}) {
+    if (aiJob) {
+      if (aiJob.state === 'calling') {
+        return {
+          stage: 'analyzing',
+          headline: 'Analyzing',
+          prepState: 'done',
+          aiState: 'active',
+          canCancel: false,
+          nonCancellableNote: 'Analysis has started and can’t be cancelled.',
+          badgeText: 'Analyzing…',
+        };
+      }
+      if (aiJob.state === 'leased') {
+        return {
+          stage: 'analyzing',
+          headline: 'Analyzing',
+          prepState: 'done',
+          aiState: 'active',
+          canCancel: true,
+          nonCancellableNote: '',
+          badgeText: 'Analyzing…',
+        };
+      }
+      if (aiJob.state === 'queued') {
+        return {
+          stage: 'waiting_ai',
+          headline: 'Waiting for AI',
+          prepState: 'done',
+          aiState: 'waiting',
+          canCancel: true,
+          nonCancellableNote: '',
+          badgeText: 'Waiting for AI…',
+        };
+      }
+      if (aiJob.state === 'needs_review') {
+        return {
+          stage: 'needs_attention',
+          headline: 'Needs attention',
+          prepState: 'done',
+          aiState: 'attention',
+          canCancel: false,
+          nonCancellableNote: '',
+          badgeText: 'Needs attention',
+        };
+      }
+      if (aiJob.state === 'failed') {
+        return {
+          stage: 'failed',
+          headline: 'Failed',
+          prepState: 'done',
+          aiState: 'failed',
+          canCancel: false,
+          nonCancellableNote: '',
+          badgeText: 'Needs attention',
+        };
+      }
+      if (aiJob.state === 'completed' || aiJob.state === 'cancelled') return null;
+    }
+
+    if (pendingOp && !pendingOp.cancelled) {
+      const reused = Boolean(pendingOp.prepReused || (renderJob && renderJob.state === 'completed'));
+      if (pendingOp.phase === 'failed') {
+        return {
+          stage: 'failed',
+          headline: 'Failed',
+          prepState: reused ? 'done' : 'failed',
+          aiState: reused ? 'failed' : 'pending',
+          canCancel: false,
+          nonCancellableNote: '',
+          badgeText: 'Needs attention',
+        };
+      }
+      if (renderJob) {
+        if (renderJob.state === 'completed') {
+          return {
+            stage: 'waiting_ai',
+            headline: 'Waiting for AI',
+            prepState: 'done',
+            aiState: 'waiting',
+            canCancel: true,
+            nonCancellableNote: '',
+            badgeText: 'Waiting for AI…',
+          };
+        }
+        if (renderJob.state === 'leased') {
+          return {
+            stage: 'preparing',
+            headline: 'Preparing clip',
+            prepState: 'active',
+            aiState: 'pending',
+            canCancel: true,
+            nonCancellableNote: '',
+            badgeText: 'Preparing…',
+          };
+        }
+        if (renderJob.state === 'queued') {
+          return {
+            stage: 'waiting_prepare',
+            headline: 'Waiting to prepare',
+            prepState: 'waiting',
+            aiState: 'pending',
+            canCancel: true,
+            nonCancellableNote: '',
+            badgeText: 'Preparing…',
+          };
+        }
+        if (renderJob.state === 'failed') {
+          return {
+            stage: 'failed',
+            headline: 'Failed',
+            prepState: 'failed',
+            aiState: 'pending',
+            canCancel: false,
+            nonCancellableNote: '',
+            badgeText: 'Needs attention',
+          };
+        }
+        if (renderJob.state === 'cancelled') return null;
+      }
+      if (reused) {
+        return {
+          stage: 'waiting_ai',
+          headline: 'Waiting for AI',
+          prepState: 'done',
+          aiState: 'waiting',
+          canCancel: true,
+          nonCancellableNote: '',
+          badgeText: 'Waiting for AI…',
+        };
+      }
+      return {
+        stage: 'waiting_prepare',
+        headline: 'Waiting to prepare',
+        prepState: 'waiting',
+        aiState: 'pending',
+        canCancel: true,
+        nonCancellableNote: '',
+        badgeText: 'Preparing…',
+      };
+    }
+
+    if (renderJob) {
+      if (renderJob.state === 'leased') {
+        return {
+          stage: 'preparing',
+          headline: 'Preparing clip',
+          prepState: 'active',
+          aiState: 'pending',
+          canCancel: true,
+          nonCancellableNote: '',
+          badgeText: 'Preparing…',
+        };
+      }
+      if (renderJob.state === 'queued') {
+        return {
+          stage: 'waiting_prepare',
+          headline: 'Waiting to prepare',
+          prepState: 'waiting',
+          aiState: 'pending',
+          canCancel: true,
+          nonCancellableNote: '',
+          badgeText: 'Preparing…',
+        };
+      }
+      if (renderJob.state === 'failed') {
+        return {
+          stage: 'failed',
+          headline: 'Failed',
+          prepState: 'failed',
+          aiState: 'pending',
+          canCancel: false,
+          nonCancellableNote: '',
+          badgeText: 'Needs attention',
+        };
+      }
+    }
+
+    return null;
+  }
+
+  function matchPendingAiJob(pendingOp, jobs = []) {
+    if (!pendingOp || !Array.isArray(jobs) || !jobs.length) return null;
+    if (pendingOp.aiJobId) {
+      return jobs.find(j => j && j.id === pendingOp.aiJobId) || null;
+    }
+    if (pendingOp.phase === 'failed') return null;
+    if (pendingOp.askRequestId) {
+      const byReq = jobs.find(j => j && j.role === 'ai' && (j.request_id === pendingOp.askRequestId || j.body?.request_id === pendingOp.askRequestId));
+      if (byReq) return byReq;
+    }
+    if (!pendingOp.exportId) return null;
+    const known = new Set(Array.isArray(pendingOp.knownAiIds) ? pendingOp.knownAiIds : []);
+    return jobs.find(j =>
+      j &&
+      j.role === 'ai' &&
+      j.body?.export_id === pendingOp.exportId &&
+      !known.has(j.id) &&
+      ['queued', 'leased', 'calling'].includes(j.state)
+    ) || null;
+  }
+
+  function deriveClipCoachBadge({jobs = [], annotations = [], pendingOp = null, clip = null, publication = null} = {}) {
+    if (!clip || !clip.id) return {kind: 'idle', count: 0, text: '', stage: 'idle'};
+    const listJobs = Array.isArray(jobs) ? jobs : [];
+    const listAnns = Array.isArray(annotations) ? annotations : [];
+    const jobMatchesClip = j => {
+      const b = j?.body;
+      if (!b || b.intent === 'share' || b.purpose === 'learning_plan') return false;
+      if (b.clip_id === clip.id) return true;
+      return finite(b.original_start) && finite(b.original_end) &&
+        finite(clip.original_start_seconds) && finite(clip.original_end_seconds) &&
+        b.original_start < clip.original_end_seconds && b.original_end > clip.original_start_seconds;
+    };
+    const sortTime = j => (finite(j?.asked_at) ? j.asked_at : (finite(j?.updated) ? j.updated : 0));
+    const clipAiJobs = listJobs.filter(j => j?.role === 'ai' && jobMatchesClip(j))
+      .sort((a, b) => (sortTime(b) - sortTime(a)) || String(b.id || '').localeCompare(String(a.id || '')));
+
+    const opMatches = pendingOp && !pendingOp.cancelled && pendingOp.clip_id === clip.id &&
+      (publication == null || pendingOp.publication === publication);
+    if (opMatches) {
+      const opAi = matchPendingAiJob(pendingOp, listJobs);
+      const opRender = pendingOp.exportId ? listJobs.find(j => j.id === pendingOp.exportId) : null;
+      const derived = deriveActiveRequestState({pendingOp, renderJob: opRender, aiJob: opAi});
+      if (derived && derived.stage !== 'failed') {
+        return {
+          kind: derived.stage === 'needs_attention' ? 'attention' : 'active',
+          count: 0,
+          text: derived.badgeText,
+          stage: derived.stage,
+        };
+      }
+      if (derived && derived.stage === 'failed' && !pendingOp.dismissedError) {
+        return {kind: 'attention', count: 0, text: 'Needs attention', stage: 'failed'};
+      }
+    }
+
+    const activeAi = clipAiJobs.find(j => ['queued', 'leased', 'calling'].includes(j.state));
+    if (activeAi) {
+      const derived = deriveActiveRequestState({aiJob: activeAi});
+      if (derived) return {kind: 'active', count: 0, text: derived.badgeText, stage: derived.stage};
+    }
+
+    if (clipAiJobs.some(j => j.state === 'needs_review')) {
+      return {kind: 'attention', count: 0, text: 'Needs attention', stage: 'needs_attention'};
+    }
+    const latestAi = clipAiJobs[0];
+    if (latestAi && latestAi.state === 'failed') {
+      return {kind: 'attention', count: 0, text: 'Needs attention', stage: 'failed'};
+    }
+
+    const clipAiIds = new Set(clipAiJobs.map(j => j.id));
+    const tipCount = listAnns.filter(a => {
+      if (!a || a.status === 'dismissed') return false;
+      if (clipAiIds.size) return clipAiIds.has(a.job_id);
+      return a.provenance?.clip_id === clip.id || (Array.isArray(a.related_clip_ids) && a.related_clip_ids.includes(clip.id));
+    }).length;
+    if (tipCount > 0) {
+      return {kind: 'tips', count: tipCount, text: tipCount === 1 ? '1 tip' : `${tipCount} tips`, stage: 'ready'};
+    }
+    return {kind: 'idle', count: 0, text: '', stage: 'idle'};
+  }
+
+  function shouldAutoOpenPlayerOptions({clip = null, subjectCustomized = false, subjectHint = ''} = {}) {
+    return Boolean(clip?.player_assignment?.needs_review || subjectCustomized || normalizeSubjectHint(subjectHint));
+  }
+
   return {
-    finite, clamp, clock, sampleTimes, sourceTime, panBounds, clampInterval, clampToInterval,
+    finite, clamp, clock, shortClock, sampleTimes, sourceTime, panBounds, clampInterval, clampToInterval,
     resolveIntervalPlayback, coachingPrompt, copyText, crc32, zipFiles, normalizeSubjectHint,
     coachingSubjectOptions, resolveCoachingSubject, describeCoachingSubject,
     STROKE_PHASE_LABELS, BODY_AREA_LABELS, normalizeCrop, evidenceToClipPoint, evidenceToClipBox,
     letterboxRect, projectPointToStage, projectBoxToStage, selectSuggestionRanges, pickSuggestionRangeIndex,
-    resolveSparseOverlay, formatNowTry,
+    resolveSparseOverlay, formatNowTry, formatExcerptSummary, deriveActiveRequestState,
+    matchPendingAiJob, deriveClipCoachBadge, shouldAutoOpenPlayerOptions,
   };
 });
