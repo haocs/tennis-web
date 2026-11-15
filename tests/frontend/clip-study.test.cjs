@@ -107,7 +107,7 @@ test('resolveCoachingSubject, normalizeSubjectHint, and describeCoachingSubject 
   assert.equal(otherRes.subjectHint,'far court dark shirt');
   const otherDesc=C.describeCoachingSubject({selectedPlayerId:blair.id,clip:assignedClip,players});
   assert.match(otherDesc,/For Blair \(this request only; clip player unchanged\)/);
-  assert.match(otherDesc,/Auto select & zoom scans foreground motion, not player identity/);
+  assert.match(otherDesc,/Auto-frame motion scans foreground motion, not player identity/);
 
   const noneRes=C.resolveCoachingSubject({selectedPlayerId:'',clip:assignedClip,players});
   assert.deepEqual(noneRes,{subjectMode:'none',playerId:null,playerProfileVersion:null,player:null,subjectHint:null});
@@ -246,4 +246,125 @@ test('formatNowTry formats v3 summary cleanly and falls back gracefully on v2 ob
   assert.equal(v2.tryText, 'Turn shoulders earlier.');
   assert.equal(v2.phaseLabel, '');
   assert.deepEqual(v2.bodyAreaLabels, []);
+});
+
+test('shortClock and formatExcerptSummary present compact human-readable selection summaries', () => {
+  assert.equal(C.shortClock(0), '0:00');
+  assert.equal(C.shortClock(12), '0:12');
+  assert.equal(C.shortClock(4.2), '0:04.2');
+  assert.equal(C.shortClock(0.25), '0:00.25');
+  assert.equal(C.shortClock(59.9996), '1:00');
+  assert.equal(C.shortClock(3600.5), '1:00:00.5');
+
+  assert.equal(
+    C.formatExcerptSummary({start: 0, end: 12, speed: 0.5, zoom: 1}, 12),
+    'Full clip (0:00–0:12) · 0.5× · 1× zoom'
+  );
+  assert.equal(
+    C.formatExcerptSummary({start: 0.2, end: 1.4, speed: 0.25, zoom: 1.5}, 12),
+    '0:00.2–0:01.4 · 0.25× · 1.5× zoom'
+  );
+});
+
+test('deriveActiveRequestState distinguishes waiting, working, reused prep, and non-cancellable calling', () => {
+  const inFlightPost = C.deriveActiveRequestState({pendingOp: {clip_id: 'c1', cancelled: false}});
+  assert.equal(inFlightPost.stage, 'waiting_prepare');
+  assert.equal(inFlightPost.headline, 'Waiting to prepare');
+  assert.equal(inFlightPost.prepState, 'waiting');
+  assert.equal(inFlightPost.canCancel, true);
+  assert.equal(inFlightPost.badgeText, 'Preparing…');
+
+  const reusedPrep = C.deriveActiveRequestState({pendingOp: {clip_id: 'c1', exportId: 'e1', prepReused: true}});
+  assert.equal(reusedPrep.stage, 'waiting_ai');
+  assert.equal(reusedPrep.prepState, 'done');
+  assert.equal(reusedPrep.headline, 'Waiting for AI');
+
+  const renderLeased = C.deriveActiveRequestState({renderJob: {id: 'r1', role: 'render', state: 'leased'}});
+  assert.equal(renderLeased.stage, 'preparing');
+  assert.equal(renderLeased.headline, 'Preparing clip');
+  assert.equal(renderLeased.prepState, 'active');
+  assert.equal(renderLeased.canCancel, true);
+
+  const aiQueued = C.deriveActiveRequestState({aiJob: {id: 'a1', role: 'ai', state: 'queued'}});
+  assert.equal(aiQueued.stage, 'waiting_ai');
+  assert.equal(aiQueued.headline, 'Waiting for AI');
+  assert.equal(aiQueued.prepState, 'done');
+  assert.equal(aiQueued.canCancel, true);
+
+  const aiCalling = C.deriveActiveRequestState({aiJob: {id: 'a1', role: 'ai', state: 'calling'}});
+  assert.equal(aiCalling.stage, 'analyzing');
+  assert.equal(aiCalling.headline, 'Analyzing');
+  assert.equal(aiCalling.canCancel, false);
+  assert.match(aiCalling.nonCancellableNote, /Analysis has started/);
+
+  const needsReview = C.deriveActiveRequestState({aiJob: {id: 'a1', role: 'ai', state: 'needs_review'}});
+  assert.equal(needsReview.stage, 'needs_attention');
+  assert.equal(needsReview.headline, 'Needs attention');
+  assert.equal(needsReview.badgeText, 'Needs attention');
+
+  assert.equal(C.deriveActiveRequestState({aiJob: {id: 'a1', role: 'ai', state: 'completed'}}), null);
+});
+
+test('deriveClipCoachBadge prioritizes active work and attention, then counts non-dismissed tips only', () => {
+  const c1 = {id: 'clip1', original_start_seconds: 0, original_end_seconds: 12};
+  const jobDone = {id: 'j1', role: 'ai', state: 'completed', asked_at: 100, body: {clip_id: 'clip1', original_start: 1, original_end: 5}};
+  const annotations = [
+    {id: 'a1', job_id: 'j1', status: 'proposed'},
+    {id: 'a2', job_id: 'j1', status: 'accepted'},
+    {id: 'a3', job_id: 'j1', status: 'dismissed'},
+  ];
+
+  // Excludes dismissed annotations from tip count, ignores share exports and unowned render jobs.
+  const shareJob = {id: 's1', role: 'render', state: 'leased', body: {clip_id: 'clip1', intent: 'share', publication: 1}};
+  const unownedRender = {id: 'r0', role: 'render', state: 'queued', body: {clip_id: 'clip1', publication: 1}};
+  assert.deepEqual(
+    C.deriveClipCoachBadge({jobs: [jobDone, shareJob, unownedRender], annotations, clip: c1, publication: 1}),
+    {kind: 'tips', count: 2, text: '2 tips', stage: 'ready'}
+  );
+
+  // Pending operation takes precedence over existing tips.
+  assert.deepEqual(
+    C.deriveClipCoachBadge({
+      jobs: [jobDone],
+      annotations,
+      pendingOp: {clip_id: 'clip1', publication: 1, cancelled: false},
+      clip: c1,
+      publication: 1,
+    }),
+    {kind: 'active', count: 0, text: 'Preparing…', stage: 'waiting_prepare'}
+  );
+
+  // Calling AI shows Analyzing…
+  const callingJob = {id: 'j2', role: 'ai', state: 'calling', asked_at: 200, body: {clip_id: 'clip1'}};
+  assert.deepEqual(
+    C.deriveClipCoachBadge({jobs: [jobDone, callingJob], annotations, clip: c1, publication: 1}),
+    {kind: 'active', count: 0, text: 'Analyzing…', stage: 'analyzing'}
+  );
+
+  // Failed latest job shows Needs attention.
+  const failedJob = {id: 'j3', role: 'ai', state: 'failed', asked_at: 300, body: {clip_id: 'clip1'}};
+  assert.deepEqual(
+    C.deriveClipCoachBadge({jobs: [jobDone, failedJob], annotations, clip: c1, publication: 1}),
+    {kind: 'attention', count: 0, text: 'Needs attention', stage: 'failed'}
+  );
+
+  // Failed follow-on question reusing a completed render must not be masked by an earlier completed AI job on that export.
+  const reusedRender = {id: 'r1', role: 'render', state: 'completed', body: {clip_id: 'clip1', publication: 1}};
+  const doneJobOnR1 = {id: 'j1', role: 'ai', state: 'completed', asked_at: 100, body: {clip_id: 'clip1', export_id: 'r1', original_start: 1, original_end: 5}};
+  const failedReusedOp = {clip_id: 'clip1', publication: 1, exportId: 'r1', prepReused: true, aiJobId: null, askRequestId: 'req-2', phase: 'failed', knownAiIds: ['j1'], cancelled: false};
+  assert.equal(C.matchPendingAiJob(failedReusedOp, [reusedRender, doneJobOnR1]), null);
+  assert.equal(
+    C.deriveActiveRequestState({pendingOp: failedReusedOp, renderJob: reusedRender, aiJob: C.matchPendingAiJob(failedReusedOp, [reusedRender, doneJobOnR1])}).stage,
+    'failed'
+  );
+  assert.deepEqual(
+    C.deriveClipCoachBadge({jobs: [reusedRender, doneJobOnR1], annotations, pendingOp: failedReusedOp, clip: c1, publication: 1}),
+    {kind: 'attention', count: 0, text: 'Needs attention', stage: 'failed'}
+  );
+
+  // Player options disclosure stays collapsed unless review needed, override selected, or hint entered.
+  assert.equal(C.shouldAutoOpenPlayerOptions({clip: c1}), false);
+  assert.equal(C.shouldAutoOpenPlayerOptions({clip: {...c1, player_assignment: {needs_review: true}}}), true);
+  assert.equal(C.shouldAutoOpenPlayerOptions({clip: c1, subjectCustomized: true}), true);
+  assert.equal(C.shouldAutoOpenPlayerOptions({clip: c1, subjectHint: '  far court  '}), true);
 });

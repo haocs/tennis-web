@@ -121,20 +121,46 @@ const LearningUI=(()=>{
   $('#learning-tab-reviews').onclick=()=>switchTab('reviews');
   $('#learning-tab-plan').onclick=()=>switchTab('plan');
   $('#learning-clips').addEventListener('click',async e=>{
+   const cancelBtn=e.target.closest('[data-cancel-delete-review]');
+   if(cancelBtn){
+    const box=cancelBtn.closest('.learning-delete-confirm');
+    const row=cancelBtn.closest('.learning-review-actions');
+    if(box)box.remove();
+    const trigger=row?.querySelector('[data-delete-review]');
+    if(trigger){trigger.hidden=false;trigger.disabled=false;trigger.focus({preventScroll:true});}
+    return;
+   }
+   const confirmBtn=e.target.closest('[data-confirm-delete-review]');
+   if(confirmBtn&&!confirmBtn.disabled){
+    const reviewId=confirmBtn.dataset.confirmDeleteReview;if(!reviewId)return;
+    const pid=selected,epoch=playerEpoch;
+    const cancelSibling=confirmBtn.parentElement?.querySelector('[data-cancel-delete-review]');
+    confirmBtn.disabled=true;
+    if(cancelSibling)cancelSibling.disabled=true;
+    try{
+     await api('/api/coaching/jobs/'+encodeURIComponent(reviewId),{method:'DELETE',body:JSON.stringify({})});
+     if(epoch!==playerEpoch||pid!==selected)return;
+     toast('Coaching review deleted.');
+     await load();
+    }catch(err){
+     if(epoch===playerEpoch&&pid===selected)toast(err.message);
+     confirmBtn.disabled=false;
+     if(cancelSibling)cancelSibling.disabled=false;
+    }
+    return;
+   }
    const btn=e.target.closest('[data-delete-review]');
    if(!btn||btn.disabled)return;
    const reviewId=btn.dataset.deleteReview;if(!reviewId)return;
-   const pid=selected,epoch=playerEpoch;
-   btn.disabled=true;
-   try{
-    await api('/api/coaching/jobs/'+encodeURIComponent(reviewId),{method:'DELETE',body:JSON.stringify({})});
-    if(epoch!==playerEpoch||pid!==selected)return;
-    toast('Coaching review deleted.');
-    await load();
-   }catch(err){
-    if(epoch===playerEpoch&&pid===selected)toast(err.message);
-    btn.disabled=false;
-   }
+   const row=btn.closest('.learning-review-actions');if(!row)return;
+   if(row.querySelector('.learning-delete-confirm'))return;
+   btn.hidden=true;
+   const confirm=document.createElement('span');
+   confirm.className='learning-delete-confirm';
+   confirm.dataset.confirmingDelete='true';
+   confirm.innerHTML=`<span>Delete this review and its saved Moments?</span><button type="button" class="button small learning-delete-confirm-btn" data-confirm-delete-review="${esc(reviewId)}">Confirm delete</button><button type="button" class="button small" data-cancel-delete-review>Cancel</button>`;
+   row.append(confirm);
+   confirm.querySelector('[data-confirm-delete-review]')?.focus({preventScroll:true});
   });
   load();
  }

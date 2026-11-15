@@ -8,6 +8,183 @@
   const SVG_NS = 'http://www.w3.org/2000/svg';
   const PLAY_ICON = '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M8 5v14l11-7z"/></svg>';
   const PAUSE_ICON = '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M6 5h4v14H6zm8 0h4v14h-4z"/></svg>';
+  const SHARE_STORAGE_KEY = 'tennis-share-downloads:v1';
+  const shareTimers = new Map();
+  function shareKeyFor(session, clip) {
+    return session?.id && session?.published_at !== undefined && clip?.id
+      ? `${session.id}:${session.published_at}:${clip.id}`
+      : '';
+  }
+  function loadShareDownloads() {
+    const map = new Map();
+    try {
+      const raw = JSON.parse(sessionStorage.getItem(SHARE_STORAGE_KEY) || '{}');
+      if (raw && typeof raw === 'object') {
+        const entries = Object.entries(raw)
+          .filter(([, v]) => v && typeof v === 'object' && !v.cancelled && !v.superseded)
+          .sort((a, b) => (b[1].updatedAt || 0) - (a[1].updatedAt || 0))
+          .slice(0, 20);
+        for (const [k, v] of entries) {
+          const item = {...v, abort: null, autoDownload: false};
+          if (item.state === 'submitting') {
+            item.state = 'failed';
+            item.error = 'Interrupted before starting. Prepare video download again.';
+          }
+          map.set(k, item);
+        }
+      }
+    } catch (_) {}
+    return map;
+  }
+  const shareDownloads = loadShareDownloads();
+  function saveShareDownloads() {
+    try {
+      const entries = [...shareDownloads.entries()]
+        .filter(([, v]) => v && !v.cancelled && !v.superseded)
+        .sort((a, b) => (b[1].updatedAt || 0) - (a[1].updatedAt || 0))
+        .slice(0, 20);
+      const out = {};
+      for (const [k, v] of entries) {
+        out[k] = {
+          key: v.key, requestId: v.requestId, jobId: v.jobId || null, version: v.version ?? null,
+          state: v.state, selectionKey: v.selectionKey || '', summary: v.summary || '',
+          href: v.href || '', isHdr: !!v.isHdr, error: v.error || '', epoch: v.epoch || 0,
+          updatedAt: v.updatedAt || Date.now(),
+        };
+      }
+      sessionStorage.setItem(SHARE_STORAGE_KEY, JSON.stringify(out));
+    } catch (_) {}
+  }
+  function clearShareTimer(key) {
+    const id = shareTimers.get(key);
+    if (id) { clearTimeout(id); shareTimers.delete(key); }
+  }
+  function renderDownloadCard(owner = context) {
+    const card = $('study-download-card'), heading = $('study-download-heading'), summary = $('study-download-summary');
+    const cancelBtn = $('study-download-cancel'), readyLink = $('study-download-ready');
+    if (!card || !heading || !summary || !cancelBtn || !readyLink) return;
+    if (!owner || context !== owner) { card.hidden = true; return; }
+    const key = shareKeyFor(owner.session, owner.clip);
+    const entry = key ? shareDownloads.get(key) : null;
+    if (!entry || entry.cancelled || entry.superseded) {
+      card.hidden = true;
+      cancelBtn.hidden = true;
+      readyLink.hidden = true;
+      readyLink.removeAttribute('href');
+      return;
+    }
+    card.hidden = false;
+    summary.textContent = entry.error || entry.summary || '';
+    if (entry.state === 'submitting' || entry.state === 'queued' || entry.state === 'leased') {
+      heading.textContent = 'Preparing video download…';
+      summary.textContent = entry.summary || '';
+      cancelBtn.hidden = false;
+      cancelBtn.disabled = !!entry.cancelling;
+      readyLink.hidden = true;
+      readyLink.removeAttribute('href');
+    } else if (entry.state === 'completed') {
+      heading.textContent = entry.isHdr ? 'Prepared HDR video download' : 'Prepared video download';
+      summary.textContent = entry.summary || '';
+      cancelBtn.hidden = true;
+      readyLink.href = entry.href;
+      readyLink.hidden = false;
+    } else {
+      heading.textContent = 'Video download failed';
+      cancelBtn.hidden = true;
+      readyLink.hidden = true;
+      readyLink.removeAttribute('href');
+    }
+  }
+  async function cancelShareJobRemote(jobId, knownVersion = null) {
+    if (!jobId) return;
+    let version = knownVersion;
+    if (version == null) {
+      try {
+        const cur = await fetch('/api/coaching/jobs/' + encodeURIComponent(jobId));
+        if (cur.ok) version = (await cur.json())?.version;
+      } catch (_) {}
+    }
+    try {
+      const r = await fetch('/api/coaching/jobs/' + encodeURIComponent(jobId), {
+        method: 'PUT',
+        headers: {'Content-Type': 'application/json', 'X-Tennis-Request': '1'},
+        body: JSON.stringify(version != null ? {action: 'cancel', version} : {action: 'cancel'}),
+      });
+      if (r.status === 409) {
+        const fresh = await fetch('/api/coaching/jobs/' + encodeURIComponent(jobId));
+        if (fresh.ok) {
+          const data = await fresh.json();
+          if (['queued', 'leased'].includes(data?.state)) {
+            await fetch('/api/coaching/jobs/' + encodeURIComponent(jobId), {
+              method: 'PUT',
+              headers: {'Content-Type': 'application/json', 'X-Tennis-Request': '1'},
+              body: JSON.stringify({action: 'cancel', version: data.version}),
+            });
+          }
+        }
+      }
+    } catch (_) {}
+  }
+  async function pollShareJob(key, entry) {
+    clearShareTimer(key);
+    const isAlive = () => !entry.cancelled && !entry.superseded && shareDownloads.get(key) === entry;
+    if (!isAlive() || !entry.jobId) return;
+    const abort = new AbortController();
+    entry.abort = abort;
+    try {
+      const r = await fetch('/api/coaching/jobs/' + entry.jobId, {signal: abort.signal});
+      if (!r.ok) throw new Error('Could not check download status. Retrying…');
+      const currentJob = await r.json();
+      if (!isAlive() || currentJob.id !== entry.jobId) return;
+      entry.state = currentJob.state;
+      if (currentJob.version != null) entry.version = currentJob.version;
+      entry.updatedAt = Date.now();
+      const activeOpen = Boolean(context && shareKeyFor(context.session, context.clip) === key);
+      if (currentJob.state === 'completed') {
+        entry.href = `/api/coaching/exports/${entry.jobId}/excerpt.mp4?download=1`;
+        entry.isHdr = String(currentJob.result?.color_output || '').startsWith('hdr10-');
+        const shouldAuto = Boolean(entry.autoDownload && activeOpen && context.shareEpoch === entry.epoch);
+        entry.autoDownload = false;
+        entry.abort = null;
+        saveShareDownloads();
+        if (activeOpen) {
+          if (context.shareEpoch === entry.epoch) context.downloading = false;
+          setControls();
+          renderDownloadCard(context);
+          status(entry.isHdr ? 'High-quality HDR (10-bit HEVC) download ready.' : 'High-quality download ready.');
+          if (shouldAuto) $('study-download-ready')?.click();
+        }
+        return;
+      }
+      if (currentJob.state === 'failed' || currentJob.state === 'cancelled') {
+        entry.abort = null;
+        if (currentJob.state === 'cancelled') {
+          shareDownloads.delete(key);
+        } else {
+          entry.error = currentJob.result?.error || 'Video download failed.';
+        }
+        saveShareDownloads();
+        if (activeOpen) {
+          if (context.shareEpoch === entry.epoch) {
+            context.downloading = false;
+            context.shareRequestId = null;
+          }
+          setControls();
+          renderDownloadCard(context);
+          status(currentJob.state === 'cancelled' ? 'Video download cancelled.' : entry.error);
+        }
+        return;
+      }
+      saveShareDownloads();
+      if (isAlive()) shareTimers.set(key, setTimeout(() => pollShareJob(key, entry), 1500));
+    } catch (error) {
+      if (!isAlive()) return;
+      if (context && shareKeyFor(context.session, context.clip) === key && context.shareEpoch === entry.epoch) {
+        status(error.message || 'Waiting for download status…');
+      }
+      shareTimers.set(key, setTimeout(() => pollShareJob(key, entry), 2000));
+    }
+  }
   let context = null, generation = 0, walkthroughToken = 0;
   const pointers = new Map();
   let drag = null, pinch = null, pinDrag = null, playbackTimer = null;
@@ -287,25 +464,26 @@
   }
   function invalidateShare(owner) {
     owner.shareEpoch = (owner.shareEpoch || 0) + 1;
-    clearInterval(owner.shareTimer);
-    owner.shareTimer = null;
-    owner.shareAbort?.abort();
-    owner.shareAbort = null;
-    owner.shareJobId = null;
     owner.downloading = false;
   }
   function notifySelectionChanged() {
     if (!context) return;
     const selection = window.ClipStudy?.coachingSelection?.();
-    const key = JSON.stringify(selection && [selection.start, selection.end, selection.speed, selection.crop]);
-    if (key !== context.shareSelectionKey) {
-      const hadShare = context.downloading || context.shareJobId;
-      invalidateShare(context);
-      context.shareSelectionKey = key;
+    const selKey = JSON.stringify(selection && [selection.start, selection.end, selection.speed, selection.crop]);
+    if (selKey !== context.shareSelectionKey) {
+      const hadActiveForeground = context.downloading;
+      context.shareEpoch = (context.shareEpoch || 0) + 1;
+      context.shareSelectionKey = selKey;
+      context.downloading = false;
       context.shareRequestId = null;
-      const link = $('study-download-ready');
-      if (link) { link.hidden = true; link.removeAttribute('href'); }
-      if (hadShare) status('');
+      const sk = shareKeyFor(context.session, context.clip);
+      const active = sk ? shareDownloads.get(sk) : null;
+      if (active) {
+        active.autoDownload = false;
+        saveShareDownloads();
+      }
+      renderDownloadCard(context);
+      if (hadActiveForeground) status('');
       setControls();
     }
     window.dispatchEvent(new CustomEvent('study-selection-changed'));
@@ -461,19 +639,29 @@
   }
   function setControls() {
     const enabled = ready() && !context.capturing;
-    for (const id of ['study-seek', 'study-pin-start', 'study-pin-end', 'study-back', 'study-play', 'study-forward', 'study-download-interval']) {
+    for (const id of ['study-seek', 'study-pin-start', 'study-pin-end', 'study-back', 'study-play', 'study-forward', 'study-full-clip', 'study-reset-framing', 'study-download-interval']) {
       if ($(id)) $(id).disabled = !enabled || (id === 'study-download-interval' && !!context?.downloading);
     }
     const autoBtn = $('study-auto-detect'), autoCancelBtn = $('study-auto-cancel');
+    const unavailable = !!context?.autoDetectUnavailable || !isAutoDetectSupported();
+    const scanning = !!context?.scanningAutoDetect;
+    const count = context?.detectedWindows?.length || 0;
+    const idx = context?.detectedWindowIndex ?? -1;
     if (autoBtn) {
-      const unavailable = !!context?.autoDetectUnavailable || !isAutoDetectSupported();
-      const scanning = !!context?.scanningAutoDetect;
-      const count = context?.detectedWindows?.length || 0;
-      const idx = context?.detectedWindowIndex ?? -1;
       autoBtn.disabled = !enabled || unavailable || scanning || !!context?.capturing;
-      autoBtn.textContent = scanning ? 'Scanning…' : unavailable ? 'Auto select unavailable' : count > 1 && idx >= 0 ? `Next moment (${idx + 1}/${count})` : 'Auto select & zoom';
+      autoBtn.textContent = scanning ? 'Scanning…' : unavailable ? 'Auto-frame unavailable' : 'Auto-frame motion';
     }
-    if (autoCancelBtn) autoCancelBtn.hidden = !context?.scanningAutoDetect;
+    if (autoCancelBtn) autoCancelBtn.hidden = !scanning;
+    const stepper = $('study-auto-stepper'), prevAuto = $('study-auto-prev'), nextAuto = $('study-auto-next'), countAuto = $('study-auto-count');
+    if (stepper) {
+      const hasWindows = !scanning && Array.isArray(context?.detectedWindows) && count > 0;
+      stepper.hidden = !hasWindows;
+      if (hasWindows) {
+        if (countAuto) countAuto.textContent = `${Math.max(0, idx) + 1} of ${count}`;
+        if (prevAuto) prevAuto.disabled = !enabled || count <= 1;
+        if (nextAuto) nextAuto.disabled = !enabled || count <= 1;
+      }
+    }
     const frameReady = enabled && video.readyState >= 2 && !context?.capturing;
     for (const id of ['study-capture', 'study-sample']) $(id).disabled = !frameReady;
     $('study-copy').disabled = !!context?.capturing;
@@ -573,6 +761,9 @@
     clearWalkthroughTimer(old);
     window.Coach?.close();
     clearInterval(playbackTimer); playbackTimer = null;
+    const sk = shareKeyFor(old.session, old.clip);
+    const activeShare = sk ? shareDownloads.get(sk) : null;
+    if (activeShare) { activeShare.autoDownload = false; saveShareDownloads(); }
     invalidateShare(old);
     context = null; generation++;
     hideCoachOverlay(); hideWalkthroughHud();
@@ -650,7 +841,7 @@
     video.pause();
     $('study-media-error').hidden = false;
     $('study-media-error').textContent = 'This browser could not play the clip. Download it to review in a compatible player. HDR/HEVC support varies by device.';
-    for (const id of ['study-seek','study-pin-start','study-pin-end','study-back','study-play','study-forward','study-auto-detect','study-capture','study-sample','study-download-interval']) {
+    for (const id of ['study-seek','study-pin-start','study-pin-end','study-back','study-play','study-forward','study-full-clip','study-reset-framing','study-auto-detect','study-auto-prev','study-auto-next','study-capture','study-sample','study-download-interval']) {
       if ($(id)) $(id).disabled = true;
     }
   }
@@ -683,22 +874,71 @@
     }
   });
   $('study-zoom').addEventListener('input', event => { if (context) { context.zoom = Number(event.target.value); applyView(); } });
+  $('study-download-cancel')?.addEventListener('click', async () => {
+    if (!context) return;
+    const key = shareKeyFor(context.session, context.clip);
+    const entry = key ? shareDownloads.get(key) : null;
+    if (!entry) return;
+    entry.cancelled = true;
+    entry.cancelling = true;
+    clearShareTimer(key);
+    entry.abort?.abort();
+    entry.abort = null;
+    shareDownloads.delete(key);
+    saveShareDownloads();
+    context.downloading = false;
+    context.shareRequestId = null;
+    renderDownloadCard(context);
+    setControls();
+    status('Video download cancelled.');
+    if (entry.jobId) await cancelShareJobRemote(entry.jobId, entry.version);
+  });
   $('study-download-interval').addEventListener('click', async () => {
     if (!context || !ready() || context.downloading) return;
     notifySelectionChanged();
     const owner = context;
     const sel = window.ClipStudy.coachingSelection();
     if (!sel) return;
-    const epoch = owner.shareEpoch || 0;
+    const key = shareKeyFor(owner.session, owner.clip);
+    if (!key) return;
+    const prev = shareDownloads.get(key);
+    if (prev) {
+      prev.superseded = true;
+      prev.autoDownload = false;
+      prev.abort?.abort();
+      clearShareTimer(key);
+    }
+    const epoch = ++owner.shareEpoch;
+    const requestId = owner.shareRequestId || cryptoId();
+    owner.shareRequestId = requestId;
     const abort = new AbortController();
-    owner.shareAbort = abort;
-    const isCurrent = () => context === owner && (owner.shareEpoch || 0) === epoch && owner.shareAbort === abort;
+    const entry = {
+      key,
+      requestId,
+      jobId: null,
+      version: null,
+      state: 'submitting',
+      selectionKey: owner.shareSelectionKey || JSON.stringify([sel.start, sel.end, sel.speed, sel.crop]),
+      summary: C.formatExcerptSummary(sel, fallbackDuration()),
+      href: '',
+      isHdr: false,
+      error: '',
+      epoch,
+      autoDownload: true,
+      cancelled: false,
+      cancelling: false,
+      superseded: false,
+      abort,
+      updatedAt: Date.now(),
+    };
+    shareDownloads.set(key, entry);
+    saveShareDownloads();
     owner.downloading = true;
-    clearInterval(owner.shareTimer);
+    renderDownloadCard(owner);
     setControls();
-    status('Preparing high-quality download…');
+    status('Preparing video download…');
+    const isAlive = () => !entry.cancelled && !entry.superseded && shareDownloads.get(key) === entry;
     try {
-      owner.shareRequestId = owner.shareRequestId || cryptoId();
       const response = await fetch('/api/coaching/exports', {
         method: 'POST',
         signal: abort.signal,
@@ -713,61 +953,51 @@
           crop: sel.crop,
           intent: 'share',
           quality: 'high',
-          request_id: owner.shareRequestId
+          request_id: requestId
         })
       });
       const job = await response.json();
-      if (!response.ok) throw new Error(job.error || 'Could not queue interval download');
-      if (!isCurrent()) return;
-      owner.shareJobId = job.id;
-      const jobId = job.id;
-      let polling = false;
-      const checkShare = async () => {
-        if (!isCurrent() || polling) return;
-        polling = true;
-        try {
-          const r = await fetch('/api/coaching/jobs/' + jobId, {signal: abort.signal});
-          if (!r.ok) throw new Error('Could not check download status. Retrying…');
-          const currentJob = await r.json();
-          if (!isCurrent() || currentJob.id !== jobId) return;
-          if (currentJob.state === 'completed') {
-            clearInterval(owner.shareTimer);
-            owner.shareTimer = null;
-            owner.downloading = false;
-            owner.shareAbort = null;
-            setControls();
-            const href = `/api/coaching/exports/${jobId}/excerpt.mp4?download=1`;
-            const readyLink = $('study-download-ready');
-            readyLink.href = href;
-            readyLink.hidden = false;
-            const isHdr = String(currentJob.result?.color_output || '').startsWith('hdr10-');
-            status(isHdr ? 'High-quality HDR (10-bit HEVC) download ready.' : 'High-quality download ready.');
-            readyLink.click();
-          } else if (currentJob.state === 'failed' || currentJob.state === 'cancelled') {
-            clearInterval(owner.shareTimer);
-            owner.shareTimer = null;
-            owner.downloading = false;
-            owner.shareAbort = null;
-            owner.shareRequestId = null;
-            setControls();
-            status(currentJob.result?.error || 'Interval download failed.');
-          }
-        } catch (error) {
-          if (isCurrent()) status(error.message || 'Waiting for download status…');
-        } finally { polling = false; }
-      };
-      if (job.state === 'completed') {
-        await checkShare();
-      } else {
-        owner.shareTimer = setInterval(checkShare, 1500);
-        await checkShare();
+      if (entry.cancelled && job?.id) {
+        await cancelShareJobRemote(job.id, job.version);
+        return;
       }
+      if (!response.ok) throw new Error(job.error || 'Could not prepare video download');
+      if (!isAlive()) return;
+      entry.jobId = job.id;
+      entry.version = job.version ?? null;
+      entry.state = job.state || 'queued';
+      entry.abort = null;
+      entry.updatedAt = Date.now();
+      if (job.state === 'completed') {
+        entry.href = `/api/coaching/exports/${job.id}/excerpt.mp4?download=1`;
+        entry.isHdr = String(job.result?.color_output || '').startsWith('hdr10-');
+        const shouldAuto = Boolean(entry.autoDownload && context === owner && owner.shareEpoch === epoch);
+        entry.autoDownload = false;
+        saveShareDownloads();
+        if (context === owner) {
+          if (owner.shareEpoch === epoch) owner.downloading = false;
+          setControls();
+          renderDownloadCard(owner);
+          status(entry.isHdr ? 'High-quality HDR (10-bit HEVC) download ready.' : 'High-quality download ready.');
+          if (shouldAuto) $('study-download-ready')?.click();
+        }
+        return;
+      }
+      saveShareDownloads();
+      if (context === owner) renderDownloadCard(owner);
+      await pollShareJob(key, entry);
     } catch (error) {
-      if (isCurrent()) {
-        owner.downloading = false;
-        owner.shareAbort = null;
+      if (entry.cancelled || entry.superseded || shareDownloads.get(key) !== entry) return;
+      entry.abort = null;
+      entry.state = 'failed';
+      entry.error = error.message || 'Could not prepare video download';
+      entry.updatedAt = Date.now();
+      saveShareDownloads();
+      if (context === owner) {
+        if (owner.shareEpoch === epoch) owner.downloading = false;
+        renderDownloadCard(owner);
         setControls();
-        status(error.message);
+        status(entry.error);
       }
     }
   });
@@ -1280,6 +1510,19 @@
       }
     }
   },
+  setEntryStatus(badge) {
+    const pill = $('study-clip-status');
+    if (!pill) return;
+    if (!badge || !badge.text) {
+      pill.textContent = '';
+      pill.hidden = true;
+      pill.removeAttribute('data-stage');
+      return;
+    }
+    pill.textContent = badge.text;
+    pill.dataset.stage = badge.kind || 'idle';
+    pill.hidden = false;
+  },
   updateEntry(options) {
     const {button,clip}=options;
     if(!button)return;
@@ -1291,12 +1534,13 @@
       button.studyBound=true;
     }
     button.studyOptions=options;button.classList.toggle('hidden',!clip);
+    if (!clip) window.ClipStudy.setEntryStatus(null);
   },
   open(options) {
     if (context || !options.clip || !options.player) return;
     const {session,clip,player,url,returnFocus}=options;
     const initialDur = C.finite(clip.duration_seconds) && clip.duration_seconds > 0 ? clip.duration_seconds : 1;
-    context={session,clip,player,url,returnFocus,parentRate:player.playbackRate,startTime:player.currentTime||0,lastTime:player.currentTime||0,intervalStart:0,intervalEnd:initialDur,intervalDefaultEnd:true,loop:false,zoom:1,x:0,y:0,frames:[],fetchController:new AbortController(),capturing:false,downloading:false,scanningAutoDetect:false,autoDetectUnavailable:!isAutoDetectSupported(),detectedWindows:null,detectedWindowIndex:-1,shareJobId:null,shareRequestId:null,shareTimer:null,inspection:null,overlayEnabled:true,coachMarkers:[],generation:++generation};
+    context={session,clip,player,url,returnFocus,parentRate:player.playbackRate,startTime:player.currentTime||0,lastTime:player.currentTime||0,intervalStart:0,intervalEnd:initialDur,intervalDefaultEnd:true,loop:false,zoom:1,x:0,y:0,frames:[],fetchController:new AbortController(),capturing:false,downloading:false,scanningAutoDetect:false,autoDetectUnavailable:!isAutoDetectSupported(),detectedWindows:null,detectedWindowIndex:-1,shareEpoch:0,shareSelectionKey:'',shareRequestId:null,inspection:null,overlayEnabled:true,coachMarkers:[],generation:++generation};
     player.pause();
     $('study-heading').textContent='Clip study · '+String(clip.index).padStart(2,'0');
     $('study-description').textContent=`${session.title} · Original ${C.clock(clip.original_start_seconds)}–${C.clock(clip.original_end_seconds)}`;
@@ -1307,7 +1551,9 @@
     $('study-loop').setAttribute('aria-pressed','false');
     video.loop=false;video.muted=player.muted;video.volume=player.volume;
     video.dataset.autoCoachState='idle';video.dataset.autoCoachCaptures='0';video.dataset.autoCoachDetections='0';
-    $('study-download-ready').hidden=true;$('study-download-ready').removeAttribute('href');
+    if ($('study-auto-stepper')) $('study-auto-stepper').hidden = true;
+    if ($('study-manual-frames')) $('study-manual-frames').open = false;
+    if ($('study-recording-details')) $('study-recording-details').open = false;
     $('study-download').href=url+'&download=1';$('study-download').textContent='Download clip '+String(clip.index).padStart(2,'0');
     $('study-frames').replaceChildren();$('study-export').disabled=true;$('study-export').textContent='Download frame package';$('study-cancel-capture').hidden=true;
     $('study-prompt').value=C.coachingPrompt(clip);
@@ -1317,6 +1563,13 @@
     dialog.scrollTop=0;document.querySelector('.study-sidebar').scrollTop=0;
     syncIntervalUI();
     video.src=url;video.load();setControls();resetView();
+    const sk = shareKeyFor(session, clip);
+    const activeShare = sk ? shareDownloads.get(sk) : null;
+    if (activeShare && activeShare.jobId && ['queued', 'leased'].includes(activeShare.state) && !shareTimers.has(sk)) {
+      activeShare.autoDownload = false;
+      pollShareJob(sk, activeShare);
+    }
+    renderDownloadCard(context);
     loadContext(context);
     window.Coach?.open(session,clip);
   }};
@@ -1413,50 +1666,79 @@
   $('study-capture').addEventListener('click',()=>capture(false));
   $('study-cancel-capture').addEventListener('click',stopCapture);
   $('study-auto-cancel')?.addEventListener('click',stopCapture);
-  $('study-auto-detect')?.addEventListener('click',async()=>{
-    if(!context||!ready()||context.capturing)return;
-    const owner=context;
-    if(Array.isArray(owner.detectedWindows)&&owner.detectedWindows.length>0){
-      owner.detectedWindowIndex=(owner.detectedWindowIndex+1)%owner.detectedWindows.length;
-      const win=owner.detectedWindows[owner.detectedWindowIndex];
-      applyDetectedWindow(owner,win);
+  $('study-full-clip')?.addEventListener('click', () => {
+    if (!context || !ready() || context.capturing) return;
+    if (context.inspection) exitInspection({keepCurrentBounds: false, restoreZoomPan: false, pauseVideo: false});
+    const dur = fallbackDuration();
+    setIntervalBounds(0, dur, 'end');
+    context.intervalDefaultEnd = true;
+    syncIntervalUI();
+    status(`Full clip selected (0:00–${C.shortClock(dur)}). Zoom and speed preserved.`);
+  });
+  $('study-reset-framing')?.addEventListener('click', () => {
+    if (!context || !ready() || context.capturing) return;
+    if (context.inspection) exitInspection({keepCurrentBounds: false, restoreZoomPan: false, pauseVideo: false});
+    resetView();
+    status('Zoom and pan reset to 1×. Selected interval preserved.');
+  });
+  function stepDetectedWindow(delta) {
+    if (!context || !ready() || context.capturing) return;
+    const owner = context;
+    if (!Array.isArray(owner.detectedWindows) || owner.detectedWindows.length <= 1) return;
+    if (owner.inspection) exitInspection({keepCurrentBounds: false, restoreZoomPan: false, pauseVideo: false});
+    owner.detectedWindowIndex = (owner.detectedWindowIndex + delta + owner.detectedWindows.length) % owner.detectedWindows.length;
+    const win = owner.detectedWindows[owner.detectedWindowIndex];
+    applyDetectedWindow(owner, win);
+    setControls();
+    status(`Moment ${owner.detectedWindowIndex + 1} of ${owner.detectedWindows.length}: ${C.clock(win.start)}–${C.clock(win.end)} (${Number(owner.zoom.toFixed(2))}× zoom).`);
+  }
+  $('study-auto-prev')?.addEventListener('click', () => stepDetectedWindow(-1));
+  $('study-auto-next')?.addEventListener('click', () => stepDetectedWindow(1));
+  $('study-auto-detect')?.addEventListener('click', async () => {
+    if (!context || !ready() || context.capturing) return;
+    if (context.inspection) exitInspection({keepCurrentBounds: false, restoreZoomPan: false, pauseVideo: false});
+    const owner = context;
+    if (!isAutoDetectSupported()) {
+      owner.autoDetectUnavailable = true;
       setControls();
-      status(`Moment ${owner.detectedWindowIndex+1} of ${owner.detectedWindows.length}: ${C.clock(win.start)}–${C.clock(win.end)} (${Number(owner.zoom.toFixed(2))}× zoom).`);
+      status('Auto-frame motion is unavailable in this browser. Select an interval and zoom manually.');
       return;
     }
-    if(!isAutoDetectSupported()){
-      owner.autoDetectUnavailable=true;
-      setControls();
-      status('Auto select & zoom is unavailable in this browser. Select an interval and zoom manually.');
-      return;
-    }
-    owner.scanningAutoDetect=true;
+    owner.scanningAutoDetect = true;
     setControls();
     status('Scanning clip for player motion…');
-    try{
-      const result=await window.ClipStudy.scanPlayerMoments({
-        maxWindows:5,
-        onProgress:({index,total})=>{if(context===owner)status(`Scanning clip for player motion (${index}/${total})…`);}
+    try {
+      const result = await window.ClipStudy.scanPlayerMoments({
+        maxWindows: 5,
+        onProgress: ({index, total}) => { if (context === owner) status(`Scanning clip for player motion (${index}/${total})…`); }
       });
-      if(context!==owner)return;
-      const windows=result?.windows||[];
-      if(!windows.length){
-        owner.detectedWindows=[];
-        owner.detectedWindowIndex=-1;
+      if (context !== owner) return;
+      const windows = result?.windows || [];
+      if (!windows.length) {
+        owner.detectedWindows = [];
+        owner.detectedWindowIndex = -1;
         status('No clear player motion detected in this clip. Select an interval and zoom manually.');
         return;
       }
-      owner.detectedWindows=windows;
-      owner.detectedWindowIndex=0;
-      applyDetectedWindow(owner,windows[0]);
-      status(windows.length>1?`Selected 1 of ${windows.length} moments (${C.clock(windows[0].start)}–${C.clock(windows[0].end)} · ${Number(owner.zoom.toFixed(2))}× zoom). Click Next moment to cycle.`:`Selected moment (${C.clock(windows[0].start)}–${C.clock(windows[0].end)} · ${Number(owner.zoom.toFixed(2))}× zoom).`);
-    }catch(error){
-      if(context!==owner)return;
-      if(error?.name==='AbortError')status('Auto select scan cancelled.');
-      else if(['unsupported','worker_graphics_unavailable'].includes(error?.code)){owner.autoDetectUnavailable=true;status('Auto select & zoom is unavailable in this browser. Select an interval and zoom manually.');}
-      else status(error?.message||'Auto select & zoom failed.');
-    }finally{
-      if(context===owner){owner.scanningAutoDetect=false;setControls();}
+      owner.detectedWindows = windows;
+      owner.detectedWindowIndex = 0;
+      applyDetectedWindow(owner, windows[0]);
+      status(
+        windows.length > 1
+          ? `Framed 1 of ${windows.length} moments (${C.clock(windows[0].start)}–${C.clock(windows[0].end)} · ${Number(owner.zoom.toFixed(2))}× zoom). Use Prev or Next to compare.`
+          : `Framed moment (${C.clock(windows[0].start)}–${C.clock(windows[0].end)} · ${Number(owner.zoom.toFixed(2))}× zoom).`
+      );
+    } catch (error) {
+      if (context !== owner) return;
+      if (error?.name === 'AbortError') status('Auto-frame scan cancelled.');
+      else if (['unsupported', 'worker_graphics_unavailable'].includes(error?.code)) {
+        owner.autoDetectUnavailable = true;
+        status('Auto-frame motion is unavailable in this browser. Select an interval and zoom manually.');
+      } else {
+        status(error?.message || 'Auto-frame motion failed.');
+      }
+    } finally {
+      if (context === owner) { owner.scanningAutoDetect = false; setControls(); }
     }
   });
   $('study-copy').addEventListener('click',async()=>{

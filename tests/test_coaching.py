@@ -1424,3 +1424,92 @@ def test_render_pose_fault_isolation_ffmpeg(setup, tmp_path, monkeypatch):
     assert info_err['pose_status'] == 'unavailable'
     assert post(c, f"worker/jobs/{j_err['id']}/complete", {'token': j_err['token']}, token).status_code == 200
     assert r_dis['id'] != r_err['id']
+
+
+def test_manual_coaching_render_cancel_handoff_and_listing_retention(setup):
+    app, root, data = enabled(setup)
+    c = app.test_client()
+
+    # 1. Completed manual coaching render can be cancelled before AI creation, blocking late handoff.
+    manual_exp = post(
+        c,
+        'exports',
+        dict(selection(data), start=0.2, end=1.2, request_id='manual-handoff-cancel-1'),
+    ).json
+    _complete_render_job(app, c, manual_exp['id'])
+    done_exp = c.get(f"/api/coaching/jobs/{manual_exp['id']}").json
+    assert done_exp['state'] == 'completed'
+    cancel_res = c.put(
+        f"/api/coaching/jobs/{manual_exp['id']}",
+        json={'action': 'cancel', 'version': done_exp['version']},
+        headers={'X-Tennis-Request': '1'},
+    )
+    assert cancel_res.status_code == 200 and cancel_res.json['state'] == 'cancelled'
+    late_ai = post(
+        c,
+        'requests',
+        {
+            'export_id': manual_exp['id'],
+            'prompt': 'Check late submission',
+            'consent': True,
+            'request_id': 'manual-late-ai-1',
+        },
+    )
+    assert late_ai.status_code == 409
+
+    # 2. Once AI request exists for export_id, cancelling render returns 409 while cancelling queued AI succeeds.
+    manual_exp_2 = post(
+        c,
+        'exports',
+        dict(selection(data), start=0.3, end=1.3, request_id='manual-handoff-cancel-2'),
+    ).json
+    _complete_render_job(app, c, manual_exp_2['id'])
+    done_exp_2 = c.get(f"/api/coaching/jobs/{manual_exp_2['id']}").json
+    ai_res = post(
+        c,
+        'requests',
+        {
+            'export_id': manual_exp_2['id'],
+            'prompt': 'Check split step',
+            'consent': True,
+            'request_id': 'manual-ai-2',
+        },
+    )
+    assert ai_res.status_code == 201
+    ai_job = ai_res.json
+    render_cancel_after_ai = c.put(
+        f"/api/coaching/jobs/{manual_exp_2['id']}",
+        json={'action': 'cancel', 'version': done_exp_2['version']},
+        headers={'X-Tennis-Request': '1'},
+    )
+    assert render_cancel_after_ai.status_code == 409
+    ai_cancel = c.put(
+        f"/api/coaching/jobs/{ai_job['id']}",
+        json={'action': 'cancel', 'version': ai_job['version']},
+        headers={'X-Tennis-Request': '1'},
+    )
+    assert ai_cancel.status_code == 200 and ai_cancel.json['state'] == 'cancelled'
+
+    # 3. Unsubmitted manual coaching render jobs remain visible past 105 newer share downloads.
+    retained_completed = post(
+        c,
+        'exports',
+        dict(selection(data), start=0.4, end=1.4, request_id='manual-retain-completed'),
+    ).json
+    _complete_render_job(app, c, retained_completed['id'])
+    retained_queued = post(
+        c,
+        'exports',
+        dict(selection(data), start=0.1, end=1.0, request_id='manual-retain-queued'),
+    ).json
+    for i in range(105):
+        r_share = post(
+            c,
+            'exports',
+            dict(selection(data), intent='share', quality='high', start=0.1, end=0.5, request_id=f'manual-bulk-share-{i:03d}'),
+        )
+        assert r_share.status_code == 201
+
+    listed_ids = {j['id'] for j in c.get(f'/api/coaching/sessions/{ID}').json['jobs']}
+    assert retained_queued['id'] in listed_ids
+    assert retained_completed['id'] in listed_ids

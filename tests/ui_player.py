@@ -187,7 +187,7 @@ def test_mobile_overlay_layout_and_autoplay(browser, ui_server):
         assert page.locator('#video-rate').evaluate("e=>getComputedStyle(e).backgroundColor")=="rgba(0, 0, 0, 0)"
         expect(page.locator('#player-download svg')).to_be_visible()
         assert page.locator('#player-download').inner_text().strip() == ''
-        expect(page.get_by_role('button',name='Study clip',exact=True)).to_be_visible()
+        expect(page.get_by_role('button',name=re.compile(r'^Study & AI Coach'))).to_be_visible()
         assert page.locator('#study-clip svg').count() == 1
         assert page.locator('.player-options').evaluate("e => [...e.children].map(c=>c.id||c.className)")[:3] == ['player-reactions','study-clip','player-download']
         expect(page.locator('.player-chapters')).to_have_count(0)
@@ -341,7 +341,7 @@ def test_clip_study_action_precision_and_return(browser, ui_server):
     page.goto(ui_server+f'/review/{ID}?clip={CLIP}')
     page.wait_for_function("() => document.querySelector('#player')?.readyState >= 2")
     page.locator('#video-seek').evaluate("el => { el.value = 0.4; el.dispatchEvent(new Event('input', {bubbles:true})); }")
-    page.get_by_role('button', name='Study clip', exact=True).click()
+    page.locator('#study-clip').click()
     dialog = page.get_by_role('dialog', name='Clip study · 01', exact=True)
     expect(dialog).to_be_visible()
     expect(page.locator('#study-play')).to_be_enabled()
@@ -370,10 +370,10 @@ def test_clip_study_action_precision_and_return(browser, ui_server):
     page.wait_for_function("() => Math.abs(document.querySelector('#player').currentTime - .5) <= .08")
     assert page.locator('#player').evaluate('v => v.currentTime') == pytest.approx(.5, abs=.08)
     assert page.locator('#player').evaluate('v => v.paused')
-    expect(page.get_by_role('button',name='Study clip',exact=True)).to_be_focused()
+    expect(page.locator('#study-clip')).to_be_focused()
     page.get_by_role('button', name='Full practice ↗', exact=True).click()
     page.get_by_label('More video actions', exact=True).click()
-    expect(page.get_by_role('button', name='Study clip', exact=True)).not_to_be_visible()
+    expect(page.locator('#study-clip')).not_to_be_visible()
     page.close()
 
 
@@ -383,10 +383,10 @@ def test_clip_study_frame_package_is_local_and_resets(browser, ui_server, tmp_pa
     external = []
     page.on('request', lambda req: external.append(req.url) if req.url.startswith(('http:', 'https:')) and not req.url.startswith(ui_server) else None)
     page.goto(ui_server+f'/review/{ID}?clip={CLIP}')
-    page.get_by_role('button', name='Study clip', exact=True).click()
+    page.locator('#study-clip').click()
     dialog = page.get_by_role('dialog', name='Clip study · 01', exact=True)
-    expect(dialog.locator('.study-extra-tools')).not_to_have_attribute('open', '')
-    dialog.get_by_text('Recording & frame tools', exact=True).click()
+    expect(dialog.locator('#study-manual-frames')).not_to_have_attribute('open', '')
+    dialog.get_by_text('Manual frame export', exact=True).click()
     expect(dialog.get_by_role('button', name='Sample 6 moments', exact=True)).to_be_enabled()
     dialog.get_by_role('button', name='Sample 6 moments', exact=True).click()
     expect(page.locator('.study-frame')).to_have_count(6, timeout=15000)
@@ -403,7 +403,7 @@ def test_clip_study_frame_package_is_local_and_resets(browser, ui_server, tmp_pa
         assert all(0 < t < 2 for t in times)
     assert external == []
     dialog.get_by_role('button', name='← Back to review', exact=True).click()
-    page.get_by_role('button', name='Study clip', exact=True).click()
+    page.locator('#study-clip').click()
     expect(page.locator('.study-frame')).to_have_count(0)
     expect(page.locator('#study-export')).to_be_disabled()
     expect(page.locator('#study-export')).to_have_text('Download frame package')
@@ -415,11 +415,15 @@ def test_clip_study_frame_package_is_local_and_resets(browser, ui_server, tmp_pa
 def test_coaching_selection_queues_export_without_ai_upload(browser, ui_server):
     page=browser.new_page()
     page.goto(ui_server+f'/review/{ID}?clip={CLIP}')
-    page.get_by_role('button',name='Study clip',exact=True).click()
+    page.locator('#study-clip').click()
     expect(page.locator('#study-play')).to_be_enabled()
     expect(page.locator('#coach-ask')).to_be_enabled()
     page.locator('#study-pin-start').evaluate("el => { el.value = 0.2; el.dispatchEvent(new Event('input', {bubbles:true})); }")
     page.locator('#study-pin-end').evaluate("el => { el.value = 1.4; el.dispatchEvent(new Event('input', {bubbles:true})); }")
+    if page.locator('#coach-composer').get_attribute('open') is None:
+        page.locator('#coach-composer-summary').click()
+    if not page.locator('#coach-question').is_visible():
+        page.locator('#coach-toggle-question').click()
     page.get_by_label('Preset',exact=True).select_option('footwork')
     expect(page.locator('#coach-question')).to_have_value(re.compile('footwork'))
     page.get_by_role('textbox',name='Question for coach',exact=True).fill('Check my balance')
@@ -427,7 +431,7 @@ def test_coaching_selection_queues_export_without_ai_upload(browser, ui_server):
     zoom.press('Home')
     for _ in range(4):zoom.press('ArrowRight')
     with page.expect_response(lambda r:r.url.endswith('/api/coaching/exports') and r.request.method=='POST') as event:
-        page.get_by_role('button',name='Ask coach',exact=True).click()
+        page.get_by_role('button',name='Ask AI Coach',exact=True).click()
     response=event.value
     assert response.status==201
     job=response.json()
@@ -437,13 +441,20 @@ def test_coaching_selection_queues_export_without_ai_upload(browser, ui_server):
     assert spec['start']==pytest.approx(0.2,abs=0.01) and spec['end']==pytest.approx(1.4,abs=0.01)
     assert 0 < min(spec['crop'][2:]) < 1
     expect(page.locator('#coach-ask')).to_be_disabled()
-    expect(page.locator('#coach-status')).to_contain_text('Preparing your clip…')
+    expect(page.locator('#coach-active-request')).to_be_visible()
     with page.expect_response(lambda r:r.url.endswith('/api/coaching/exports') and r.request.method=='POST') as share_event:
-        page.get_by_role('button',name='Download interval',exact=True).click()
+        page.get_by_role('button',name='Prepare video download',exact=True).click()
     share_job=share_event.value.json()
     assert share_job['body']['intent']=='share' and share_job['body']['quality']=='high'
     assert share_job['body']['start']==pytest.approx(0.2,abs=0.01) and share_job['body']['end']==pytest.approx(1.4,abs=0.01)
-    expect(page.locator('#study-status')).to_contain_text('Preparing high-quality download…')
+    expect(page.locator('#study-download-card')).to_be_visible()
+    with page.expect_response(lambda r:r.url.endswith(f"/api/coaching/jobs/{job['id']}") and r.request.method=='PUT' and r.status==200):
+        page.locator('#coach-active-request').get_by_role('button',name='Cancel request',exact=True).click()
+    expect(page.locator('#coach-active-request')).to_be_hidden()
+    expect(page.locator('#coach-ask')).to_be_enabled()
+    with page.expect_response(lambda r:r.url.endswith(f"/api/coaching/jobs/{share_job['id']}") and r.request.method=='PUT' and r.status==200):
+        page.locator('#study-download-cancel').click()
+    expect(page.locator('#study-download-card')).to_be_hidden()
     page.get_by_role('button',name='← Back to review',exact=True).click()
     page.close()
 
@@ -494,7 +505,7 @@ def test_native_media_navigation_uses_current_clip_queue(browser, ui_server):
     page.evaluate('staleNext()')
     expect(page.locator('#player')).to_have_attribute('src',re.compile('clip-001.mp4'))
     # Clip study owns its own playback; the parent must not accept remote skips.
-    page.get_by_role('button',name='Study clip',exact=True).click()
+    page.locator('#study-clip').click()
     page.wait_for_function('() => Object.values(mediaHandlers).every(h => h === null)')
     page.get_by_role('button',name='← Back to review',exact=True).click()
     page.wait_for_function('() => typeof mediaHandlers.play === "function"')
@@ -576,45 +587,57 @@ def test_structured_coaching_evidence_review_and_draft(browser, ui_server, width
     assert all(v>=44 for v in pin_dims)
     assert float(page.locator('#study-pin-start').get_attribute('aria-valuenow'))==pytest.approx(0.25,abs=0.05)
     assert float(page.locator('#study-pin-end').get_attribute('aria-valuenow'))==pytest.approx(1.5,abs=0.05)
+    if page.locator('#coach-composer').get_attribute('open') is None:
+        page.locator('#coach-composer-summary').click()
+    if not page.locator('#coach-question').is_visible():
+        page.locator('#coach-toggle-question').click()
     question=page.get_by_role('textbox',name='Question for coach',exact=True)
     question.fill('Keep my custom question')
     expect(page.get_by_role('heading',name='Balanced reset',exact=True)).to_be_visible()
     expect(page.locator('.coach-asked-at')).to_contain_text('Asked ')
     card=page.locator('.coach-suggestion')
     expect(card).to_have_class(re.compile(r'\bis-highlighted\b'))
-    expect(card.locator('.coach-review-state')).to_have_text('Needs your review')
+    expect(card.locator('.coach-review-state')).to_have_text('New tip')
     expect(card.get_by_role('button',name='Save',exact=True)).to_have_count(0)
-    expect(card.get_by_role('button',name='Use in playback',exact=True)).to_be_visible()
-    card.get_by_role('button',name='Use in playback',exact=True).click()
-    expect(card.locator('.coach-review-state')).to_have_text('Saved · Active in playback')
-    expect(card.get_by_role('button',name='Use in playback',exact=True)).to_have_count(0)
+    expect(card.get_by_role('button',name='Save to Moments',exact=True)).to_be_visible()
+    card.get_by_role('button',name='Save to Moments',exact=True).click()
+    expect(card.locator('.coach-review-state')).to_have_text('Saved to Moments · Active in playback')
+    expect(card.get_by_role('button',name='Save to Moments',exact=True)).to_have_count(0)
     expect(card.get_by_role('button',name='Save',exact=True)).to_have_count(0)
     image=card.locator('img');expect(image).to_be_visible()
     expect(image).to_have_attribute('src','/api/coaching/evidence/job-test/f_test.jpg')
-    card.get_by_role('button',name=re.compile('Frame 1')).click()
+    card.get_by_role('button',name=re.compile(r'View key frame|Frame 1')).click()
     assert page.locator('#study-video').evaluate('v=>v.currentTime')==pytest.approx(.5,abs=.08)
     # Failed save (409 conflict) keeps dirty state so top-right × still protects unsaved edits.
+    if card.locator('.coach-more-menu').get_attribute('open') is None:
+        card.locator('.coach-more-menu > summary').click()
     card.locator('.coach-editor summary').click()
     card.get_by_label('Playback cue',exact=True).fill('Unsaved edited cue')
     fail_next_update['conflict']=True
     card.get_by_role('button',name='Save edits and accept',exact=True).click()
     expect(page.locator('#coach-status')).to_contain_text('This suggestion changed. Reload before saving your review')
     expect(card.get_by_label('Playback cue',exact=True)).to_have_value('Unsaved edited cue')
-    card.get_by_role('button',name='Discard suggestion',exact=True).click()
-    expect(page.locator('#coach-status')).to_contain_text('Save or reset your edits before discarding')
-    expect(card.locator('.coach-review-state')).to_have_text('Saved · Active in playback')
+    if card.locator('.coach-more-menu').get_attribute('open') is None:
+        card.locator('.coach-more-menu > summary').click()
+    card.get_by_role('button',name='Dismiss suggestion',exact=True).click()
+    expect(page.locator('#coach-status')).to_contain_text('Save or reset your edits before dismissing')
+    expect(card.locator('.coach-review-state')).to_have_text('Saved to Moments · Active in playback')
     # Reset edits restores the saved cue and clears dirty state, and successful save also clears dirty state.
     card.get_by_role('button',name='Reset edits',exact=True).click()
     expect(page.locator('#coach-status')).to_have_text('Edits reset.')
+    if card.locator('.coach-more-menu').get_attribute('open') is None:
+        card.locator('.coach-more-menu > summary').click()
     card.locator('.coach-editor summary').click()
     expect(card.get_by_label('Playback cue',exact=True)).to_have_value('Reset with soft knees.')
     card.get_by_label('Playback cue',exact=True).fill('Saved edited cue')
     card.get_by_role('button',name='Save edits and accept',exact=True).click()
-    expect(page.locator('#coach-status')).to_have_text('Suggestion saved.')
-    card.get_by_role('button',name='Discard suggestion',exact=True).click()
-    expect(card.locator('.coach-review-state')).to_have_text('Discarded')
+    expect(page.locator('#coach-status')).to_have_text('Saved to Moments.')
+    if card.locator('.coach-more-menu').get_attribute('open') is None:
+        card.locator('.coach-more-menu > summary').click()
+    card.get_by_role('button',name='Dismiss suggestion',exact=True).click()
+    expect(card.locator('.coach-review-state')).to_have_text('Dismissed')
     card.get_by_role('button',name='Restore',exact=True).click()
-    expect(card.locator('.coach-review-state')).to_have_text('Saved · Active in playback')
+    expect(card.locator('.coach-review-state')).to_have_text('Saved to Moments · Active in playback')
     # Missing exact suggestion shows a truthful notice instead of silently masquerading parent response as the suggestion.
     page.evaluate("()=>window.Coach.focusTarget({clipId: '"+CLIP+"', jobId: 'job-test', annotationId: 'a_missing', startSeconds: 0.4, endSeconds: 1.2})")
     expect(page.locator('#coach-status')).to_contain_text('The selected coaching suggestion is unavailable; showing its parent coaching review.')
@@ -627,7 +650,7 @@ def test_structured_coaching_evidence_review_and_draft(browser, ui_server, width
       document.getElementById('study-close').click();
       delete v.readyState;
     }""")
-    page.get_by_role('button',name='Study clip',exact=True).click()
+    page.locator('#study-clip').click()
     page.wait_for_function("() => document.getElementById('study-video')?.readyState >= 1")
     page.evaluate("""() => {
       const v = document.getElementById('study-video');
@@ -638,8 +661,15 @@ def test_structured_coaching_evidence_review_and_draft(browser, ui_server, width
     assert page.locator('#study-video').evaluate('v=>v.currentTime')!=pytest.approx(1.1,abs=0.05)
     assert page.locator('#clip-study').evaluate('d=>d.scrollWidth<=d.clientWidth')
     assert not page.evaluate('document.documentElement.scrollWidth>innerWidth')
-    if width<761:page.get_by_role('button',name='Coach',exact=True).click()
+    if width<761:page.locator('#study-mode-coach').click()
+    if page.locator('#coach-composer').get_attribute('open') is None:
+        page.locator('#coach-composer-summary').click()
+    if not page.locator('#coach-question').is_visible():
+        page.locator('#coach-toggle-question').click()
     expect(question).to_have_value('Keep my custom question')
+    review_details = page.locator('.coach-review-details').first
+    if review_details.count() and review_details.get_attribute('open') is None and not page.get_by_role('button',name='Re-ask',exact=True).is_visible():
+        review_details.locator('> summary').click()
     page.get_by_role('button',name='Re-ask',exact=True).click()
     expect(question).to_be_visible()
     question.fill('Please reassess all snapshots, including footwork.')
@@ -649,9 +679,9 @@ def test_structured_coaching_evidence_review_and_draft(browser, ui_server, width
         new=copy.deepcopy(job);new.update(id='follow-up-job',version=1,state='queued');new['body'].update(prompt=sent[-1]['prompt'],follow_up_of='job-test');state['jobs'].insert(0,new)
         route.fulfill(status=201,json=new)
     page.route('**/api/coaching/requests',ask)
-    page.get_by_role('button',name='Ask coach',exact=True).click()
-    expect(page.locator('#coach-status')).to_have_text('Getting response…')
-    expect(page.locator('#coach-history')).to_contain_text('Queued')
+    page.get_by_role('button',name='Ask AI Coach',exact=True).click()
+    expect(page.locator('#coach-active-request')).to_be_visible()
+    expect(page.locator('#coach-active-request')).to_contain_text('Queued')
     assert sent[0]['follow_up_of']=='job-test' and sent[0]['export_id']=='render-test'
     assert sent[0]['prompt']=='Please reassess all snapshots, including footwork.'
     assert not errors
@@ -663,7 +693,7 @@ def test_normal_playback_ignores_coaching_end_until_play_selection(browser,ui_se
     csp_errors=[]
     page.add_init_script("window.cspViolations=[]; document.addEventListener('securitypolicyviolation', e => window.cspViolations.push(e.blockedURI + ':' + e.violatedDirective));")
     page.goto(ui_server+f'/review/{ID}?clip={CLIP}')
-    page.get_by_role('button',name='Study clip',exact=True).click()
+    page.locator('#study-clip').click()
     expect(page.locator('#study-play')).to_be_enabled()
     bar_box=page.locator('#study-interval-bar').bounding_box()
     pin_start=page.locator('#study-pin-start')
@@ -719,9 +749,13 @@ def test_player_profiles_assignments_and_filters(browser, ui_server):
     page.reload()
     expect(page.locator('#clip-main-player')).to_have_attribute('aria-label',re.compile(re.escape(name)))
     assert not page.evaluate('document.documentElement.scrollWidth > innerWidth')
-    page.get_by_role('button',name='Study clip',exact=True).click()
+    page.locator('#study-clip').click()
     page.locator('#study-mode-coach').click()
+    if page.locator('#coach-composer').get_attribute('open') is None:
+        page.locator('#coach-composer-summary').click()
     expect(page.locator('#coach-player-context')).to_contain_text(name)
+    if not page.locator('#coach-question').is_visible():
+        page.locator('#coach-toggle-question').click()
     expect(page.locator('#coach-question')).not_to_have_value(re.compile('I am a beginner'))
     page.get_by_role('button',name='← Back to review',exact=True).click()
     page.goto(ui_server+'/')
@@ -1698,10 +1732,13 @@ def test_adjacent_thumb_reactions_are_exclusive_and_scoped(browser,ui_server,wid
     expect(group).to_be_visible()
     assert group.locator('button').count()==2 and group.locator('svg').count()==2
     assert group.evaluate("e=>getComputedStyle(e).borderTopWidth")=="0px"
+    download=page.locator('#player-download').bounding_box()
+    study=page.locator('#study-clip').bounding_box()
     for button in group.locator('button').all():
         assert button.evaluate("e=>getComputedStyle(e).borderTopWidth")=="0px"
-        box=button.bounding_box();study=page.locator('#study-clip').bounding_box()
-        assert abs(box['width']-study['width'])<1 and abs(box['height']-study['height'])<1
+        box=button.bounding_box()
+        assert abs(box['width']-download['width'])<1 and abs(box['height']-download['height'])<1
+        assert abs(box['height']-study['height'])<2 and study['width']>box['width']
     expect(page.locator('.note-quick-actions')).to_have_count(0)
     page.locator('#note-demote').click()
     expect(page.locator('#note-demote')).to_have_attribute('aria-pressed','true')
@@ -1939,7 +1976,7 @@ def test_desktop_autofocus_tracking_loss_and_cleanup(browser, ui_server):
     )
 
     # Opening Clip Study suspends/disables Auto focus and restores neutral framing.
-    page.get_by_role('button', name='Study clip', exact=True).click()
+    page.locator('#study-clip').click()
     expect(page.locator('#clip-study')).to_be_visible()
     expect(af_btn).to_have_attribute('aria-pressed', 'false')
     expect(af_btn).to_have_attribute('data-autofocus-state', 'off')
@@ -2361,8 +2398,8 @@ def test_share_download_ignores_old_selection_results(browser, ui_server, delaye
     page.route('**/api/coaching/exports', create)
     page.route('**/api/coaching/jobs/share-*', poll)
     page.goto(ui_server + f'/review/{ID}?clip={CLIP}')
-    page.get_by_role('button', name='Study clip', exact=True).click()
-    download = page.get_by_role('button', name='Download interval', exact=True)
+    page.locator('#study-clip').click()
+    download = page.get_by_role('button', name='Prepare video download', exact=True)
     expect(download).to_be_enabled()
     expected = '/api/coaching/exports' if delayed == 'create' else '/api/coaching/jobs/share-1'
     with page.expect_request(lambda r: r.url.endswith(expected)):
@@ -2422,14 +2459,18 @@ def test_old_coach_failure_cannot_clear_reopened_clip_request(browser, ui_server
     page.route('**/api/coaching/exports', create)
     page.route('**/api/coaching/requests', ask)
     page.goto(ui_server + f'/review/{ID}?clip={CLIP}')
-    page.get_by_role('button', name='Study clip', exact=True).click()
+    page.locator('#study-clip').click()
+    expect(page.locator('#study-play')).to_be_enabled()
+    expect(page.locator('#coach-ask')).to_be_enabled()
     with page.expect_request(lambda r: r.url.endswith('/api/coaching/exports')):
-        page.get_by_role('button', name='Ask coach', exact=True).click()
+        page.get_by_role('button', name='Ask AI Coach', exact=True).click()
     page.get_by_role('button', name='← Back to review', exact=True).click()
     page.get_by_role('button', name=re.compile(r'^Play clip 2,')).click()
-    page.get_by_role('button', name='Study clip', exact=True).click()
-    page.get_by_role('button', name='Ask coach', exact=True).click()
-    expect(page.locator('#coach-status')).to_contain_text('Preparing your clip')
+    page.locator('#study-clip').click()
+    expect(page.locator('#study-play')).to_be_enabled()
+    expect(page.locator('#coach-ask')).to_be_enabled()
+    page.get_by_role('button', name='Ask AI Coach', exact=True).click()
+    expect(page.locator('#coach-active-request')).to_be_visible()
     assert len(exported) == 2 and exported[1]['clip_id'] != CLIP
     assert held
     held[0].fulfill(status=500, json={'error': 'Old request failed'})
@@ -2825,7 +2866,7 @@ def test_auto_coach_real_worker_smoke_and_fallback(browser, ui_server):
       };
     })()""")
     page.goto(ui_server + f'/review/{ID}?clip={CLIP}')
-    page.get_by_role('button', name='Study clip', exact=True).click()
+    page.locator('#study-clip').click()
     page.wait_for_function("() => document.querySelector('#study-video')?.readyState >= 2")
     assert page.evaluate('window.__autoCoachWorkerEvents.length') == 0
     expect(page.locator('#coach-auto-ask')).to_have_count(0)
@@ -2833,7 +2874,7 @@ def test_auto_coach_real_worker_smoke_and_fallback(browser, ui_server):
 
     auto_btn = page.locator('#study-auto-detect')
     expect(auto_btn).to_be_enabled()
-    expect(auto_btn).to_have_text('Auto select & zoom')
+    expect(auto_btn).to_have_text('Auto-frame motion')
     auto_btn.click()
 
     page.wait_for_function(
@@ -2849,8 +2890,8 @@ def test_auto_coach_real_worker_smoke_and_fallback(browser, ui_server):
         assert browser.browser_type.name != 'chromium', 'Reference Chromium must run real MediaPipe inference in Clip Study'
         expect(page.locator('#study-video')).to_have_attribute('data-auto-coach-state', 'unavailable')
         expect(auto_btn).to_be_disabled()
-        expect(auto_btn).to_have_text('Auto select unavailable')
-        expect(page.locator('#study-status')).to_contain_text('Auto select & zoom is unavailable in this browser.')
+        expect(auto_btn).to_have_text('Auto-frame unavailable')
+        expect(page.locator('#study-status')).to_contain_text('is unavailable in this browser.')
         expect(page.locator('#coach-ask')).to_be_enabled()
     else:
         assert int(page.locator('#study-video').get_attribute('data-auto-coach-detections') or '0') >= 1
@@ -2987,7 +3028,7 @@ def test_clip_study_auto_coach_detection_cap_cancellation_and_manual_coexistence
       });
       window.__setMockDuration = d => { mockDuration = d; };
     }""")
-    page.get_by_role('button', name='Study clip', exact=True).click()
+    page.locator('#study-clip').click()
     page.wait_for_function("() => document.querySelector('#study-video')?.readyState >= 2")
 
     # Zero background scanning on modal open; old #coach-auto-* controls removed; model-neutral copy enforced.
@@ -2995,8 +3036,8 @@ def test_clip_study_auto_coach_detection_cap_cancellation_and_manual_coexistence
     assert len(export_calls) == 0 and len(ai_calls) == 0
     expect(page.locator('#coach-auto-ask')).to_have_count(0)
     expect(page.locator('#coach-auto-quota')).to_have_count(0)
-    expect(page.locator('#coaching-panel .study-muted').first).to_contain_text('to send up to 32 stills and your question to AI coach')
-    coaching_text = page.locator('#coaching-panel').inner_text()
+    coaching_text = page.locator('#coaching-panel').text_content() or ''
+    assert 'sends up to 32 selected frames' in coaching_text
     assert 'OpenAI' not in coaching_text
     assert 'ChatGPT' not in coaching_text
     prompt_actions_text = page.locator('.study-ai-actions').text_content() or ''
@@ -3006,13 +3047,18 @@ def test_clip_study_auto_coach_detection_cap_cancellation_and_manual_coexistence
 
     auto_btn = page.locator('#study-auto-detect')
     cancel_btn = page.locator('#study-auto-cancel')
+    stepper = page.locator('#study-auto-stepper')
+    stepper_count = page.locator('#study-auto-count')
+    next_btn = page.locator('#study-auto-next')
+    prev_btn = page.locator('#study-auto-prev')
     expect(auto_btn).to_be_visible()
     expect(auto_btn).to_be_enabled()
-    expect(auto_btn).to_have_text('Auto select & zoom')
+    expect(auto_btn).to_have_text('Auto-frame motion')
 
     # 1. Empty court / static scene -> 0 windows selected, 0 jobs created, truthful guidance shown.
     auto_btn.click()
     expect(page.locator('#study-status')).to_contain_text('No clear player motion detected in this clip. Select an interval and zoom manually.')
+    expect(stepper).to_be_hidden()
     assert len(export_calls) == 0 and len(ai_calls) == 0
     assert page.evaluate('window.__scanWorkers.at(-1).terminated') is True
 
@@ -3032,9 +3078,9 @@ def test_clip_study_auto_coach_detection_cap_cancellation_and_manual_coexistence
     auto_btn.click(force=True)
     assert page.evaluate('window.__scanWorkers.length') == workers_during_scan
     cancel_btn.click()
-    expect(page.locator('#study-status')).to_contain_text('Auto select scan cancelled.')
+    expect(page.locator('#study-status')).to_contain_text('Auto-frame scan cancelled.')
     expect(cancel_btn).to_be_hidden()
-    expect(auto_btn).to_have_text('Auto select & zoom')
+    expect(auto_btn).to_have_text('Auto-frame motion')
     assert len(export_calls) == 0
     sel_after_cancel = page.evaluate('window.ClipStudy.coachingSelection()')
     assert sel_after_cancel['start'] == pytest.approx(0.3, abs=0.05)
@@ -3047,15 +3093,17 @@ def test_clip_study_auto_coach_detection_cap_cancellation_and_manual_coexistence
     page.get_by_role('button', name='← Back to review', exact=True).click()
     page.wait_for_function('() => window.__scanWorkers.at(-1)?.terminated === true')
     assert len(export_calls) == 0
-    page.get_by_role('button', name='Study clip', exact=True).click()
+    page.locator('#study-clip').click()
     page.wait_for_function("() => document.querySelector('#study-video')?.readyState >= 2")
 
-    # 3. Two non-overlapping motion bursts: scans locally, applies zoom > 1 & focus crop, cycles Next moment (1/2) -> (2/2) -> (1/2) without spawning extra workers or API calls.
+    # 3. Two non-overlapping motion bursts: scans locally, keeps Auto-frame motion button label, applies zoom > 1 & focus crop, cycles via Prev/Next stepper (1 of 2 -> 2 of 2 -> 1 of 2) without spawning extra workers or API calls.
     page.evaluate('() => { window.__scanDelayMs = 2; window.__scanScene = "two_bursts"; }')
     workers_before_detect = page.evaluate('window.__scanWorkers.length')
     auto_btn.click()
-    expect(auto_btn).to_have_text('Next moment (1/2)')
-    expect(page.locator('#study-status')).to_contain_text('Selected 1 of 2 moments')
+    expect(stepper).to_be_visible()
+    expect(stepper_count).to_have_text('1 of 2')
+    expect(auto_btn).to_have_text('Auto-frame motion')
+    expect(page.locator('#study-status')).to_contain_text('Framed 1 of 2 moments')
     assert page.evaluate('window.__scanWorkers.length') == workers_before_detect + 1
     assert len(export_calls) == 0 and len(ai_calls) == 0
 
@@ -3064,9 +3112,9 @@ def test_clip_study_auto_coach_detection_cap_cancellation_and_manual_coexistence
     assert 0 < min(sel1['crop'][2], sel1['crop'][3]) < 1.0
     assert page.locator('#study-video').evaluate('v => v.currentTime') == pytest.approx(sel1['start'], abs=0.08)
 
-    # Clicking again cycles locally to moment 2 without spawning another worker.
-    auto_btn.click()
-    expect(auto_btn).to_have_text('Next moment (2/2)')
+    # Clicking Next cycles locally to moment 2 without spawning another worker.
+    next_btn.click()
+    expect(stepper_count).to_have_text('2 of 2')
     expect(page.locator('#study-status')).to_contain_text('Moment 2 of 2:')
     assert page.evaluate('window.__scanWorkers.length') == workers_before_detect + 1
     sel2 = page.evaluate('window.ClipStudy.coachingSelection()')
@@ -3075,15 +3123,19 @@ def test_clip_study_auto_coach_detection_cap_cancellation_and_manual_coexistence
     assert sel2['crop'] != sel1['crop']
     assert len(export_calls) == 0 and len(ai_calls) == 0
 
-    # Clicking again wraps back to moment 1.
-    auto_btn.click()
-    expect(auto_btn).to_have_text('Next moment (1/2)')
+    # Clicking Prev and Next wraps cleanly without extra workers.
+    prev_btn.click()
+    expect(stepper_count).to_have_text('1 of 2')
     assert page.evaluate('window.ClipStudy.coachingSelection().start') == pytest.approx(sel1['start'], abs=0.05)
 
-    # 4. Manual Ask coach sends the locally auto-selected interval and zoomed crop (without auto_detect flag).
+    # 4. Manual Ask AI Coach sends the locally auto-selected interval and zoomed crop (without auto_detect flag).
     page.locator('#study-speed').select_option('0.25')
     if width < 761:
         page.locator('#study-mode-coach').click()
+    if page.locator('#coach-composer').get_attribute('open') is None:
+        page.locator('#coach-composer-summary').click()
+    if not page.locator('#coach-question').is_visible():
+        page.locator('#coach-toggle-question').click()
     page.get_by_role('textbox', name='Question for coach', exact=True).fill('Check split step and recovery on zoomed moment')
     page.locator('#coach-ask').click()
     assert len(export_calls) == 1
@@ -3110,8 +3162,10 @@ def test_clip_study_auto_coach_detection_cap_cancellation_and_manual_coexistence
     if width < 761:
         page.locator('#study-mode-watch').click()
     auto_btn.click()
-    expect(auto_btn).to_have_text('Next moment (1/5)')
-    expect(page.locator('#study-status')).to_contain_text('Selected 1 of 5 moments')
+    expect(stepper).to_be_visible()
+    expect(stepper_count).to_have_text('1 of 5')
+    expect(auto_btn).to_have_text('Auto-frame motion')
+    expect(page.locator('#study-status')).to_contain_text('Framed 1 of 5 moments')
     assert len(export_calls) == 1
 
     for check_w in (320, 390, 1280):
@@ -3215,12 +3269,15 @@ def test_clip_study_auto_coach_long_clip_watchdog_and_stale_abort_regressions(br
         },
       });
     }""")
-    page.get_by_role('button', name='Study clip', exact=True).click()
+    page.locator('#study-clip').click()
     page.wait_for_function("() => document.querySelector('#study-video')?.readyState >= 2")
 
     auto_btn = page.locator('#study-auto-detect')
+    stepper = page.locator('#study-auto-stepper')
+    stepper_count = page.locator('#study-auto-count')
+    next_btn = page.locator('#study-auto-next')
     expect(auto_btn).to_be_enabled()
-    expect(auto_btn).to_have_text('Auto select & zoom')
+    expect(auto_btn).to_have_text('Auto-frame motion')
 
     # 1. Total scan watchdog: each sample takes 55ms (< detectTimeoutMs=2000ms), but cumulative scan exceeds scanTimeoutMs=160ms.
     page.evaluate("""() => {
@@ -3232,10 +3289,10 @@ def test_clip_study_auto_coach_long_clip_watchdog_and_stale_abort_regressions(br
       window.__TENNIS_AUTOFOCUS_CONFIG = {detectTimeoutMs: 2000, scanTimeoutMs: 160};
     }""")
     auto_btn.click()
-    expect(page.locator('#study-status')).to_contain_text('Auto-detect scan timed out. Try again or select an interval and use Ask coach.')
+    expect(page.locator('#study-status')).to_contain_text('timed out')
     expect(page.locator('#study-video')).to_have_attribute('data-auto-coach-state', 'error')
     expect(auto_btn).to_be_enabled()
-    expect(auto_btn).to_have_text('Auto select & zoom')
+    expect(auto_btn).to_have_text('Auto-frame motion')
     assert page.evaluate('window.__scanWorkers.at(-1).terminated') is True
     assert len(export_calls) == 0 and len(ai_calls) == 0
     sel_after_timeout = page.evaluate('window.ClipStudy.coachingSelection()')
@@ -3250,16 +3307,16 @@ def test_clip_study_auto_coach_long_clip_watchdog_and_stale_abort_regressions(br
       window.__workerMode = 'detector_error';
     }""")
     auto_btn.click()
-    expect(page.locator('#study-status')).to_contain_text('Automatic detection failed on this clip. Try again or select an interval and use Ask coach.')
+    expect(page.locator('#study-status')).to_contain_text('failed on this clip')
     expect(page.locator('#study-video')).to_have_attribute('data-auto-coach-state', 'error')
     expect(auto_btn).to_be_enabled()
 
     page.evaluate("() => { window.__workerMode = 'unsupported'; }")
     auto_btn.click()
-    expect(page.locator('#study-status')).to_contain_text('Auto select & zoom is unavailable in this browser.')
+    expect(page.locator('#study-status')).to_contain_text('is unavailable in this browser.')
     expect(page.locator('#study-video')).to_have_attribute('data-auto-coach-state', 'unavailable')
     expect(auto_btn).to_be_disabled()
-    expect(auto_btn).to_have_text('Auto select unavailable')
+    expect(auto_btn).to_have_text('Auto-frame unavailable')
     expect(page.locator('#coach-ask')).to_be_enabled()
 
     # Re-open with normal worker mode to test 60s clip paired-sample auto-detection (2 non-overlapping moments from 16 samples, zero auto exports).
@@ -3267,20 +3324,22 @@ def test_clip_study_auto_coach_long_clip_watchdog_and_stale_abort_regressions(br
       window.__workerMode = 'normal';
       document.getElementById('clip-study').close();
     }""")
-    page.get_by_role('button', name='Study clip', exact=True).click()
+    page.locator('#study-clip').click()
     page.wait_for_function("() => document.querySelector('#study-video')?.readyState >= 2")
     expect(auto_btn).to_be_enabled()
     auto_btn.click()
-    expect(auto_btn).to_contain_text('Next moment (1/')
+    expect(stepper).to_be_visible()
+    expect(stepper_count).to_have_text(re.compile(r'^1 of \d+$'))
+    expect(auto_btn).to_have_text('Auto-frame motion')
     assert len(export_calls) == 0 and len(ai_calls) == 0
     assert int(page.locator('#study-video').get_attribute('data-auto-coach-detections') or '0') == 16
-    total_moments = int(auto_btn.inner_text().split('/')[1].rstrip(')'))
+    total_moments = int(stepper_count.inner_text().split('of')[-1].strip())
     assert 2 <= total_moments <= 5
     windows_seen = []
     for idx in range(total_moments):
         if idx > 0:
-            auto_btn.click()
-            expect(auto_btn).to_have_text(f'Next moment ({idx + 1}/{total_moments})')
+            next_btn.click()
+            expect(stepper_count).to_have_text(f'{idx + 1} of {total_moments}')
         sel = page.evaluate('window.ClipStudy.coachingSelection()')
         assert sel['zoom'] > 1.0
         windows_seen.append(sel)
@@ -3529,11 +3588,20 @@ def test_coaching_subject_selector_auto_coach_reopen_followup_and_learning(brows
         }""")
 
         # 1. Open Clip Study -> Coach: subject selector defaults to Alex (clip main player).
-        page.get_by_role('button', name='Study clip', exact=True).click()
+        page.locator('#study-clip').click()
         page.wait_for_function("() => document.querySelector('#study-video')?.readyState >= 2")
         if width < 761:
             page.locator('#study-mode-coach').click()
 
+        def open_composer_controls(need_player=False, need_question=False):
+            if page.locator('#coach-composer').get_attribute('open') is None:
+                page.locator('#coach-composer-summary').click()
+            if need_player and not page.locator('#coach-subject').is_visible():
+                page.locator('#coach-toggle-player').click()
+            if need_question and not page.locator('#coach-question').is_visible():
+                page.locator('#coach-toggle-question').click()
+
+        open_composer_controls(need_player=True, need_question=True)
         subject_sel = page.locator('#coach-subject')
         expect(subject_sel).to_be_visible()
         expect(subject_sel).to_have_value(alex['id'])
@@ -3561,21 +3629,22 @@ def test_coaching_subject_selector_auto_coach_reopen_followup_and_learning(brows
         assert sess_after_add['clips'][0]['main_player']['id'] == alex['id']
         assert [p['id'] for p in sess_after_add['recording_players']] == [alex['id']]
 
-        # 3. Select Blair + visible target cue, click Ask coach, and switch dropdown mid-render: pending job keeps Blair!
+        # 3. Select Blair + visible target cue, click Ask AI Coach, and switch dropdown mid-render: pending job keeps Blair!
         subject_sel.select_option(blair['id'])
         expect(page.locator('#coach-player-context')).to_contain_text('For BlairPrivate (this request only; clip player unchanged)')
-        expect(page.locator('#coach-player-context')).to_contain_text('Auto select & zoom scans foreground motion, not player identity.')
+        expect(page.locator('#coach-player-context')).to_contain_text('foreground motion, not player identity.')
         page.locator('#coach-subject-hint').fill('far-court player in dark shirt')
         page.locator('#coach-question').fill('Check split-step posture for Blair')
         page.locator('#coach-ask').click()
-        expect(page.locator('#coach-status')).to_have_text('Preparing your clip…')
+        expect(page.locator('#coach-active-request')).to_be_visible()
 
-        # Mutate the live UI controls while render is queued — must NOT retarget pendingAsk.
+        # Mutate the live UI controls while render is queued — must NOT retarget pending request.
+        open_composer_controls(need_player=True)
         subject_sel.select_option(alex['id'])
         page.locator('#coach-subject-hint').fill('near-court server in white')
         finish_next_render()
         # Trigger a refresh cycle by polling / waiting until AI job is queued, then complete AI job.
-        page.wait_for_function("() => document.querySelector('#coach-status')?.textContent === 'Getting response…'", timeout=8000)
+        page.wait_for_function("() => document.querySelector('#coach-active-request')?.textContent?.includes('Waiting for AI')", timeout=8000)
         claimed_blair_1 = finish_next_ai('Blair manual stance summary', title='Wide split step')
         assert claimed_blair_1['body']['subject_mode'] == 'selected_player'
         assert claimed_blair_1['body']['player_context']['player_id'] == blair['id']
@@ -3591,13 +3660,14 @@ def test_coaching_subject_selector_auto_coach_reopen_followup_and_learning(brows
         blair_card = page.locator(f'.coach-note[data-job="{claimed_blair_1["id"]}"]')
         expect(blair_card).to_contain_text('Blair manual stance summary')
         expect(blair_card.locator('.coach-job-subject')).to_have_text('For BlairPrivate · selected for this review · Target: far-court player in dark shirt')
-        # Suggestion is eligible for Use in playback even though clip.main_player is Alex!
-        use_btn = blair_card.get_by_role('button', name='Use in playback', exact=True)
+        # Suggestion is eligible for Save to Moments even though clip.main_player is Alex!
+        use_btn = blair_card.get_by_role('button', name='Save to Moments', exact=True)
         expect(use_btn).to_be_visible()
         use_btn.click()
-        expect(blair_card.locator('.coach-review-state')).to_have_text('Saved · Active in playback')
+        expect(blair_card.locator('.coach-review-state')).to_have_text('Saved to Moments · Active in playback')
 
         # 4. Cross-tab profile edit (Blair v1 -> v2) returns 409 and automatically syncs #coach-subject to v2 for clean retry.
+        open_composer_controls(need_player=True, need_question=True)
         subject_sel.select_option(blair['id'])
         page.locator('#coach-subject-hint').fill('far-court player in dark shirt')
         page.locator('#coach-question').fill('Second angle check for Blair')
@@ -3608,17 +3678,18 @@ def test_coaching_subject_selector_auto_coach_reopen_followup_and_learning(brows
         page.wait_for_function(f"() => model.players.find(p => p.id === '{blair['id']}')?.version === 2")
         expect(subject_sel).to_have_value(blair['id'])
         page.locator('#coach-ask').click()
-        expect(page.locator('#coach-status')).to_have_text('Getting response…')
+        expect(page.locator('#coach-active-request')).to_contain_text('Waiting for AI')
         claimed_blair_v2 = finish_next_ai('Blair v2 follow-on summary', title='Pro unit turn')
         assert claimed_blair_v2['body']['player_context']['profile_version'] == 2
 
-        # 5. Local Auto select & zoom selects and zooms to a burst without auto-submitting; then manual Ask coach submits the zoomed crop for Blair (v2).
+        # 5. Local Auto-frame motion selects and zooms to a burst without auto-submitting; then manual Ask AI Coach submits the zoomed crop for Blair (v2).
         if width < 761:
             page.locator('#study-mode-watch').click()
         auto_btn = page.locator('#study-auto-detect')
         expect(auto_btn).to_be_enabled()
         auto_btn.click()
-        expect(auto_btn).to_have_text('Next moment (1/2)')
+        expect(page.locator('#study-auto-stepper')).to_be_visible()
+        expect(page.locator('#study-auto-count')).to_have_text('1 of 2')
         zoomed_sel = page.evaluate('window.ClipStudy.coachingSelection()')
         assert zoomed_sel['zoom'] > 1.0
         assert 0 < min(zoomed_sel['crop'][2], zoomed_sel['crop'][3]) < 1.0
@@ -3626,6 +3697,7 @@ def test_coaching_subject_selector_auto_coach_reopen_followup_and_learning(brows
 
         if width < 761:
             page.locator('#study-mode-coach').click()
+        open_composer_controls(need_player=True, need_question=True)
         subject_sel.select_option(blair['id'])
         page.locator('#coach-subject-hint').fill('backhand corner player')
         page.locator('#coach-question').fill('Check zoomed split step and recovery')
@@ -3641,6 +3713,7 @@ def test_coaching_subject_selector_auto_coach_reopen_followup_and_learning(brows
         page.evaluate('() => window.Coach.open(model.session, model.session.clips[0])')
         if width < 761:
             page.locator('#study-mode-coach').click()
+        open_composer_controls(need_player=True, need_question=True)
         subject_sel.select_option('')
         page.locator('#coach-subject-hint').fill('')
         page.locator('#coach-question').fill('General unassigned rally geometry')
@@ -3656,7 +3729,11 @@ def test_coaching_subject_selector_auto_coach_reopen_followup_and_learning(brows
 
         # Click Re-ask on Blair's v2 review: restores Blair + hint; then switch to Alex -> clears follow_up_of and submits independently.
         v2_card = page.locator(f'.coach-note[data-job="{claimed_blair_v2["id"]}"]')
+        v2_details = v2_card.locator('.coach-review-details')
+        if v2_details.count() and v2_details.get_attribute('open') is None and not v2_card.get_by_role('button', name='Re-ask', exact=True).is_visible():
+            v2_details.locator('> summary').click()
         v2_card.get_by_role('button', name='Re-ask', exact=True).click()
+        open_composer_controls(need_player=True, need_question=True)
         expect(subject_sel).to_have_value(blair['id'])
         expect(page.locator('#coach-subject-hint')).to_have_value('far-court player in dark shirt')
         expect(page.locator('#coach-follow-up-context')).to_have_text('Re-asking with previous question and response context.')
@@ -3676,9 +3753,10 @@ def test_coaching_subject_selector_auto_coach_reopen_followup_and_learning(brows
         if width < 761:
             page.locator('#study-mode-coach').click()
         alex_card = page.locator(f'.coach-note[data-job="{claimed_alex["id"]}"]')
-        alex_card.get_by_role('button', name='Use in playback', exact=True).click()
-        expect(alex_card.locator('.coach-review-state')).to_have_text('Saved · Active in playback')
+        alex_card.get_by_role('button', name='Save to Moments', exact=True).click()
+        expect(alex_card.locator('.coach-review-state')).to_have_text('Saved to Moments · Active in playback')
 
+        open_composer_controls(need_question=True)
         page.locator('#coach-question').fill('Disposable Alex check to delete in Clip Study')
         page.locator('#coach-ask').click()
         temp_alex = fulfill_manual_ask('Temp Alex summary', title='Disposable note')
@@ -3687,7 +3765,11 @@ def test_coaching_subject_selector_auto_coach_reopen_followup_and_learning(brows
             page.locator('#study-mode-coach').click()
         temp_card = page.locator(f'.coach-note[data-job="{temp_alex["id"]}"]')
         expect(temp_card).to_be_visible()
+        temp_details = temp_card.locator('.coach-review-details')
+        if temp_details.count() and temp_details.get_attribute('open') is None:
+            temp_details.locator('> summary').click()
         temp_card.get_by_role('button', name='Delete review', exact=True).click()
+        temp_card.get_by_role('button', name='Confirm delete', exact=True).click()
         expect(page.locator('#coach-status')).to_have_text('Coaching review deleted.')
         expect(temp_card).to_have_count(0)
         assert c.get(f'/api/coaching/jobs/{temp_alex["id"]}').status_code == 404
@@ -3706,13 +3788,14 @@ def test_coaching_subject_selector_auto_coach_reopen_followup_and_learning(brows
         assert final_sess['clips'][1]['player_assignment'] == sess_after_add['clips'][1]['player_assignment']
         assert [p['id'] for p in final_sess['recording_players']] == [alex['id']]
 
-        # 6b. Delete Alex's review from the Watch page Moments menu and confirm complete removal.
+        # 6b. Delete Alex's review from the Watch page Moments menu (inline confirmation) and confirm complete removal.
         if page.locator('#moment-toggle').get_attribute('aria-expanded') == 'false':
             page.locator('#moment-toggle').click()
         alex_moment = page.locator(f'#notes-list .note-item[data-note="coach-response:{claimed_alex["id"]}"]')
         expect(alex_moment).to_be_visible()
         alex_moment.locator('.note-actions-menu summary').click()
         alex_moment.locator('[data-note-action="delete-coach"]').click()
+        alex_moment.get_by_role('button', name='Confirm delete', exact=True).click()
         expect(alex_moment).to_have_count(0)
         assert c.get(f'/api/coaching/jobs/{claimed_alex["id"]}').status_code == 404
 
@@ -3733,7 +3816,9 @@ def test_coaching_subject_selector_auto_coach_reopen_followup_and_learning(brows
         expect(page.locator('#learning-banner-headline')).to_have_text('Ready to generate a learning plan from your saved coaching reviews.')
 
         page.locator('#learning-tab-reviews').click()
-        page.locator('.learning-review', has_text='Blair zoomed moment 1 summary').get_by_role('button', name='Delete review', exact=True).click()
+        blair_zoomed_review = page.locator('.learning-review', has_text='Blair zoomed moment 1 summary')
+        blair_zoomed_review.get_by_role('button', name='Delete review', exact=True).click()
+        blair_zoomed_review.get_by_role('button', name='Confirm delete', exact=True).click()
         expect(page.locator('#learning-tab-reviews')).to_have_text('Reviews (2)')
         assert 'Blair zoomed moment 1 summary' not in page.locator('#learning-clips').inner_text()
         assert c.get(f'/api/coaching/jobs/{blair_zoomed_ai["id"]}').status_code == 404
@@ -4072,7 +4157,7 @@ def test_coaching_inspection_overlay_disjoint_ranges_walkthrough_and_non_mutatio
     page.route('**/api/coaching/exports', capture_export)
 
     page.goto(ui_server + f'/review/{ID}?clip={CLIP}')
-    page.get_by_role('button', name='Study clip', exact=True).click()
+    page.locator('#study-clip').click()
     expect(page.locator('#study-play')).to_be_enabled()
     page.wait_for_function("() => document.getElementById('study-video')?.readyState >= 1")
 
@@ -4087,7 +4172,7 @@ def test_coaching_inspection_overlay_disjoint_ranges_walkthrough_and_non_mutatio
         }"""
     )
     if width < 761:
-        page.get_by_role('button', name='Coach', exact=True).click()
+        page.locator('#study-mode-coach').click()
         page.evaluate('() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))')
     baseline = page.evaluate('() => window.ClipStudy.coachingSelection()')
     assert baseline['start'] == pytest.approx(0.3, abs=0.02)
@@ -4112,8 +4197,9 @@ def test_coaching_inspection_overlay_disjoint_ranges_walkthrough_and_non_mutatio
     assert page.locator('#study-coach-markers .study-coach-marker-range').count() >= 2
     assert page.locator('#study-coach-markers .study-coach-marker-tick').count() >= 1
 
-    # 2. Click Inspect frame -> auto-reveals mobile player, lazy-loads pose once, shows SVG focus & joints.
-    card_one.get_by_role('button', name='Inspect frame', exact=True).click()
+    # 2. Click View key frame -> auto-reveals mobile player, lazy-loads pose once, shows SVG focus & joints.
+    inspect_btn = card_one.get_by_role('button', name=re.compile(r'^View key frame')).first
+    inspect_btn.click()
     expect(page.locator('#clip-study')).to_have_attribute('data-coach-inspecting', 'true')
     if width < 761:
         expect(page.locator('#clip-study')).to_have_attribute('data-player-collapsed', 'false')
@@ -4170,7 +4256,9 @@ def test_coaching_inspection_overlay_disjoint_ranges_walkthrough_and_non_mutatio
 
     # 7. Opt-in Walkthrough sets 0.35x + HUD, cancels on manual pause, and honors reduced-motion.
     chips.nth(0).click()
-    card_one.get_by_role('button', name='Walkthrough', exact=True).click()
+    if card_one.locator('.coach-more-menu').get_attribute('open') is None:
+        card_one.locator('.coach-more-menu > summary').click()
+    card_one.get_by_role('button', name='Play walkthrough', exact=True).click()
     expect(page.locator('#study-walkthrough-hud')).to_be_visible()
     expect(page.locator('#study-walkthrough-hud')).to_contain_text('Now: Elbow drifts behind hip line.')
     expect(page.locator('#study-walkthrough-hud')).to_contain_text('Try: Lead forward with soft elbow.')
@@ -4179,7 +4267,9 @@ def test_coaching_inspection_overlay_disjoint_ranges_walkthrough_and_non_mutatio
     expect(page.locator('#study-walkthrough-hud')).to_be_hidden()
 
     page.emulate_media(reduced_motion='reduce')
-    card_one.get_by_role('button', name='Walkthrough', exact=True).click()
+    if card_one.locator('.coach-more-menu').get_attribute('open') is None:
+        card_one.locator('.coach-more-menu > summary').click()
+    card_one.get_by_role('button', name='Play walkthrough', exact=True).click()
     assert page.locator('#study-video').evaluate('v => v.paused')
     assert page.locator('#study-video').evaluate('v => v.currentTime') == pytest.approx(0.5, abs=0.08)
     expect(page.locator('#study-coach-overlay')).to_be_visible()
@@ -4188,7 +4278,7 @@ def test_coaching_inspection_overlay_disjoint_ranges_walkthrough_and_non_mutatio
     # 8. Touch target sizing (>=44px on mobile) & responsive zero-overflow across desktop and mobile widths.
     if width < 761:
         for loc in (
-            card_one.get_by_role('button', name='Inspect frame', exact=True),
+            card_one.get_by_role('button', name=re.compile(r'^View key frame')).first,
             page.get_by_role('button', name='Next suggestion', exact=True),
             page.locator('#coach-exit-inspect'),
         ):
@@ -4201,7 +4291,7 @@ def test_coaching_inspection_overlay_disjoint_ranges_walkthrough_and_non_mutatio
     page.set_viewport_size({'width': width, 'height': 844})
     page.evaluate('() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))')
 
-    # 9. Exit inspect preserves baseline export {start, end, speed, crop} and sends untouched recipe on Ask coach.
+    # 9. Exit inspect preserves baseline export {start, end, speed, crop} and sends untouched recipe on Ask AI Coach.
     page.locator('#coach-exit-inspect').click()
     expect(page.locator('#clip-study')).to_have_attribute('data-coach-inspecting', 'false')
     after_exit = page.evaluate('() => window.ClipStudy.coachingSelection()')
@@ -4210,12 +4300,16 @@ def test_coaching_inspection_overlay_disjoint_ranges_walkthrough_and_non_mutatio
     assert after_exit['speed'] == pytest.approx(baseline['speed'], abs=0.02)
     assert after_exit['crop'] == pytest.approx(baseline['crop'], abs=0.01)
 
+    if page.locator('#coach-composer').get_attribute('open') is None:
+        page.locator('#coach-composer-summary').click()
+    if not page.locator('#coach-question').is_visible():
+        page.locator('#coach-toggle-question').click()
     q_input = page.locator('#coach-question')
     q_input.scroll_into_view_if_needed()
     q_input.fill('Compare contact stability')
     with page.expect_request('**/api/coaching/exports'):
         page.locator('#coach-ask').click()
-    expect(page.locator('#coach-status')).to_contain_text('Preparing')
+    expect(page.locator('#coach-active-request')).to_be_visible()
     assert len(sent_exports) == 1
     assert sent_exports[0]['start'] == pytest.approx(baseline['start'], abs=0.02)
     assert sent_exports[0]['end'] == pytest.approx(baseline['end'], abs=0.02)
@@ -4224,4 +4318,462 @@ def test_coaching_inspection_overlay_disjoint_ranges_walkthrough_and_non_mutatio
 
     assert errors == []
     assert page.evaluate('window.cspViolations') == []
+    page.close()
+
+
+@pytest.mark.parametrize('width', [1280, 390])
+def test_coaching_ux_background_recovery_handoff_cancel_and_download_persistence(browser, ui_server, width):
+    page = browser.new_page(viewport={'width': width, 'height': 844}, has_touch=width < 761)
+    page.set_default_timeout(12000)
+    errors = []
+    page.on('pageerror', lambda err: errors.append(str(err)))
+
+    source = page.request.get(ui_server + '/api/sessions/' + ID).json()
+    publication = source['published_at']
+    frame_one = dict(frame_id='f_ux1', order=1, sha256='1' * 64, original_seconds=0.4, clip_seconds=0.4, excerpt_seconds=0.8)
+    state = dict(jobs=[], annotations=[], workers=[], enabled=True)
+    export_calls, ask_calls, cancels, deletes = [], [], [], []
+    export_fail = {'once': True}
+    hold_export = {'once': False, 'held': []}
+    request_fail = {'once': False}
+    handoff_on_cancel = {'job_id': None}
+    calling_on_cancel = {'job_id': None, 'arm_next': False}
+    counters = {'render': 0, 'share': 0, 'ai': 0}
+
+    def handle_exports(route):
+        body = route.request.post_data_json
+        export_calls.append(body)
+        if body.get('intent') == 'share':
+            counters['share'] += 1
+            job_id = f"share-ux-{counters['share']}"
+            job = dict(
+                id=job_id,
+                version=1,
+                role='render',
+                state='queued',
+                body={**body, 'original_start': body['start'], 'original_end': body['end']},
+                result={},
+            )
+            state['jobs'].append(job)
+            route.fulfill(status=201, json=job)
+            return
+        if export_fail['once']:
+            export_fail['once'] = False
+            route.fulfill(status=503, json=dict(error='Temporary queue hiccup'))
+            return
+        if hold_export['once']:
+            hold_export['once'] = False
+            hold_export['held'].append((route, body))
+            return
+        counters['render'] += 1
+        job_id = f"render-ux-{counters['render']}"
+        job = dict(
+            id=job_id,
+            version=1,
+            role='render',
+            state='queued',
+            body={**body, 'original_start': body['start'], 'original_end': body['end']},
+            result={},
+        )
+        state['jobs'].append(job)
+        route.fulfill(status=201, json=job)
+
+    def handle_requests(route):
+        if request_fail['once']:
+            request_fail['once'] = False
+            route.fulfill(status=503, json=dict(error='AI queue temporarily unavailable'))
+            return
+        body = route.request.post_data_json
+        ask_calls.append(body)
+        counters['ai'] += 1
+        job_id = f"ai-ux-{counters['ai']}"
+        parent = next((j for j in state['jobs'] if j['id'] == body.get('export_id')), {})
+        ai_state = 'leased' if calling_on_cancel['arm_next'] else 'calling'
+        calling_on_cancel['arm_next'] = False
+        job = dict(
+            id=job_id,
+            version=1,
+            role='ai',
+            state=ai_state,
+            asked_at=1700000100.0 + counters['ai'],
+            updated=1700000100.0 + counters['ai'],
+            body={**(parent.get('body') or {}), **body, 'evidence_frames': [frame_one]},
+            result={},
+        )
+        state['jobs'].append(job)
+        route.fulfill(status=201, json=job)
+
+    def handle_job(route):
+        job_id = route.request.url.rsplit('/', 1)[-1].split('?')[0]
+        method = route.request.method
+        job = next((j for j in state['jobs'] if j['id'] == job_id), None)
+        if method == 'GET':
+            if not job:
+                route.fulfill(status=404, json=dict(error='Not found'))
+            else:
+                route.fulfill(json=job)
+            return
+        if method == 'PUT':
+            body = route.request.post_data_json or {}
+            cancels.append((job_id, body))
+            if handoff_on_cancel['job_id'] == job_id and body.get('action') == 'cancel':
+                handoff_on_cancel['job_id'] = None
+                if job:
+                    job.update(state='completed', version=job['version'] + 1, result=dict(bytes=800, frames=[frame_one]))
+                spawned = dict(
+                    id='ai-handoff-cancel',
+                    version=1,
+                    role='ai',
+                    state='queued',
+                    asked_at=1700000150.0,
+                    updated=1700000150.0,
+                    body=dict(
+                        source_id=ID,
+                        clip_id=CLIP,
+                        publication=publication,
+                        export_id=job_id,
+                        original_start=0.0,
+                        original_end=1.8,
+                        start=0.0,
+                        end=1.8,
+                        prompt='Check handoff cancel',
+                    ),
+                    result={},
+                )
+                state['jobs'].append(spawned)
+                route.fulfill(status=409, json=dict(error='Render already completed'))
+                return
+            if calling_on_cancel['job_id'] == job_id and body.get('action') == 'cancel':
+                calling_on_cancel['job_id'] = None
+                if job:
+                    job.update(state='calling', version=job['version'] + 1)
+                route.fulfill(status=409, json=dict(error='Provider call already started'))
+                return
+            if not job:
+                route.fulfill(status=404, json=dict(error='Not found'))
+                return
+            if body.get('action') == 'cancel':
+                job.update(state='cancelled', version=job['version'] + 1)
+            route.fulfill(json=job)
+            return
+        if method == 'DELETE':
+            deletes.append(job_id)
+            state['jobs'] = [j for j in state['jobs'] if j['id'] != job_id and j.get('body', {}).get('export_id') != job_id]
+            state['annotations'] = [a for a in state['annotations'] if a.get('job_id') != job_id]
+            route.fulfill(json=dict(deleted=True, job_id=job_id))
+
+    page.route(
+        '**/api/coaching/sessions/*',
+        lambda route: route.fulfill(json=state)
+        if route.request.url.rstrip('/').endswith(ID)
+        else route.fulfill(status=500, json=dict(error='Foreground poll unavailable')),
+    )
+    page.route('**/api/coaching/exports', handle_exports)
+    page.route('**/api/coaching/requests', handle_requests)
+    page.route('**/api/coaching/jobs/*', handle_job)
+    page.route(
+        '**/api/coaching/exports/*/excerpt.mp4*',
+        lambda route: route.fulfill(body=(Path(__file__).parent / 'fixtures/clip.mp4').read_bytes(), content_type='video/mp4'),
+    )
+
+    page.goto(ui_server + f'/review/{ID}?clip={CLIP}')
+    expect(page.locator('#video-seek')).to_be_enabled()
+    expect(page.locator('#study-clip')).to_contain_text('Study & AI Coach')
+    assert page.locator('.player-options').evaluate('e => [...e.children].map(c => c.id || c.className)')[:3] == [
+        'player-reactions',
+        'study-clip',
+        'player-download',
+    ]
+
+    for check_w in (320, 390):
+        page.set_viewport_size({'width': check_w, 'height': 844})
+        assert not page.evaluate('document.documentElement.scrollWidth > innerWidth'), f'Watch overflow at {check_w}px'
+    if width < 761:
+        pill_box = page.locator('#study-clip').bounding_box()
+        assert pill_box and pill_box['height'] >= 44
+    page.set_viewport_size({'width': width, 'height': 844})
+
+    # 1. Independent Full clip and Reset framing controls do not clobber unrelated state.
+    page.locator('#study-clip').click()
+    page.wait_for_function("() => document.querySelector('#study-video')?.readyState >= 2")
+    page.locator('#study-speed').select_option('0.25')
+    page.evaluate(
+        """() => {
+          const z = document.getElementById('study-zoom');
+          z.value = '2';
+          z.dispatchEvent(new Event('input', {bubbles: true}));
+          window.ClipStudy.setInterval(0.3, 1.5, 'both');
+        }"""
+    )
+    page.evaluate('() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))')
+    sel_before = page.evaluate('() => window.ClipStudy.coachingSelection()')
+    transform_before = page.locator('#study-video').evaluate('v => v.style.transform')
+    assert sel_before['start'] == pytest.approx(0.3, abs=0.04)
+    assert sel_before['end'] == pytest.approx(1.5, abs=0.04)
+    assert sel_before['zoom'] == pytest.approx(2.0, abs=0.02)
+
+    page.locator('#study-full-clip').click()
+    sel_full = page.evaluate('() => window.ClipStudy.coachingSelection()')
+    assert sel_full['start'] == pytest.approx(0.0, abs=0.04)
+    assert sel_full['end'] == pytest.approx(2.0, abs=0.04)
+    assert sel_full['speed'] == pytest.approx(0.25, abs=0.02)
+    assert sel_full['zoom'] == pytest.approx(2.0, abs=0.02)
+    assert page.locator('#study-video').evaluate('v => v.style.transform') == transform_before
+
+    page.evaluate('() => window.ClipStudy.setInterval(0.4, 1.4, "both")')
+    page.locator('#study-reset-framing').click()
+    sel_reset = page.evaluate('() => window.ClipStudy.coachingSelection()')
+    assert sel_reset['zoom'] == pytest.approx(1.0, abs=0.02)
+    assert sel_reset['crop'] == pytest.approx([0, 0, 1, 1], abs=0.02)
+    assert sel_reset['start'] == pytest.approx(0.4, abs=0.04)
+    assert sel_reset['end'] == pytest.approx(1.4, abs=0.04)
+    assert sel_reset['speed'] == pytest.approx(0.25, abs=0.02)
+
+    # 2. Failed export -> idempotent Retry (same request_id) -> atomic Cancel -> 409 handoff Cancel.
+    if width < 761:
+        page.locator('#study-mode-coach').click()
+    if page.locator('#coach-composer').get_attribute('open') is None:
+        page.locator('#coach-composer-summary').click()
+    if not page.locator('#coach-question').is_visible():
+        page.locator('#coach-toggle-question').click()
+    page.locator('#coach-question').fill('Check UX workflow recovery')
+
+    page.locator('#coach-ask').click()
+    req_box = page.locator('#coach-active-request')
+    expect(req_box).to_be_visible()
+    expect(req_box).to_contain_text('Failed')
+    expect(req_box).to_contain_text('Temporary queue hiccup')
+    expect(req_box.get_by_role('button', name='Retry', exact=True)).to_be_visible()
+    expect(req_box.get_by_role('button', name='Dismiss', exact=True)).to_be_visible()
+    expect(page.locator('#study-clip-status')).to_have_text('Needs attention')
+
+    req_box.get_by_role('button', name='Retry', exact=True).click()
+    expect(req_box).to_contain_text('Waiting to prepare')
+    expect(req_box).to_contain_text('1. Prepare video frames')
+    expect(req_box).to_contain_text('2. AI Coach review')
+    expect(page.locator('#study-clip-status')).to_have_text('Preparing…')
+    assert len(export_calls) == 2 and export_calls[0]['request_id'] == export_calls[1]['request_id']
+
+    req_box.get_by_role('button', name='Cancel request', exact=True).click()
+    expect(req_box).to_be_hidden()
+    expect(page.locator('#study-clip-status')).to_be_hidden()
+    assert ('render-ux-1', {'action': 'cancel', 'version': 1}) in cancels
+
+    # Handoff 409 cancel: render completed just before cancel -> cancels spawned ai-handoff-cancel.
+    page.locator('#coach-ask').click()
+    expect(req_box).to_contain_text('Waiting to prepare')
+    handoff_on_cancel['job_id'] = 'render-ux-2'
+    req_box.get_by_role('button', name='Cancel request', exact=True).click()
+    expect(req_box).to_be_hidden()
+    expect(page.locator('#study-clip-status')).to_be_hidden()
+    assert ('ai-handoff-cancel', {'action': 'cancel', 'version': 1}) in cancels
+
+    # 3. Background render -> ai handoff across modal close, page.reload(), and switching to another recording + leased->calling cancel protection.
+    page.evaluate('() => window.ClipStudy.setInterval(0.2, 1.6, "both")')
+    calling_on_cancel['arm_next'] = True
+    page.locator('#coach-ask').click()
+    expect(req_box).to_contain_text('Waiting to prepare')
+    expect(page.locator('#study-clip-status')).to_have_text('Preparing…')
+
+    page.locator('#study-close').click()
+    expect(page.locator('#clip-study')).to_be_hidden()
+    expect(page.locator('#study-clip-status')).to_have_text('Preparing…')
+    page.reload()
+    expect(page.locator('#video-seek')).to_be_enabled()
+    expect(page.locator('#study-clip-status')).to_have_text('Preparing…')
+
+    page.evaluate("""() => {
+      window.Coach.watch({
+        session: {id: 'f'.repeat(64), published_at: 1, clips: []},
+        clip: {id: '1'.repeat(24), original_start_seconds: 0, original_end_seconds: 2},
+        player: document.querySelector('#player'),
+      });
+    }""")
+    render_bg = next(j for j in state['jobs'] if j['id'] == 'render-ux-3')
+    with page.expect_response(lambda r: r.url.endswith('/api/coaching/requests') and r.request.method == 'POST'):
+        render_bg.update(state='completed', version=2, result=dict(bytes=900, output_seconds=2.0, frames=[frame_one]))
+    assert len(ask_calls) == 1 and ask_calls[0]['export_id'] == 'render-ux-3'
+
+    page.evaluate("""() => {
+      window.Coach.watch({session: model.session, clip: model.session.clips[0], player: document.querySelector('#player')});
+    }""")
+    expect(page.locator('#study-clip-status')).to_have_text('Analyzing…')
+
+    page.locator('#study-clip').click()
+    page.wait_for_function("() => document.querySelector('#study-video')?.readyState >= 2")
+    if width < 761:
+        page.locator('#study-mode-coach').click()
+    expect(req_box).to_contain_text('Analyzing')
+    expect(req_box.get_by_role('button', name='Cancel request', exact=True)).to_be_visible()
+    calling_on_cancel['job_id'] = 'ai-ux-1'
+    req_box.get_by_role('button', name='Cancel request', exact=True).click()
+    expect(page.locator('#coach-status')).to_contain_text('Analysis has started and can’t be cancelled.')
+    expect(req_box).to_contain_text('Analyzing')
+    expect(req_box).to_contain_text('Analysis has started and can’t be cancelled.')
+    expect(req_box.get_by_role('button', name='Cancel request', exact=True)).to_have_count(0)
+    expect(page.locator('#study-clip-status')).to_have_text('Analyzing…')
+
+    ai_bg = next(j for j in state['jobs'] if j['id'] == 'ai-ux-1')
+    ai_bg.update(
+        state='completed',
+        version=2,
+        result=dict(answer='BG complete answer', structured=dict(summary='Two actionable tips.', validation_warnings=[], parse_status='valid')),
+    )
+    for idx, title in enumerate(('Tip one', 'Tip two'), start=1):
+        content = dict(
+            title=title,
+            topic='Footwork',
+            observation=f'Obs {idx}.',
+            cue=f'Cue {idx}.',
+            drill=f'Drill {idx}.',
+            uncertainty='Still uncertainty.',
+            evidence_frame_ids=['f_ux1'],
+            applies_to=[dict(start_seconds=0.3, end_seconds=0.9)],
+            validation_warnings=[],
+            timing_status='timed',
+        )
+        state['annotations'].append(
+            dict(
+                id=f'ann-ux-{idx}',
+                job_id='ai-ux-1',
+                current=content,
+                proposal=copy.deepcopy(content),
+                status='proposed',
+                historical=False,
+                playback_eligible=False,
+                version=1,
+                provenance=dict(clip_id=CLIP, publication=publication),
+                related_clip_ids=[CLIP],
+            )
+        )
+    expect(req_box).to_be_hidden()
+    expect(page.locator('#coach-status')).to_have_text('')
+    expect(page.locator('.coach-suggestion')).to_have_count(2)
+    assert (page.locator('#study-clip-status').text_content() or '').strip() == '2 tips'
+
+    # 3b. Reusing completed render-ux-3 when /requests fails must still surface Failed + Retry (not masked by ai-ux-1).
+    request_fail['once'] = True
+    exports_before_reuse = len(export_calls)
+    page.evaluate(
+        """() => {
+          const sp = document.getElementById('study-speed');
+          sp.value = '0.25';
+          sp.dispatchEvent(new Event('change', {bubbles: true}));
+          window.ClipStudy.setInterval(0.2, 1.6, 'both');
+        }"""
+    )
+    if page.locator('#coach-composer').get_attribute('open') is None:
+        page.locator('#coach-composer-summary').click()
+    if not page.locator('#coach-question').is_visible():
+        page.locator('#coach-toggle-question').click()
+    page.locator('#coach-question').fill('Follow-up reusing prepared excerpt')
+    page.locator('#coach-ask').click()
+    expect(req_box).to_contain_text('Failed')
+    expect(req_box).to_contain_text('AI queue temporarily unavailable')
+    expect(req_box.get_by_role('button', name='Retry', exact=True)).to_be_visible()
+    expect(page.locator('#study-clip-status')).to_have_text('Needs attention')
+    assert len(export_calls) == exports_before_reuse
+    req_box.get_by_role('button', name='Dismiss', exact=True).click()
+    expect(req_box).to_be_hidden()
+    assert (page.locator('#study-clip-status').text_content() or '').strip() == '2 tips'
+    page.evaluate(
+        """() => {
+          const sp = document.getElementById('study-speed');
+          sp.value = '0.5';
+          sp.dispatchEvent(new Event('change', {bubbles: true}));
+          window.ClipStudy.setInterval(0, 2.0, 'both');
+        }"""
+    )
+
+    # 3c. Cancelling while /exports is in-flight and immediately re-asking submits the replacement cleanly.
+    page.evaluate('() => window.ClipStudy.setInterval(0.1, 1.3, "both")')
+    hold_export['once'] = True
+    page.locator('#coach-question').fill('First pending export')
+    page.locator('#coach-ask').click()
+    for _ in range(50):
+        if hold_export['held']:
+            break
+        page.wait_for_timeout(20)
+    assert len(hold_export['held']) == 1
+    first_route, first_body = hold_export['held'].pop(0)
+
+    req_box.get_by_role('button', name='Cancel request', exact=True).click()
+    expect(req_box).to_be_hidden()
+    expect(page.locator('#coach-ask')).to_be_enabled()
+    page.locator('#coach-question').fill('Replacement export after inflight cancel')
+    page.locator('#coach-ask').click()
+    expect(req_box).to_contain_text('Waiting to prepare')
+
+    with page.expect_response(
+        lambda r: r.url.endswith('/api/coaching/exports')
+        and r.request.method == 'POST'
+        and 'Replacement export after inflight cancel' in (r.request.post_data or '')
+    ):
+        first_job = dict(
+            id='render-ux-cancelled-inflight',
+            version=1,
+            role='render',
+            state='queued',
+            body={**first_body, 'original_start': first_body['start'], 'original_end': first_body['end']},
+            result={},
+        )
+        state['jobs'].append(first_job)
+        first_route.fulfill(status=201, json=first_job)
+
+    assert ('render-ux-cancelled-inflight', {'action': 'cancel', 'version': 1}) in cancels
+    expect(req_box).to_contain_text('Waiting to prepare')
+    req_box.get_by_role('button', name='Cancel request', exact=True).click()
+    expect(req_box).to_be_hidden()
+    assert ('render-ux-4', {'action': 'cancel', 'version': 1}) in cancels
+    page.evaluate('() => window.ClipStudy.setInterval(0, 2.0, "both")')
+
+    # 4. Inline two-step Cancel -> Confirm delete on review card.
+    review_details = page.locator('.coach-note[data-job="ai-ux-1"] .coach-review-details')
+    if review_details.get_attribute('open') is None:
+        review_details.locator('> summary').click()
+    review_details.get_by_role('button', name='Delete review', exact=True).click()
+    expect(review_details).to_contain_text('Delete this review and its saved Moments?')
+    review_details.get_by_role('button', name='Cancel', exact=True).click()
+    assert deletes == []
+    expect(page.locator('.coach-note[data-job="ai-ux-1"]')).to_be_visible()
+
+    review_details.get_by_role('button', name='Delete review', exact=True).click()
+    review_details.get_by_role('button', name='Confirm delete', exact=True).click()
+    expect(page.locator('.coach-note[data-job="ai-ux-1"]')).to_have_count(0)
+    assert 'ai-ux-1' in deletes
+
+    # 5. Durable background share download card persists across selection edits & reload, and cancels remotely.
+    if width < 761:
+        page.locator('#study-mode-watch').click()
+    with page.expect_response(lambda r: r.url.endswith('/api/coaching/exports') and r.request.method == 'POST'):
+        page.get_by_role('button', name='Prepare video download', exact=True).click()
+    dl_card = page.locator('#study-download-card')
+    expect(dl_card).to_be_visible()
+    page.locator('#study-pin-start').evaluate("el=>{el.value=0.2;el.dispatchEvent(new Event('input',{bubbles:true}));}")
+    expect(dl_card).to_be_visible()
+
+    page.locator('#study-close').click()
+    page.reload()
+    expect(page.locator('#video-seek')).to_be_enabled()
+    page.locator('#study-clip').click()
+    page.wait_for_function("() => document.querySelector('#study-video')?.readyState >= 2")
+    expect(dl_card).to_be_visible()
+
+    share_1 = next(j for j in state['jobs'] if j['id'] == 'share-ux-1')
+    share_1.update(state='completed', version=2)
+    expect(page.locator('#study-download-ready')).to_have_attribute('href', '/api/coaching/exports/share-ux-1/excerpt.mp4?download=1')
+
+    with page.expect_response(lambda r: r.url.endswith('/api/coaching/exports') and r.request.method == 'POST'):
+        page.get_by_role('button', name='Prepare video download', exact=True).click()
+    expect(page.locator('#study-download-cancel')).to_be_visible()
+    page.locator('#study-download-cancel').click()
+    expect(dl_card).to_be_hidden()
+    assert ('share-ux-2', {'action': 'cancel', 'version': 1}) in cancels
+
+    for check_w in (320, 390, width):
+        page.set_viewport_size({'width': check_w, 'height': 844})
+        assert not page.evaluate('document.documentElement.scrollWidth > innerWidth'), f'Study overflow at {check_w}px'
+        assert page.locator('#clip-study').evaluate('d => d.scrollWidth <= d.clientWidth'), f'Dialog overflow at {check_w}px'
+
+    assert errors == []
     page.close()
