@@ -189,10 +189,8 @@ Windows service installation, HDR conversion on actual tennis footage and NAS
 container deployment remain release/device checks. Existing Chromium/WebKit CI was
 not run for this unpushed branch.
 
-## Evidence-linked annotations
+## Evidence-linked annotations and lazy pose enrichment
 
-The new four-step coaching flow, structured response schema, immutable snapshots,
-review/version rules and reprocessing behavior are documented in
-[COACHING-ANNOTATIONS.md](COACHING-ANNOTATIONS.md). Rollout requires coaching worker
-0.2.0 as well as the updated website; an old AI worker will safely leave new requests
-queued. Prepared-export expiration must not remove retained evidence.
+The four-step coaching flow, structured response schema (`SCHEMA_VERSION = 3`, backward-compatible with `2`), immutable snapshots,
+review/version rules, and reprocessing behavior are documented in
+[COACHING-ANNOTATIONS.md](COACHING-ANNOTATIONS.md) and [COACHING-INSPECTION-DESIGN.md](COACHING-INSPECTION-DESIGN.md). Optional render-worker pose extraction requires coaching worker `0.6.0` (`pip install ".[pose]"`), while base `0.6.0` and older `0.2.0+` workers continue operating safely with text/frame fallback (`GET /api/coaching/evidence/{id}/pose` serves retained pose lazily while `pose_artifact` is stripped from queue/job polling responses and cleaned up with `DELETE /api/coaching/jobs/{id}`). Prepared-export expiration must not remove retained evidence or pose enrichment.

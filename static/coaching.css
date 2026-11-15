@@ -35,3 +35,26 @@
 }
 
 @media(max-width:760px){#clip-study[data-mobile-mode=coach][data-player-collapsed=true] .study-stage{display:none}.study-mobile-transport .study-button{font-size:11px;padding:7px}}
+.coach-nav{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px;padding:10px;margin-bottom:12px;border:1px solid #3c5043;border-radius:10px;background:#14241d;max-width:100%;box-sizing:border-box}
+.coach-nav-row{display:flex;align-items:center;gap:6px;flex-wrap:wrap;max-width:100%}
+.coach-nav-count{font-size:12px;color:#d7e8aa;font-variant-numeric:tabular-nums;padding:0 4px}
+.coach-overlay-btn[aria-pressed=true]{background:#d9ed91;color:#153125;border-color:#d9ed91;font-weight:600}
+.coach-exit-btn{border-color:#f3d26780;color:#f7e6a8}
+.coach-meta-chips{display:flex;flex-wrap:wrap;gap:5px;margin:6px 0}
+.coach-meta-chip{display:inline-flex;align-items:center;padding:2px 8px;border-radius:999px;font-size:11px;background:#22352b;border:1px solid #3c5043;color:#d2dfd5}
+.coach-phase-chip{background:#2b4232;border-color:#6b8d60;color:#e5f3bd;font-weight:600}
+.coach-now-try{margin:8px 0;padding:8px 10px;border-left:3px solid #d9ed91;background:#14251d;border-radius:0 8px 8px 0}
+.coach-now-line,.coach-try-line{margin:0;font-size:13px;line-height:1.4}
+.coach-now-line+.coach-try-line{margin-top:4px}
+.coach-inspect-bar{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0}
+.coach-inspect-btn{min-height:36px;padding:6px 10px}
+.coach-range-chip.is-selected-range{border-color:#d9ed91;background:#2d4434;color:#eef7cd}
+.coach-frame-link.is-primary-frame{outline:2px solid #f3d267}
+.coaching-panel,.coach-suggestion{max-width:100%;box-sizing:border-box}
+@media(max-width:760px){
+ #clip-study[data-mobile-mode=coach]{scroll-padding-top:var(--coach-anchor-height,340px);scroll-padding-bottom:56px}
+ #clip-study[data-mobile-mode=coach][data-coach-inspecting=true]:not([data-player-collapsed=true]) .study-stage{height:min(26dvh,200px)}
+ .coach-nav{scroll-margin-top:var(--coach-anchor-height,340px)}
+ .coach-nav .study-button,.coach-inspect-bar .study-button,.coach-timing .study-button,.coach-range-chip{min-height:44px}
+ .coach-inspect-bar .coach-inspect-btn,.coach-nav .coach-nav-btn,.coach-overlay-btn,.coach-exit-btn{width:auto;flex:0 1 auto}
+}

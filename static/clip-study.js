@@ -4,15 +4,284 @@
   const C = window.ClipStudyCore;
   const $ = id => document.getElementById(id);
   const dialog = $('clip-study'), video = $('study-video'), stage = $('study-stage');
+  const overlaySvg = $('study-coach-overlay'), overlayBadge = $('study-overlay-badge'), walkthroughHud = $('study-walkthrough-hud'), markersBox = $('study-coach-markers');
+  const SVG_NS = 'http://www.w3.org/2000/svg';
   const PLAY_ICON = '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M8 5v14l11-7z"/></svg>';
   const PAUSE_ICON = '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M6 5h4v14H6zm8 0h4v14h-4z"/></svg>';
-  let context = null, generation = 0;
+  let context = null, generation = 0, walkthroughToken = 0;
   const pointers = new Map();
   let drag = null, pinch = null, pinDrag = null, playbackTimer = null;
   function status(message) { if (context) $('study-status').textContent = message; }
   function duration() { return C.finite(video.duration) && video.duration > 0 ? video.duration : 0; }
   function fallbackDuration() { return duration() || (context?.clip?.duration_seconds > 0 ? context.clip.duration_seconds : 1); }
   function ready() { return !!context && video.readyState >= 1 && duration() > 0; }
+  function hideCoachOverlay() {
+    if (overlaySvg) { overlaySvg.replaceChildren(); overlaySvg.setAttribute('hidden', ''); }
+    if (overlayBadge) overlayBadge.hidden = true;
+  }
+  function hideWalkthroughHud() {
+    if (walkthroughHud) { walkthroughHud.replaceChildren(); walkthroughHud.hidden = true; }
+  }
+  function showWalkthroughHud(nowTry) {
+    if (!walkthroughHud) return;
+    walkthroughHud.replaceChildren();
+    const lines = [];
+    if (nowTry?.nowText) {
+      const p = document.createElement('p');
+      p.className = 'study-hud-line';
+      const strong = document.createElement('strong');
+      strong.textContent = 'Now: ';
+      p.append(strong, document.createTextNode(nowTry.nowText));
+      lines.push(p);
+    }
+    if (nowTry?.tryText) {
+      const p = document.createElement('p');
+      p.className = 'study-hud-line';
+      const strong = document.createElement('strong');
+      strong.textContent = 'Try: ';
+      p.append(strong, document.createTextNode(nowTry.tryText));
+      lines.push(p);
+    }
+    if (!lines.length) { walkthroughHud.hidden = true; return; }
+    walkthroughHud.append(...lines);
+    walkthroughHud.hidden = false;
+  }
+  function clearWalkthroughTimer(owner = context) {
+    walkthroughToken++;
+    if (owner?.inspection?.timerId) {
+      clearTimeout(owner.inspection.timerId);
+      owner.inspection.timerId = null;
+    }
+    if (owner?.inspection) {
+      owner.inspection.walkthroughFrozen = false;
+    }
+  }
+  function selectionFromState(src) {
+    if (!context) return null;
+    const dur = fallbackDuration();
+    const bounds = C.clampInterval(src.intervalStart, src.intervalEnd, dur);
+    const selSpeed = C.finite(src.speed) && src.speed > 0 ? src.speed : (Number($('study-speed').value) || 0.5);
+    if (!ready()) {
+      return {start: bounds.start, end: bounds.end, speed: selSpeed, zoom: src.zoom, crop: [0, 0, 1, 1]};
+    }
+    const sw = stage.clientWidth, sh = stage.clientHeight, w = video.videoWidth, h = video.videoHeight;
+    if (sw <= 0 || sh <= 0 || w <= 0 || h <= 0) {
+      return {start: bounds.start, end: bounds.end, speed: selSpeed, zoom: src.zoom, crop: [0, 0, 1, 1]};
+    }
+    const fit = Math.min(sw / w, sh / h) * src.zoom;
+    const x0 = C.clamp(((-sw / 2 - src.x) / fit + w / 2) / w, 0, 1);
+    const y0 = C.clamp(((-sh / 2 - src.y) / fit + h / 2) / h, 0, 1);
+    const x1 = C.clamp(((sw / 2 - src.x) / fit + w / 2) / w, 0, 1);
+    const y1 = C.clamp(((sh / 2 - src.y) / fit + h / 2) / h, 0, 1);
+    return {start: bounds.start, end: bounds.end, speed: selSpeed, zoom: src.zoom, crop: [x0, y0, x1 - x0, y1 - y0]};
+  }
+  function ensureInspectionBaseline() {
+    if (!context || context.inspection) return;
+    const currentSpeed = ready() ? (Number($('study-speed').value) || video.playbackRate || 0.5) : (Number($('study-speed').value) || 0.5);
+    const baselineSrc = {
+      intervalStart: context.intervalStart,
+      intervalEnd: context.intervalEnd,
+      intervalDefaultEnd: context.intervalDefaultEnd,
+      loop: context.loop,
+      zoom: context.zoom,
+      x: context.x,
+      y: context.y,
+      speed: currentSpeed,
+      statusText: $('study-status')?.textContent || '',
+    };
+    context.inspection = {
+      savedControls: baselineSrc,
+      savedSelection: selectionFromState(baselineSrc),
+      mode: 'frame',
+      suggestionId: null,
+      rangeIndex: -1,
+      suggestion: null,
+      frame: null,
+      poseFrame: null,
+      crop: [0, 0, 1, 1],
+      historical: false,
+      range: null,
+      freezeTime: null,
+      nowTry: null,
+      timerId: null,
+      walkthroughFrozen: false,
+      walkthroughFrozeThisPass: false,
+      lastOverlay: null,
+    };
+  }
+  function setSpeedControl(rate) {
+    const num = C.finite(rate) && rate > 0 ? rate : 0.5;
+    if (ready()) {
+      try { video.playbackRate = num; }
+      catch (_) { try { video.playbackRate = 0.5; } catch (__) {} }
+    }
+    const sel = $('study-speed');
+    if (sel) {
+      const target = String(video.playbackRate || num);
+      if ([...sel.options].some(opt => opt.value === target)) sel.value = target;
+    }
+  }
+  function activePlaybackBounds() {
+    if (!context) return {start: 0, end: 0, loop: false};
+    const insp = context.inspection;
+    if (insp && (insp.mode === 'loop' || insp.mode === 'walkthrough') && insp.range) {
+      return {start: insp.range.start, end: insp.range.end, loop: true};
+    }
+    return {start: context.intervalStart, end: context.intervalEnd, loop: context.loop};
+  }
+  function renderCoachMarkers() {
+    if (!markersBox || !context) {
+      if (markersBox) markersBox.replaceChildren();
+      return;
+    }
+    markersBox.replaceChildren();
+    const dur = fallbackDuration();
+    if (!(dur > 0) || !Array.isArray(context.coachMarkers)) return;
+    for (const m of context.coachMarkers) {
+      if (!m) continue;
+      if (m.type === 'range' && C.finite(m.start) && C.finite(m.end)) {
+        const s = C.clamp(m.start, 0, dur), e = C.clamp(Math.max(s, m.end), 0, dur);
+        const span = document.createElement('div');
+        span.className = 'study-coach-marker-range' + (m.active ? ' is-active' : '');
+        span.style.left = `${(s / dur) * 100}%`;
+        span.style.width = `${Math.max(0.8, ((e - s) / dur) * 100)}%`;
+        markersBox.append(span);
+      } else if (m.type === 'frame' && C.finite(m.time)) {
+        const t = C.clamp(m.time, 0, dur);
+        const tick = document.createElement('div');
+        tick.className = 'study-coach-marker-tick' + (m.primary ? ' is-primary' : '') + (m.active ? ' is-active' : '');
+        tick.style.left = `${(t / dur) * 100}%`;
+        markersBox.append(tick);
+      }
+    }
+  }
+  function renderCoachOverlay() {
+    if (!context || !context.inspection || !ready()) {
+      hideCoachOverlay();
+      return;
+    }
+    const insp = context.inspection;
+    const res = C.resolveSparseOverlay({
+      suggestion: insp.suggestion,
+      frame: insp.frame,
+      poseFrame: insp.poseFrame,
+      crop: insp.crop,
+      paused: video.paused,
+      currentTime: video.currentTime,
+      historical: insp.historical,
+      overlayEnabled: context.overlayEnabled !== false,
+    });
+    insp.lastOverlay = res;
+    if (!res.visible || !overlaySvg) {
+      hideCoachOverlay();
+      return;
+    }
+    const sw = stage.clientWidth, sh = stage.clientHeight, vw = video.videoWidth, vh = video.videoHeight;
+    if (sw <= 0 || sh <= 0 || vw <= 0 || vh <= 0) {
+      hideCoachOverlay();
+      return;
+    }
+    overlaySvg.replaceChildren();
+    overlaySvg.setAttribute('viewBox', `0 0 ${sw} ${sh}`);
+    overlaySvg.setAttribute('width', String(sw));
+    overlaySvg.setAttribute('height', String(sh));
+    if (res.focusBox) {
+      const box = C.projectBoxToStage(res.focusBox, sw, sh, vw, vh, context.zoom, context.x, context.y);
+      if (box && box.width > 0 && box.height > 0) {
+        const rect = document.createElementNS(SVG_NS, 'rect');
+        rect.setAttribute('class', 'study-overlay-focus');
+        rect.setAttribute('x', box.left.toFixed(1));
+        rect.setAttribute('y', box.top.toFixed(1));
+        rect.setAttribute('width', box.width.toFixed(1));
+        rect.setAttribute('height', box.height.toFixed(1));
+        rect.setAttribute('rx', '8');
+        overlaySvg.append(rect);
+      }
+    }
+    const projected = {};
+    for (const [name, pt] of Object.entries(res.joints || {})) {
+      const pos = C.projectPointToStage(pt.x, pt.y, sw, sh, vw, vh, context.zoom, context.x, context.y);
+      if (pos) projected[name] = pos;
+    }
+    for (const [a, b] of res.segments || []) {
+      const pa = projected[a], pb = projected[b];
+      if (!pa || !pb) continue;
+      const line = document.createElementNS(SVG_NS, 'line');
+      line.setAttribute('class', 'study-overlay-segment');
+      line.setAttribute('x1', pa.x.toFixed(1));
+      line.setAttribute('y1', pa.y.toFixed(1));
+      line.setAttribute('x2', pb.x.toFixed(1));
+      line.setAttribute('y2', pb.y.toFixed(1));
+      overlaySvg.append(line);
+    }
+    for (const [name, pos] of Object.entries(projected)) {
+      const dot = document.createElementNS(SVG_NS, 'circle');
+      dot.setAttribute('class', 'study-overlay-joint');
+      dot.setAttribute('data-joint', name);
+      dot.setAttribute('cx', pos.x.toFixed(1));
+      dot.setAttribute('cy', pos.y.toFixed(1));
+      dot.setAttribute('r', '4.5');
+      overlaySvg.append(dot);
+    }
+    if (!overlaySvg.childElementCount) {
+      hideCoachOverlay();
+      return;
+    }
+    overlaySvg.removeAttribute('hidden');
+    if (overlayBadge) {
+      overlayBadge.textContent = res.label || 'Approximate body guide';
+      overlayBadge.hidden = false;
+    }
+  }
+  function stopWalkthroughMode(reason = 'manual') {
+    if (!context?.inspection) return;
+    const insp = context.inspection;
+    const wasWalkthrough = insp.mode === 'walkthrough' || insp.mode === 'loop';
+    clearWalkthroughTimer(context);
+    if (wasWalkthrough) {
+      insp.mode = 'frame';
+      hideWalkthroughHud();
+      setSpeedControl(insp.savedControls.speed);
+      $('study-loop')?.setAttribute('aria-pressed', String(context.loop));
+      window.dispatchEvent(new CustomEvent('study-inspection-changed'));
+    }
+    if (reason === 'rejected') {
+      status('Tap Play or Walkthrough again to start playback.');
+    }
+  }
+  function exitInspection({keepCurrentBounds = false, restoreZoomPan = true, pauseVideo = true} = {}) {
+    if (!context?.inspection) return;
+    const insp = context.inspection;
+    clearWalkthroughTimer(context);
+    if (pauseVideo && ready() && !video.paused) video.pause();
+    context.inspection = null;
+    hideCoachOverlay();
+    hideWalkthroughHud();
+    const saved = insp.savedControls;
+    if (!keepCurrentBounds) {
+      context.intervalStart = saved.intervalStart;
+      context.intervalEnd = saved.intervalEnd;
+      context.intervalDefaultEnd = saved.intervalDefaultEnd;
+      syncIntervalUI();
+    }
+    context.loop = saved.loop;
+    $('study-loop')?.setAttribute('aria-pressed', String(context.loop));
+    setSpeedControl(saved.speed);
+    if ($('study-status')) $('study-status').textContent = saved.statusText || '';
+    if (restoreZoomPan) {
+      context.zoom = saved.zoom;
+      context.x = saved.x;
+      context.y = saved.y;
+      applyView(false);
+    }
+    if (ready()) {
+      const clamped = C.clampToInterval(video.currentTime, context.intervalStart, context.intervalEnd, duration());
+      if (Math.abs(clamped - video.currentTime) > 0.002) video.currentTime = clamped;
+    }
+    syncTime();
+    setControls();
+    window.dispatchEvent(new CustomEvent('study-inspection-changed'));
+  }
   function cryptoId() {
     return 'share-' + Array.from(crypto.getRandomValues(new Uint8Array(16)), v => v.toString(16).padStart(2, '0')).join('');
   }
@@ -101,6 +370,7 @@
     pin.addEventListener('change', onValueEvent);
     pin.addEventListener('pointerdown', event => {
       if (!context || pin.disabled) return;
+      if (context.inspection) exitInspection({keepCurrentBounds: true, restoreZoomPan: false, pauseVideo: false});
       event.preventDefault();
       event.stopPropagation();
       let chosen = which;
@@ -132,6 +402,7 @@
       else if (event.key === 'Home') target = 0;
       else if (event.key === 'End') target = dur;
       else return;
+      if (context.inspection) exitInspection({keepCurrentBounds: true, restoreZoomPan: false, pauseVideo: false});
       event.preventDefault();
       event.stopPropagation();
       if (which === 'start') setIntervalBounds(target, context.intervalEnd, 'start');
@@ -211,14 +482,41 @@
   }
   function enforceIntervalPlayback() {
     if (!context || !ready() || context.capturing || video.paused) return;
-    const decision = C.resolveIntervalPlayback(video.currentTime, context.intervalStart, context.intervalEnd, context.loop);
+    const insp = context.inspection;
+    if (insp && insp.mode === 'walkthrough' && !insp.walkthroughFrozen && !insp.walkthroughFrozeThisPass && C.finite(insp.freezeTime)) {
+      const boundsNow = activePlaybackBounds();
+      if (video.currentTime >= insp.freezeTime - 0.025 && (boundsNow.end - insp.freezeTime > 0.02 || video.currentTime >= boundsNow.end - 0.025)) {
+        const freezeOwner = context, gen = generation, tok = ++walkthroughToken;
+        insp.walkthroughFrozen = true;
+        insp.walkthroughFrozeThisPass = true;
+        video.pause();
+        video.currentTime = C.clamp(insp.freezeTime, boundsNow.start, boundsNow.end);
+        syncTime();
+        renderCoachOverlay();
+        insp.timerId = setTimeout(async () => {
+          if (context !== freezeOwner || generation !== gen || context.inspection !== insp || tok !== walkthroughToken) return;
+          insp.timerId = null;
+          insp.walkthroughFrozen = false;
+          if (video.currentTime >= boundsNow.end - 0.025) {
+            video.currentTime = boundsNow.start;
+            insp.walkthroughFrozeThisPass = false;
+          }
+          hideCoachOverlay();
+          try { await video.play(); } catch (_) { stopWalkthroughMode('rejected'); }
+        }, 1200);
+        return;
+      }
+    }
+    const bounds = activePlaybackBounds();
+    const decision = C.resolveIntervalPlayback(video.currentTime, bounds.start, bounds.end, bounds.loop);
     if (decision.action === 'seek') {
       video.currentTime = decision.time;
       syncTime();
     } else if (decision.action === 'loop') {
+      if (insp) insp.walkthroughFrozeThisPass = false;
       video.currentTime = decision.time;
       syncTime();
-      if (video.paused) video.play().catch(() => {});
+      if (video.paused) video.play().catch(() => { if (insp?.mode === 'walkthrough') stopWalkthroughMode('rejected'); });
     } else if (decision.action === 'pause') {
       video.pause();
       video.currentTime = decision.time;
@@ -227,15 +525,28 @@
   }
   function seek(at) {
     if (!ready() || context.capturing) return;
+    if (context.inspection?.mode === 'walkthrough' || context.inspection?.mode === 'loop') {
+      stopWalkthroughMode('manual');
+    }
     video.pause();
-    video.currentTime = C.clampToInterval(at, context.intervalStart, context.intervalEnd, duration());
+    const bounds = activePlaybackBounds();
+    video.currentTime = C.clampToInterval(at, bounds.start, bounds.end, duration());
     syncTime();
+    renderCoachOverlay();
   }
   async function togglePlay() {
     if (!ready() || context.capturing) return;
+    if (context.inspection?.mode === 'walkthrough' && (!video.paused || context.inspection.walkthroughFrozen)) {
+      video.pause();
+      stopWalkthroughMode('manual');
+      syncTime();
+      renderCoachOverlay();
+      return;
+    }
     if (!video.paused) { video.pause(); return; }
-    if (video.currentTime < context.intervalStart - 0.005 || video.currentTime >= context.intervalEnd - 0.02) {
-      video.currentTime = context.intervalStart;
+    const bounds = activePlaybackBounds();
+    if (video.currentTime < bounds.start - 0.005 || video.currentTime >= bounds.end - 0.02) {
+      video.currentTime = bounds.start;
     }
     try { await video.play(); } catch (_) { status('Tap Play again, or download the clip if this browser cannot play it.'); }
   }
@@ -250,7 +561,8 @@
     $('study-zoom-value').textContent = value;
     $('study-zoom-badge').textContent = value;
     $('study-zoom').value = context.zoom;
-    if (selectionChanged) notifySelectionChanged();
+    renderCoachOverlay();
+    if (selectionChanged && !context.inspection) notifySelectionChanged();
   }
   function resetView() { if (context) { context.zoom = 1; context.x = 0; context.y = 0; applyView(); } }
   function stopCapture() { if (context?.captureController) context.captureController.abort(); }
@@ -258,10 +570,13 @@
   function close() { if (dialog.open) dialog.close(); }
   dialog.addEventListener('close', () => {
     const old = context; if (!old) return;
+    clearWalkthroughTimer(old);
     window.Coach?.close();
     clearInterval(playbackTimer); playbackTimer = null;
     invalidateShare(old);
     context = null; generation++;
+    hideCoachOverlay(); hideWalkthroughHud();
+    if (markersBox) markersBox.replaceChildren();
     old.fetchController.abort(); old.captureController?.abort();
     video.pause(); video.removeAttribute('src'); video.load();
     pointers.clear(); drag = pinch = pinDrag = null; stage.classList.remove('is-dragging', 'is-zoomed');
@@ -289,6 +604,7 @@
       context.intervalEnd = bounds.end;
     }
     syncIntervalUI();
+    renderCoachMarkers();
     video.playbackRate = Number($('study-speed').value) || .5;
     video.currentTime = C.clampToInterval(context.startTime, context.intervalStart, context.intervalEnd, duration());
     setControls(); syncTime(); applyView();
@@ -300,9 +616,11 @@
     enforceIntervalPlayback();
     context.lastTime = video.currentTime;
     syncTime();
+    if (video.paused) renderCoachOverlay();
   });
-  video.addEventListener('seeked', () => { if (context) context.lastTime = video.currentTime; syncTime(); });
+  video.addEventListener('seeked', () => { if (context) context.lastTime = video.currentTime; syncTime(); renderCoachOverlay(); });
   video.addEventListener('play', () => {
+    hideCoachOverlay();
     syncTime();
     clearInterval(playbackTimer);
     playbackTimer = setInterval(enforceIntervalPlayback, 30);
@@ -311,17 +629,21 @@
     clearInterval(playbackTimer);
     playbackTimer = null;
     syncTime();
+    renderCoachOverlay();
   });
   video.addEventListener('ended', () => {
     clearInterval(playbackTimer);
     playbackTimer = null;
-    if (context && context.loop && ready()) {
-      video.currentTime = context.intervalStart;
-      video.play().catch(() => {});
+    const bounds = activePlaybackBounds();
+    if (context && bounds.loop && ready()) {
+      if (context.inspection) context.inspection.walkthroughFrozeThisPass = false;
+      video.currentTime = bounds.start;
+      video.play().catch(() => { if (context?.inspection?.mode === 'walkthrough') stopWalkthroughMode('rejected'); });
       return;
     }
-    if (context && ready()) video.currentTime = context.intervalEnd;
+    if (context && ready()) video.currentTime = bounds.end;
     syncTime();
+    renderCoachOverlay();
   });
   function mediaError() {
     if (!context) return;
@@ -338,14 +660,27 @@
   $('study-forward').addEventListener('click', () => seek(video.currentTime + .1));
   $('study-seek').addEventListener('input', event => seek(Number(event.target.value)));
   $('study-speed').addEventListener('change', event => {
+    if (context?.inspection) stopWalkthroughMode('manual');
     try { video.playbackRate = Number(event.target.value); }
     catch (_) { video.playbackRate = .5; event.target.value = '0.5'; status('That speed is unavailable in this browser. Using 0.5×.'); }
+    if (context?.inspection) {
+      context.inspection.savedControls.speed = video.playbackRate;
+      if (context.inspection.savedSelection) context.inspection.savedSelection.speed = video.playbackRate;
+    }
     notifySelectionChanged();
   });
   $('study-loop').addEventListener('click', () => {
     if (!context) return;
+    if (context.inspection) exitInspection({keepCurrentBounds: false, restoreZoomPan: false, pauseVideo: false});
     context.loop = !context.loop;
     $('study-loop').setAttribute('aria-pressed', String(context.loop));
+  });
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden && context?.inspection?.mode === 'walkthrough') {
+      video.pause();
+      stopWalkthroughMode('hidden');
+      renderCoachOverlay();
+    }
   });
   $('study-zoom').addEventListener('input', event => { if (context) { context.zoom = Number(event.target.value); applyView(); } });
   $('study-download-interval').addEventListener('click', async () => {
@@ -470,19 +805,169 @@
   window.ClipStudy = {
   coachingSelection() {
     if (!context) return null;
-    const dur = fallbackDuration();
-    const bounds = C.clampInterval(context.intervalStart, context.intervalEnd, dur);
-    if (!ready()) {
-      return {start: bounds.start, end: bounds.end, speed: Number($('study-speed').value) || 0.5, zoom: context.zoom, crop: [0, 0, 1, 1]};
+    if (context.inspection?.savedSelection) {
+      const saved = context.inspection.savedSelection;
+      return {start: saved.start, end: saved.end, speed: saved.speed, zoom: saved.zoom, crop: [...saved.crop]};
     }
-    const sw=stage.clientWidth,sh=stage.clientHeight,w=video.videoWidth,h=video.videoHeight;
-    const fit=Math.min(sw/w,sh/h)*context.zoom;
-    const x0=C.clamp(((-sw/2-context.x)/fit+w/2)/w,0,1),y0=C.clamp(((-sh/2-context.y)/fit+h/2)/h,0,1);
-    const x1=C.clamp(((sw/2-context.x)/fit+w/2)/w,0,1),y1=C.clamp(((sh/2-context.y)/fit+h/2)/h,0,1);
-    return {start: bounds.start, end: bounds.end, speed: video.playbackRate, zoom: context.zoom, crop:[x0,y0,x1-x0,y1-y0]};
+    return selectionFromState({
+      intervalStart: context.intervalStart,
+      intervalEnd: context.intervalEnd,
+      speed: ready() ? video.playbackRate : (Number($('study-speed').value) || 0.5),
+      zoom: context.zoom,
+      x: context.x,
+      y: context.y,
+    });
   },
   setInterval(start, end, changed = 'end') {
     setIntervalBounds(start, end, changed);
+  },
+  setCoachMarkers(markers = []) {
+    if (!context) return;
+    context.coachMarkers = Array.isArray(markers) ? markers : [];
+    renderCoachMarkers();
+  },
+  toggleOverlay(explicit) {
+    if (!context) return true;
+    context.overlayEnabled = typeof explicit === 'boolean' ? explicit : !context.overlayEnabled;
+    renderCoachOverlay();
+    window.dispatchEvent(new CustomEvent('study-inspection-changed'));
+    return context.overlayEnabled;
+  },
+  getInspectionState() {
+    if (!context) return null;
+    if (!context.inspection) return null;
+    return {
+      mode: context.inspection.mode,
+      suggestionId: context.inspection.suggestionId,
+      rangeIndex: context.inspection.rangeIndex,
+      frameId: context.inspection.frame?.frame_id || '',
+      overlayEnabled: context.overlayEnabled !== false,
+      lastOverlay: context.inspection.lastOverlay || null,
+    };
+  },
+  exitInspection(opts) {
+    exitInspection(opts);
+  },
+  inspectSuggestion({suggestion = null, frame = null, poseFrame = null, crop = [0, 0, 1, 1], range = null, rangeIndex = -1, historical = false} = {}) {
+    if (!context) return null;
+    ensureInspectionBaseline();
+    clearWalkthroughTimer(context);
+    const insp = context.inspection;
+    insp.mode = 'frame';
+    insp.suggestionId = suggestion?.id || suggestion?.response_index || null;
+    insp.rangeIndex = rangeIndex;
+    insp.suggestion = suggestion;
+    insp.frame = frame;
+    insp.poseFrame = poseFrame;
+    insp.crop = C.normalizeCrop(crop);
+    insp.historical = !!historical;
+    insp.range = range;
+    insp.freezeTime = null;
+    insp.nowTry = null;
+    insp.walkthroughFrozeThisPass = false;
+    hideWalkthroughHud();
+    setSpeedControl(insp.savedControls.speed);
+    if (ready()) {
+      video.pause();
+      const target = frame && C.finite(frame.clip_seconds) ? frame.clip_seconds : (range ? range.start : video.currentTime);
+      video.currentTime = C.clamp(target, 0, duration());
+    } else if (frame && C.finite(frame.clip_seconds)) {
+      context.startTime = frame.clip_seconds;
+    }
+    syncTime();
+    renderCoachOverlay();
+    window.dispatchEvent(new CustomEvent('study-inspection-changed'));
+    return insp.lastOverlay;
+  },
+  async loopMoment({suggestion = null, frame = null, poseFrame = null, crop = [0, 0, 1, 1], range = null, rangeIndex = -1, historical = false} = {}) {
+    if (!context || !range || !C.finite(range.start) || !C.finite(range.end)) return false;
+    ensureInspectionBaseline();
+    clearWalkthroughTimer(context);
+    const insp = context.inspection;
+    insp.mode = 'loop';
+    insp.suggestionId = suggestion?.id || null;
+    insp.rangeIndex = rangeIndex;
+    insp.suggestion = suggestion;
+    insp.frame = frame;
+    insp.poseFrame = poseFrame;
+    insp.crop = C.normalizeCrop(crop);
+    insp.historical = !!historical;
+    insp.range = C.clampInterval(range.start, range.end, fallbackDuration(), 'end');
+    insp.freezeTime = null;
+    insp.nowTry = null;
+    insp.walkthroughFrozeThisPass = false;
+    hideWalkthroughHud();
+    hideCoachOverlay();
+    setSpeedControl(insp.savedControls.speed);
+    window.dispatchEvent(new CustomEvent('study-inspection-changed'));
+    if (!ready()) return false;
+    video.currentTime = insp.range.start;
+    syncTime();
+    try {
+      await video.play();
+      return true;
+    } catch (_) {
+      stopWalkthroughMode('rejected');
+      renderCoachOverlay();
+      return false;
+    }
+  },
+  async startWalkthrough({suggestion = null, frame = null, poseFrame = null, crop = [0, 0, 1, 1], range = null, rangeIndex = -1, nowTry = null, historical = false} = {}) {
+    if (!context) return {started: false};
+    ensureInspectionBaseline();
+    clearWalkthroughTimer(context);
+    const dur = fallbackDuration();
+    let targetRange = range && C.finite(range.start) && C.finite(range.end)
+      ? C.clampInterval(range.start, range.end, dur, 'end')
+      : null;
+    if (!targetRange && frame && C.finite(frame.clip_seconds)) {
+      targetRange = C.clampInterval(Math.max(0, frame.clip_seconds - 0.45), Math.min(dur, frame.clip_seconds + 0.45), dur, 'end');
+    }
+    if (!targetRange) targetRange = C.clampInterval(context.intervalStart, context.intervalEnd, dur, 'end');
+
+    const insp = context.inspection;
+    insp.mode = 'walkthrough';
+    insp.suggestionId = suggestion?.id || null;
+    insp.rangeIndex = rangeIndex;
+    insp.suggestion = suggestion;
+    insp.frame = frame;
+    insp.poseFrame = poseFrame;
+    insp.crop = C.normalizeCrop(crop);
+    insp.historical = !!historical;
+    insp.range = targetRange;
+    const fTime = frame && C.finite(frame.clip_seconds) ? frame.clip_seconds : (targetRange.start + targetRange.end) / 2;
+    insp.freezeTime = C.clamp(fTime, targetRange.start, targetRange.end);
+    insp.nowTry = nowTry || C.formatNowTry(suggestion || {});
+    insp.walkthroughFrozen = false;
+    insp.walkthroughFrozeThisPass = false;
+    showWalkthroughHud(insp.nowTry);
+    window.dispatchEvent(new CustomEvent('study-inspection-changed'));
+
+    const reducedMotion = Boolean(window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches);
+    if (reducedMotion) {
+      if (ready()) {
+        video.pause();
+        video.currentTime = insp.freezeTime;
+      }
+      syncTime();
+      renderCoachOverlay();
+      status('Reduced motion active: paused at key frame.');
+      return {started: true, reducedMotion: true};
+    }
+
+    setSpeedControl(0.35);
+    hideCoachOverlay();
+    if (!ready()) return {started: false, waitingMetadata: true};
+    video.currentTime = insp.range.start;
+    syncTime();
+    try {
+      await video.play();
+      return {started: true, reducedMotion: false};
+    } catch (_) {
+      stopWalkthroughMode('rejected');
+      renderCoachOverlay();
+      return {started: false, rejected: true};
+    }
   },
   isCapturing() {
     return !!context?.capturing;
@@ -811,7 +1296,7 @@
     if (context || !options.clip || !options.player) return;
     const {session,clip,player,url,returnFocus}=options;
     const initialDur = C.finite(clip.duration_seconds) && clip.duration_seconds > 0 ? clip.duration_seconds : 1;
-    context={session,clip,player,url,returnFocus,parentRate:player.playbackRate,startTime:player.currentTime||0,lastTime:player.currentTime||0,intervalStart:0,intervalEnd:initialDur,intervalDefaultEnd:true,loop:false,zoom:1,x:0,y:0,frames:[],fetchController:new AbortController(),capturing:false,downloading:false,scanningAutoDetect:false,autoDetectUnavailable:!isAutoDetectSupported(),detectedWindows:null,detectedWindowIndex:-1,shareJobId:null,shareRequestId:null,shareTimer:null,generation:++generation};
+    context={session,clip,player,url,returnFocus,parentRate:player.playbackRate,startTime:player.currentTime||0,lastTime:player.currentTime||0,intervalStart:0,intervalEnd:initialDur,intervalDefaultEnd:true,loop:false,zoom:1,x:0,y:0,frames:[],fetchController:new AbortController(),capturing:false,downloading:false,scanningAutoDetect:false,autoDetectUnavailable:!isAutoDetectSupported(),detectedWindows:null,detectedWindowIndex:-1,shareJobId:null,shareRequestId:null,shareTimer:null,inspection:null,overlayEnabled:true,coachMarkers:[],generation:++generation};
     player.pause();
     $('study-heading').textContent='Clip study · '+String(clip.index).padStart(2,'0');
     $('study-description').textContent=`${session.title} · Original ${C.clock(clip.original_start_seconds)}–${C.clock(clip.original_end_seconds)}`;

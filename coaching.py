@@ -92,6 +92,8 @@ def sanitize_worker_meta(meta):
     ver = meta.get('worker_version')
     if isinstance(ver, str) and re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', ver.strip()):
         out['worker_version'] = ver.strip()
+    if type(meta.get('pose_available')) is bool:
+        out['pose_available'] = meta['pose_available']
     providers = meta.get('providers')
     if isinstance(providers, list):
         clean_providers = []
@@ -590,6 +592,7 @@ class Coaching(Annotations):
         jobs=[self.decode(r) for r in rows]
         for job in jobs:
             for field in ('submitted_prompt','response_contract'):job['body'].pop(field,None)
+            if isinstance(job.get('result'),dict):job['result'].pop('pose_artifact',None)
         return dict(jobs=jobs,workers=workers)
 
     def claim(self,role,worker,capabilities=None,meta=None):
@@ -717,6 +720,7 @@ class Coaching(Annotations):
                 if isinstance(frame, dict) and isinstance(frame.get('sha256'), str):
                     candidate_hashes.add(frame['sha256'])
             db.execute('DELETE FROM evidence WHERE job_id=?', (identity,))
+            db.execute('DELETE FROM evidence_enrichment WHERE job_id=?', (identity,))
             db.execute('DELETE FROM jobs WHERE id=?', (identity,))
             export_id = body.get('export_id')
             if isinstance(export_id, str) and export_id:

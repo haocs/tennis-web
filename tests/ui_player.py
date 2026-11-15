@@ -3880,3 +3880,348 @@ def test_review_page_sorted_with_staged_badge_and_worker_health_indicator(browse
     finally:
         server.shutdown()
         thread.join()
+
+
+@pytest.mark.parametrize('width', [1280, 390])
+def test_coaching_inspection_overlay_disjoint_ranges_walkthrough_and_non_mutation(browser, ui_server, width):
+    import base64
+
+    page = browser.new_page(viewport={'width': width, 'height': 844}, has_touch=width < 761)
+    errors = []
+    page.on('pageerror', lambda err: errors.append(str(err)))
+    page.add_init_script(
+        "window.cspViolations=[]; document.addEventListener('securitypolicyviolation', "
+        "e => window.cspViolations.push(e.blockedURI + ':' + e.violatedDirective));"
+    )
+
+    source = page.request.get(ui_server + '/api/sessions/' + ID).json()
+    publication = source['published_at']
+    frame_one = dict(frame_id='f_one', order=1, sha256='1' * 64, original_seconds=0.5, clip_seconds=0.5, excerpt_seconds=1.0)
+    frame_two = dict(frame_id='f_two', order=2, sha256='2' * 64, original_seconds=1.2, clip_seconds=1.2, excerpt_seconds=2.4)
+
+    content_one = dict(
+        title='Keep elbow compact',
+        topic='Forehand spacing',
+        now_summary='Elbow drifts behind hip line.',
+        observation='Elbow lags slightly at contact.',
+        cue='Lead forward with soft elbow.',
+        drill='Shadow swing keeping elbow ahead.',
+        uncertainty='Single still frame view.',
+        primary_frame_id='f_one',
+        stroke_phase='contact_window',
+        body_areas=['hitting_arm', 'hips_trunk'],
+        focus_region=dict(x=0.25, y=0.2, width=0.35, height=0.45),
+        evidence_frame_ids=['f_one', 'f_two'],
+        applies_to=[dict(start_seconds=0.2, end_seconds=0.6), dict(start_seconds=1.1, end_seconds=1.6)],
+        validation_warnings=[],
+        timing_status='timed',
+    )
+    content_two = dict(
+        title='Ambiguous court view',
+        topic='Split step',
+        now_summary='Two players visible near baseline.',
+        observation='Second player enters frame.',
+        cue='Track incoming ball early.',
+        drill='Split before opponent contact.',
+        uncertainty='Multiple players visible; body guide suppressed.',
+        primary_frame_id='f_two',
+        stroke_phase='split_step',
+        body_areas=['feet_stance'],
+        focus_region=None,
+        evidence_frame_ids=['f_two'],
+        applies_to=[dict(start_seconds=1.1, end_seconds=1.5)],
+        validation_warnings=[],
+        timing_status='timed',
+    )
+
+    ann_one = dict(
+        id='a_one',
+        job_id='job-inspect',
+        current=content_one,
+        proposal=copy.deepcopy(content_one),
+        status='proposed',
+        historical=False,
+        playback_eligible=False,
+        version=1,
+        provenance=dict(clip_id=CLIP, publication=publication, has_pose_enrichment=True),
+        related_clip_ids=[CLIP],
+    )
+    ann_two = dict(
+        id='a_two',
+        job_id='job-inspect',
+        current=content_two,
+        proposal=copy.deepcopy(content_two),
+        status='proposed',
+        historical=False,
+        playback_eligible=False,
+        version=1,
+        provenance=dict(clip_id=CLIP, publication=publication, has_pose_enrichment=True),
+        related_clip_ids=[CLIP],
+    )
+    job = dict(
+        id='job-inspect',
+        version=1,
+        role='ai',
+        state='completed',
+        asked_at=1700000100.0,
+        updated=1700000200.0,
+        body=dict(
+            source_id=ID,
+            clip_id=CLIP,
+            publication=publication,
+            export_id='render-inspect',
+            original_start=0,
+            original_end=1.8,
+            start=0,
+            end=1.8,
+            prompt='Check contact and split step',
+            evidence_frames=[frame_one, frame_two],
+            has_pose_enrichment=True,
+        ),
+        result=dict(
+            answer='Structured v3 response',
+            structured=dict(summary='Two focused observations.', validation_warnings=[], parse_status='valid'),
+        ),
+    )
+    rendered = dict(
+        id='render-inspect',
+        version=1,
+        role='render',
+        state='completed',
+        body=dict(
+            source_id=ID,
+            clip_id=CLIP,
+            publication=publication,
+            start=0,
+            end=1.8,
+            original_start=0,
+            original_end=1.8,
+            speed=0.5,
+            crop=[0.1, 0.1, 0.8, 0.8],
+        ),
+        result=dict(bytes=1000, output_seconds=3.6, pose_status='ok', frames=[frame_one, frame_two]),
+    )
+    state = dict(jobs=[job, rendered], annotations=[ann_one, ann_two], workers=[], enabled=True)
+
+    pose_payload = dict(
+        schema_version=1,
+        coordinate_space='display_oriented_evidence_normalized',
+        model=dict(name='mediapipe_pose_landmarker_lite', version='0.1', sha256='a' * 64, license='Apache-2.0'),
+        limitations='Approximate 2D monocular still-frame pose estimates.',
+        frames=dict(
+            f_one=dict(
+                frame_id='f_one',
+                order=1,
+                original_seconds=0.5,
+                clip_seconds=0.5,
+                excerpt_seconds=1.0,
+                width=640,
+                height=360,
+                person_count=1,
+                subject_ambiguous=False,
+                ambiguity_reason='',
+                joints=dict(
+                    left_shoulder=dict(x=0.38, y=0.28, confidence=0.92),
+                    right_shoulder=dict(x=0.46, y=0.28, confidence=0.95),
+                    right_elbow=dict(x=0.52, y=0.38, confidence=0.93),
+                    right_wrist=dict(x=0.56, y=0.45, confidence=0.9),
+                    left_hip=dict(x=0.39, y=0.5, confidence=0.9),
+                    right_hip=dict(x=0.45, y=0.5, confidence=0.91),
+                ),
+            ),
+            f_two=dict(
+                frame_id='f_two',
+                order=2,
+                original_seconds=1.2,
+                clip_seconds=1.2,
+                excerpt_seconds=2.4,
+                width=640,
+                height=360,
+                person_count=2,
+                subject_ambiguous=True,
+                ambiguity_reason='Multiple players visible',
+                joints={},
+            ),
+        ),
+    )
+
+    page.route(
+        '**/api/coaching/exports/render-inspect/excerpt.mp4',
+        lambda route: route.fulfill(body=(Path(__file__).parent / 'fixtures/clip.mp4').read_bytes(), content_type='video/mp4'),
+    )
+    page.route('**/api/coaching/sessions/*', lambda route: route.fulfill(json=state))
+    png = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jWZkAAAAASUVORK5CYII=')
+    page.route('**/api/coaching/evidence/*/*.jpg', lambda route: route.fulfill(body=png, content_type='image/png'))
+
+    pose_requests = {'count': 0}
+
+    def fulfill_pose(route):
+        pose_requests['count'] += 1
+        route.fulfill(json=pose_payload)
+
+    page.route('**/api/coaching/evidence/*/pose', fulfill_pose)
+
+    sent_exports = []
+
+    def capture_export(route):
+        sent_exports.append(route.request.post_data_json)
+        new_render = copy.deepcopy(rendered)
+        new_render.update(id='render-new-export', state='queued')
+        route.fulfill(status=201, json=new_render)
+
+    page.route('**/api/coaching/exports', capture_export)
+
+    page.goto(ui_server + f'/review/{ID}?clip={CLIP}')
+    page.get_by_role('button', name='Study clip', exact=True).click()
+    expect(page.locator('#study-play')).to_be_enabled()
+    page.wait_for_function("() => document.getElementById('study-video')?.readyState >= 1")
+
+    # Configure custom baseline export pins, speed, and zoom before entering inspection.
+    page.locator('#study-speed').select_option('0.75')
+    page.evaluate(
+        """() => {
+          const z = document.getElementById('study-zoom');
+          z.value = '1.5';
+          z.dispatchEvent(new Event('input', {bubbles: true}));
+          window.ClipStudy.setInterval(0.3, 1.8, 'both');
+        }"""
+    )
+    if width < 761:
+        page.get_by_role('button', name='Coach', exact=True).click()
+        page.evaluate('() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))')
+    baseline = page.evaluate('() => window.ClipStudy.coachingSelection()')
+    assert baseline['start'] == pytest.approx(0.3, abs=0.02)
+    assert baseline['end'] == pytest.approx(1.8, abs=0.02)
+    assert baseline['speed'] == pytest.approx(0.75, abs=0.02)
+    assert baseline['zoom'] == pytest.approx(1.5, abs=0.02)
+
+    if width < 761:
+        page.locator('#study-mobile-collapse').click()
+        expect(page.locator('#clip-study')).to_have_attribute('data-player-collapsed', 'true')
+        expect(page.locator('#study-stage')).to_be_hidden()
+
+    # 1. Pose enrichment is NOT fetched before inspection is triggered.
+    assert pose_requests['count'] == 0
+    card_one = page.locator('.coach-suggestion[data-annotation="a_one"]')
+    expect(card_one).to_be_visible()
+    expect(card_one).to_contain_text('Now: Elbow drifts behind hip line.')
+    expect(card_one).to_contain_text('Try: Lead forward with soft elbow.')
+    expect(card_one).to_contain_text('Contact window')
+    expect(card_one).to_contain_text('Hitting arm')
+    expect(card_one).to_contain_text('Hips / trunk')
+    assert page.locator('#study-coach-markers .study-coach-marker-range').count() >= 2
+    assert page.locator('#study-coach-markers .study-coach-marker-tick').count() >= 1
+
+    # 2. Click Inspect frame -> auto-reveals mobile player, lazy-loads pose once, shows SVG focus & joints.
+    card_one.get_by_role('button', name='Inspect frame', exact=True).click()
+    expect(page.locator('#clip-study')).to_have_attribute('data-coach-inspecting', 'true')
+    if width < 761:
+        expect(page.locator('#clip-study')).to_have_attribute('data-player-collapsed', 'false')
+        expect(page.locator('#study-stage')).to_be_visible()
+    assert pose_requests['count'] == 1
+    expect(page.locator('#coach-nav-count')).to_have_text('Suggestion 1 of 2')
+    assert page.locator('#study-video').evaluate('v => v.paused')
+    assert page.locator('#study-video').evaluate('v => v.currentTime') == pytest.approx(0.5, abs=0.08)
+    expect(page.locator('#study-coach-overlay')).to_be_visible()
+    expect(page.locator('#study-overlay-badge')).to_be_visible()
+    assert page.locator('#study-coach-overlay rect.study-overlay-focus').count() == 1
+    assert page.locator('#study-coach-overlay line.study-overlay-segment').count() >= 1
+    assert page.locator('#study-coach-overlay circle.study-overlay-joint').count() >= 4
+
+    # 3. Body guide toggle button toggles overlay cleanly.
+    toggle_btn = page.locator('#coach-overlay-toggle')
+    expect(toggle_btn).to_have_attribute('aria-pressed', 'true')
+    toggle_btn.click()
+    expect(toggle_btn).to_have_attribute('aria-pressed', 'false')
+    expect(page.locator('#study-coach-overlay')).to_be_hidden()
+    toggle_btn.click()
+    expect(toggle_btn).to_have_attribute('aria-pressed', 'true')
+    expect(page.locator('#study-coach-overlay')).to_be_visible()
+
+    # 4. Starting playback hides sparse still overlay immediately so no stale skeleton floats.
+    play_btn = page.locator('#study-mobile-play' if width < 761 else '#study-play')
+    play_btn.click()
+    page.wait_for_function("() => !document.getElementById('study-video').paused")
+    expect(page.locator('#study-coach-overlay')).to_be_hidden()
+    play_btn.click()
+    page.wait_for_function("() => document.getElementById('study-video').paused")
+
+    # 5. Next -> / <- Prev navigation & ambiguous frame suppression (zero joints) without extra /pose fetch.
+    page.get_by_role('button', name='Next suggestion', exact=True).click()
+    expect(page.locator('#coach-nav-count')).to_have_text('Suggestion 2 of 2')
+    assert pose_requests['count'] == 1
+    assert page.locator('#study-video').evaluate('v => v.currentTime') == pytest.approx(1.2, abs=0.08)
+    assert page.locator('#study-coach-overlay circle.study-overlay-joint').count() == 0
+    page.get_by_role('button', name='Previous suggestion', exact=True).click()
+    expect(page.locator('#coach-nav-count')).to_have_text('Suggestion 1 of 2')
+
+    # 6. Disjoint applies_to ranges remain independent and loop only the selected range, not their union.
+    chips = card_one.locator('.coach-range-chip')
+    expect(chips).to_have_count(2)
+    expect(chips.nth(0)).to_contain_text('Moment 1')
+    expect(chips.nth(1)).to_contain_text('Moment 2')
+    chips.nth(1).click()
+    card_one.get_by_role('button', name='Loop moment', exact=True).click()
+    page.wait_for_function(
+        "() => { const v = document.getElementById('study-video'); return !v.paused && v.currentTime >= 1.05 && v.currentTime <= 1.65; }"
+    )
+    play_btn.click()
+    page.wait_for_function("() => document.getElementById('study-video').paused")
+
+    # 7. Opt-in Walkthrough sets 0.35x + HUD, cancels on manual pause, and honors reduced-motion.
+    chips.nth(0).click()
+    card_one.get_by_role('button', name='Walkthrough', exact=True).click()
+    expect(page.locator('#study-walkthrough-hud')).to_be_visible()
+    expect(page.locator('#study-walkthrough-hud')).to_contain_text('Now: Elbow drifts behind hip line.')
+    expect(page.locator('#study-walkthrough-hud')).to_contain_text('Try: Lead forward with soft elbow.')
+    assert page.locator('#study-video').evaluate('v => v.playbackRate') == pytest.approx(0.35, abs=0.02)
+    play_btn.click()
+    expect(page.locator('#study-walkthrough-hud')).to_be_hidden()
+
+    page.emulate_media(reduced_motion='reduce')
+    card_one.get_by_role('button', name='Walkthrough', exact=True).click()
+    assert page.locator('#study-video').evaluate('v => v.paused')
+    assert page.locator('#study-video').evaluate('v => v.currentTime') == pytest.approx(0.5, abs=0.08)
+    expect(page.locator('#study-coach-overlay')).to_be_visible()
+    page.emulate_media(reduced_motion='no-preference')
+
+    # 8. Touch target sizing (>=44px on mobile) & responsive zero-overflow across desktop and mobile widths.
+    if width < 761:
+        for loc in (
+            card_one.get_by_role('button', name='Inspect frame', exact=True),
+            page.get_by_role('button', name='Next suggestion', exact=True),
+            page.locator('#coach-exit-inspect'),
+        ):
+            box = loc.bounding_box()
+            assert box and box['height'] >= 44
+    for vw, vh in ((width, 844), (844, 390), (320, 568)):
+        page.set_viewport_size({'width': vw, 'height': vh})
+        assert not page.evaluate('document.documentElement.scrollWidth > innerWidth'), f'Viewport overflow at {vw}x{vh}'
+        assert page.locator('#clip-study').evaluate('d => d.scrollWidth <= d.clientWidth'), f'Dialog overflow at {vw}x{vh}'
+    page.set_viewport_size({'width': width, 'height': 844})
+    page.evaluate('() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))')
+
+    # 9. Exit inspect preserves baseline export {start, end, speed, crop} and sends untouched recipe on Ask coach.
+    page.locator('#coach-exit-inspect').click()
+    expect(page.locator('#clip-study')).to_have_attribute('data-coach-inspecting', 'false')
+    after_exit = page.evaluate('() => window.ClipStudy.coachingSelection()')
+    assert after_exit['start'] == pytest.approx(baseline['start'], abs=0.02)
+    assert after_exit['end'] == pytest.approx(baseline['end'], abs=0.02)
+    assert after_exit['speed'] == pytest.approx(baseline['speed'], abs=0.02)
+    assert after_exit['crop'] == pytest.approx(baseline['crop'], abs=0.01)
+
+    q_input = page.locator('#coach-question')
+    q_input.scroll_into_view_if_needed()
+    q_input.fill('Compare contact stability')
+    with page.expect_request('**/api/coaching/exports'):
+        page.locator('#coach-ask').click()
+    expect(page.locator('#coach-status')).to_contain_text('Preparing')
+    assert len(sent_exports) == 1
+    assert sent_exports[0]['start'] == pytest.approx(baseline['start'], abs=0.02)
+    assert sent_exports[0]['end'] == pytest.approx(baseline['end'], abs=0.02)
+    assert sent_exports[0]['speed'] == pytest.approx(baseline['speed'], abs=0.02)
+    assert sent_exports[0]['crop'] == pytest.approx(baseline['crop'], abs=0.01)
+
+    assert errors == []
+    assert page.evaluate('window.cspViolations') == []
+    page.close()

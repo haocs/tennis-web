@@ -12,3 +12,19 @@ body.study-open{overflow:hidden}#clip-study{--study-bg:#101e1a;--study-panel:#19
 
 .study-status:empty{display:none}.study-control-help{margin-top:12px;font-size:11px;color:var(--study-muted)}.study-control-help summary{cursor:pointer;padding:6px 0}
 #clip-study #study-speed{appearance:none;-webkit-appearance:none;background-image:none;width:54px;min-width:54px;padding:6px 8px;text-align:center;cursor:pointer}
+.study-coach-overlay{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:2}
+.study-overlay-focus{fill:#d9ed9118;stroke:#d9ed91;stroke-width:2;stroke-dasharray:6 4}
+.study-overlay-segment{stroke:#f3d267;stroke-width:2.5;stroke-linecap:round;opacity:.92}
+.study-overlay-joint{fill:#d9ed91;stroke:#101e1a;stroke-width:1.5}
+.study-overlay-badge{position:absolute;top:12px;right:12px;border:1px solid #d9ed9166;background:#0c1914cc;backdrop-filter:blur(6px);color:#e9f5c9;padding:4px 8px;border-radius:6px;font-size:11px;font-weight:600;pointer-events:none;z-index:3;max-width:calc(100% - 96px);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.study-walkthrough-hud{position:absolute;left:10px;right:10px;bottom:10px;background:#0c1914db;border:1px solid #d9ed9170;border-radius:9px;padding:7px 10px;color:#f2f4e8;font-size:12px;line-height:1.35;pointer-events:none;z-index:3;max-height:38%;overflow:hidden}
+.study-hud-line{margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.study-hud-line+.study-hud-line{margin-top:2px}
+.study-hud-line strong{color:#d9ed91}
+.study-coach-markers{position:absolute;left:0;right:0;top:50%;height:14px;transform:translateY(-50%);pointer-events:none;z-index:1}
+.study-coach-marker-range{position:absolute;top:1px;bottom:1px;border-radius:3px;background:#9bd6b855}
+.study-coach-marker-range.is-active{background:#f3d26780;box-shadow:inset 0 0 0 1px #f3d267}
+.study-coach-marker-tick{position:absolute;top:-2px;bottom:-2px;width:2px;transform:translateX(-1px);background:#c5d6cc;border-radius:1px}
+.study-coach-marker-tick.is-primary{width:3px;background:#f3d267}
+.study-coach-marker-tick.is-active{background:#d9ed91}
+@media(prefers-reduced-motion:reduce){#clip-study,#clip-study *{scroll-behavior:auto!important;transition:none!important;animation:none!important}}
